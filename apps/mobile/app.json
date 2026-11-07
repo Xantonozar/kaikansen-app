@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Kaikansen",
-    "slug": "kaikansen-app",
+    "slug": "kaikansen",
     "version": "0.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
