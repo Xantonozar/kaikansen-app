@@ -1,0 +1,21 @@
+{
+  "name": "kaikansen-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kaikansen mobile — Expo app + NestJS API monorepo (Gate 5 prototype)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @kaikansen/contracts && npm run build -w @kaikansen/api",
+    "build:api": "npm run build -w @kaikansen/api",
+    "dev:api": "npm run start:dev -w @kaikansen/api",
+    "test:api": "npm run test -w @kaikansen/api",
+    "dev:mobile": "npm run start -w @kaikansen/mobile",
+    "typecheck:mobile": "npm run typecheck -w @kaikansen/mobile"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
