@@ -1,8 +1,15 @@
 import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { House, Library, Trophy, User } from 'lucide-react-native';
+import { House, Library, Trophy, Users } from 'lucide-react-native';
 import type { ComponentType } from 'react';
-import { radii, shell, spacing, typeStyles, type Theme } from '../theme';
+import {
+  fontFamilies,
+  radii,
+  shell,
+  spacing,
+  typeStyles,
+  type Theme,
+} from '../theme';
 import { useTheme } from '../theme-context';
 
 type IconComponent = ComponentType<{ size?: number; color?: string; strokeWidth?: number }>;
@@ -11,7 +18,7 @@ type IconComponent = ComponentType<{ size?: number; color?: string; strokeWidth?
 const TABS: Record<string, { label: string; Icon: IconComponent }> = {
   index: { label: 'Home', Icon: House },
   quiz: { label: 'Quiz', Icon: Trophy },
-  social: { label: 'Social', Icon: User },
+  social: { label: 'Social', Icon: Users },
   library: { label: 'Library', Icon: Library },
 };
 
@@ -34,9 +41,10 @@ export interface TabBarProps {
 }
 
 /**
- * Bottom navigation (DESIGN.md §5): 64px bar, four tabs. The active tab is a
- * solid accent pill with on-accent content; inactive tabs are icon + label
- * in muted treatment (P-01).
+ * Bottom navigation (DESIGN.md §5): 64px bar, four tabs. Compact
+ * treatment (approved mockup v1): the active tab's icon sits in a
+ * solid accent pill with the label underneath it (secondary when
+ * active, muted otherwise); inactive tabs are bare icon + label.
  */
 export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
   const theme = useTheme();
@@ -53,7 +61,8 @@ export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
         if (!tab) return null;
         const focused = state.index === index;
         const { Icon } = tab;
-        const contentColor = focused ? theme.onAccent : theme.muted;
+        const iconColor = focused ? theme.onAccent : theme.muted;
+        const labelColor = focused ? theme.secondary : theme.muted;
 
         return (
           <Pressable
@@ -67,9 +76,9 @@ export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
             style={styles.tab}
           >
             <View style={[styles.pill, focused && styles.pillActive]}>
-              <Icon size={20} color={contentColor} strokeWidth={2} />
-              <Text style={[styles.label, { color: contentColor }]}>{tab.label}</Text>
+              <Icon size={20} color={iconColor} strokeWidth={2} />
             </View>
+            <Text style={[styles.label, { color: labelColor }]}>{tab.label}</Text>
           </Pressable>
         );
       })}
@@ -83,6 +92,7 @@ const createStyles = (theme: Theme) =>
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: spacing.sm,
+    paddingTop: spacing.xs,
     backgroundColor: theme.surface,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: theme.border,
@@ -91,22 +101,22 @@ const createStyles = (theme: Theme) =>
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 48, // DESIGN.md §10: 48dp touch targets
+    gap: 2,
+    minHeight: 52, // ≥44px touch target (DESIGN.md §10)
   },
   pill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
+    minWidth: 48,
+    height: 28,
+    paddingHorizontal: spacing.md,
     borderRadius: radii.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   pillActive: {
     backgroundColor: theme.accent,
   },
   label: {
     ...typeStyles.caption,
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 12,
+    fontFamily: fontFamilies.bodyStrong,
   },
 });

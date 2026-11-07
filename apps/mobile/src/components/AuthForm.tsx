@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ComponentType, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -12,16 +12,34 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { ChevronLeft } from 'lucide-react-native';
+import {
+  AtSign,
+  ChevronLeft,
+  Lock,
+  Mail,
+  User,
+} from 'lucide-react-native';
 import { radii, spacing, typeStyles, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
 import { useAuth } from '../auth';
+import { FORM_MAX_WIDTH } from '../layout';
+
+type IconComponent = ComponentType<{
+  size?: number;
+  color?: string;
+  strokeWidth?: number;
+}>;
 
 /**
  * Login / Register form (DESIGN.md §6.1/§6.2): wordmark block, the
  * web-pattern fields, one primary action, the AniList entry point, and
  * the cross-link to the sibling screen. Inputs follow §7 — surface
  * fill, radius base, muted placeholder, accent border on focus.
+ *
+ * Compact/icon-led chrome (approved mockup v1): a tile back button,
+ * a leading glyph inside each field, pill-shaped actions, and the
+ * form column capped and centred on wide viewports. The fields,
+ * validation and submit flow are unchanged.
  *
  * The AniList button runs the real OAuth round-trip in live mode on
  * native (src/anilistAuth.ts + the provider's loginWithAnilist). In
@@ -77,10 +95,26 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
     }
   };
 
-  const fieldStyle = (name: string) => [
-    styles.input,
-    focused === name && styles.inputFocused,
+  const fieldBoxStyle = (name: string) => [
+    styles.fieldBox,
+    focused === name && styles.fieldBoxFocused,
   ];
+
+  /** A labelled field: leading glyph + input inside one surface box. */
+  const field = (
+    name: string,
+    label: string,
+    Icon: IconComponent,
+    input: ReactNode,
+  ) => (
+    <>
+      <Text style={styles.label}>{label}</Text>
+      <View style={fieldBoxStyle(name)}>
+        <Icon size={18} color={theme.muted} strokeWidth={2} />
+        {input}
+      </View>
+    </>
+  );
 
   const onAnilist = async () => {
     // Fixture mode has no API to run OAuth against, and web has no
@@ -117,8 +151,16 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
           contentContainerStyle={styles.content}
           keyboardShouldPersistTaps="handled"
         >
-          <Pressable onPress={goBack} hitSlop={8} style={styles.back}>
-            <ChevronLeft size={24} color={theme.text} strokeWidth={2} />
+          <Pressable
+            onPress={goBack}
+            hitSlop={3}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
+            style={styles.backHit}
+          >
+            <View style={styles.backTile}>
+              <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
+            </View>
           </Pressable>
 
           <Text style={styles.wordmark}>Kaikansen</Text>
@@ -128,64 +170,80 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
 
           {!isLogin && (
             <>
-              <Text style={styles.label}>Username</Text>
-              <TextInput
-                style={fieldStyle('username')}
-                value={username}
-                onChangeText={setUsername}
-                onFocus={() => setFocused('username')}
-                onBlur={() => setFocused(null)}
-                placeholder="zadid"
-                placeholderTextColor={theme.muted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                returnKeyType="next"
-              />
-              <Text style={styles.label}>Display name (optional)</Text>
-              <TextInput
-                style={fieldStyle('displayName')}
-                value={displayName}
-                onChangeText={setDisplayName}
-                onFocus={() => setFocused('displayName')}
-                onBlur={() => setFocused(null)}
-                placeholder="Zadid"
-                placeholderTextColor={theme.muted}
-                autoCorrect={false}
-                returnKeyType="next"
-              />
+              {field(
+                'username',
+                'Username',
+                AtSign,
+                <TextInput
+                  style={styles.input}
+                  value={username}
+                  onChangeText={setUsername}
+                  onFocus={() => setFocused('username')}
+                  onBlur={() => setFocused(null)}
+                  placeholder="zadid"
+                  placeholderTextColor={theme.muted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="next"
+                />,
+              )}
+              {field(
+                'displayName',
+                'Display name (optional)',
+                User,
+                <TextInput
+                  style={styles.input}
+                  value={displayName}
+                  onChangeText={setDisplayName}
+                  onFocus={() => setFocused('displayName')}
+                  onBlur={() => setFocused(null)}
+                  placeholder="Zadid"
+                  placeholderTextColor={theme.muted}
+                  autoCorrect={false}
+                  returnKeyType="next"
+                />,
+              )}
             </>
           )}
 
-          <Text style={styles.label}>Email</Text>
-          <TextInput
-            style={fieldStyle('email')}
-            value={email}
-            onChangeText={setEmail}
-            onFocus={() => setFocused('email')}
-            onBlur={() => setFocused(null)}
-            placeholder="you@example.com"
-            placeholderTextColor={theme.muted}
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="email-address"
-            returnKeyType="next"
-          />
+          {field(
+            'email',
+            'Email',
+            Mail,
+            <TextInput
+              style={styles.input}
+              value={email}
+              onChangeText={setEmail}
+              onFocus={() => setFocused('email')}
+              onBlur={() => setFocused(null)}
+              placeholder="you@example.com"
+              placeholderTextColor={theme.muted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+              returnKeyType="next"
+            />,
+          )}
 
-          <Text style={styles.label}>Password</Text>
-          <TextInput
-            style={fieldStyle('password')}
-            value={password}
-            onChangeText={setPassword}
-            onFocus={() => setFocused('password')}
-            onBlur={() => setFocused(null)}
-            placeholder="Your password"
-            placeholderTextColor={theme.muted}
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-            returnKeyType="go"
-            onSubmitEditing={() => void submit()}
-          />
+          {field(
+            'password',
+            'Password',
+            Lock,
+            <TextInput
+              style={styles.input}
+              value={password}
+              onChangeText={setPassword}
+              onFocus={() => setFocused('password')}
+              onBlur={() => setFocused(null)}
+              placeholder="Your password"
+              placeholderTextColor={theme.muted}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="go"
+              onSubmitEditing={() => void submit()}
+            />,
+          )}
 
           {error !== null && <Text style={styles.error}>{error}</Text>}
 
@@ -264,13 +322,27 @@ const createStyles = (theme: Theme) =>
       flex: 1,
     },
     content: {
+      width: '100%',
+      maxWidth: FORM_MAX_WIDTH,
+      alignSelf: 'center',
       paddingHorizontal: spacing.screenEdge,
       paddingTop: spacing.sm,
       paddingBottom: spacing.xxxl,
     },
-    back: {
-      alignSelf: 'flex-start',
-      marginBottom: spacing.lg,
+    backHit: {
+      width: 44,
+      height: 44,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginBottom: spacing.md,
+    },
+    backTile: {
+      width: 38,
+      height: 38,
+      borderRadius: radii.base,
+      backgroundColor: theme.raised,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     wordmark: {
       ...typeStyles.wordmark,
@@ -283,7 +355,7 @@ const createStyles = (theme: Theme) =>
       color: theme.text,
       textAlign: 'center',
       marginTop: spacing.sm,
-      marginBottom: spacing.xxl,
+      marginBottom: spacing.xl,
     },
     label: {
       ...typeStyles.caption,
@@ -291,18 +363,25 @@ const createStyles = (theme: Theme) =>
       marginBottom: spacing.xs,
       marginTop: spacing.md,
     },
-    input: {
-      ...typeStyles.body,
-      color: theme.text,
+    fieldBox: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
       backgroundColor: theme.surface,
       borderRadius: radii.base,
       borderWidth: 1,
       borderColor: 'transparent',
-      paddingHorizontal: spacing.lg,
-      minHeight: 52,
+      paddingHorizontal: spacing.md,
+      minHeight: 50,
     },
-    inputFocused: {
+    fieldBoxFocused: {
       borderColor: theme.accent,
+    },
+    input: {
+      flex: 1,
+      ...typeStyles.body,
+      color: theme.text,
+      paddingVertical: spacing.sm,
     },
     error: {
       ...typeStyles.bodySmall,
@@ -311,11 +390,11 @@ const createStyles = (theme: Theme) =>
     },
     primary: {
       backgroundColor: theme.accent,
-      borderRadius: radii.base,
-      minHeight: 52,
+      borderRadius: radii.pill,
+      minHeight: 50,
       alignItems: 'center',
       justifyContent: 'center',
-      marginTop: spacing.xxl,
+      marginTop: spacing.xl,
     },
     disabled: {
       opacity: 0.6,
@@ -328,8 +407,8 @@ const createStyles = (theme: Theme) =>
     ghost: {
       borderWidth: 1,
       borderColor: theme.border,
-      borderRadius: radii.base,
-      minHeight: 52,
+      borderRadius: radii.pill,
+      minHeight: 50,
       alignItems: 'center',
       justifyContent: 'center',
       marginTop: spacing.md,
@@ -346,7 +425,7 @@ const createStyles = (theme: Theme) =>
       marginTop: spacing.md,
     },
     footer: {
-      marginTop: spacing.xxl,
+      marginTop: spacing.xl,
       alignItems: 'center',
     },
     footerText: {

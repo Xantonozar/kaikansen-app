@@ -1,4 +1,10 @@
+// react-native-gesture-handler must be imported before anything
+// else in the entry chain — the drawer navigator's gestures depend
+// on it being initialised first.
+import 'react-native-gesture-handler';
 import { useEffect } from 'react';
+import { StyleSheet } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useFonts } from 'expo-font';
@@ -63,7 +69,9 @@ function Shell() {
   const { mode } = useThemeMode();
 
   return (
-    <>
+    <GestureHandlerRootView
+      style={[styles.root, { backgroundColor: theme.background }]}
+    >
       <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
       <Stack
         screenOptions={{
@@ -71,13 +79,16 @@ function Shell() {
           contentStyle: { backgroundColor: theme.background },
         }}
       >
-        <Stack.Screen name="(tabs)" />
-        <Stack.Screen name="search" />
-        <Stack.Screen name="theme/[slug]" />
+        <Stack.Screen name="(drawer)" />
         <Stack.Screen name="login" />
         <Stack.Screen name="register" />
-        <Stack.Screen name="settings" />
       </Stack>
-    </>
+    </GestureHandlerRootView>
   );
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
+});
