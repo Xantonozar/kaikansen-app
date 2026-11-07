@@ -23,17 +23,19 @@ import { useAuth } from '../auth';
  * the cross-link to the sibling screen. Inputs follow §7 — surface
  * fill, radius base, muted placeholder, accent border on focus.
  *
- * The AniList button is present per the design, but AniList sign-in is
- * NOT part of this prototype slice; pressing it says so inline rather
- * than pretending to work. In fixture mode the screens carry the demo
- * note — auth then runs against the device-local demo store
+ * The AniList button runs the real OAuth round-trip in live mode on
+ * native (src/anilistAuth.ts + the provider's loginWithAnilist). In
+ * fixture mode — and on web, where the custom-scheme auth session
+ * cannot come back — pressing it keeps the honest placeholder note
+ * rather than pretending to work. In fixture mode the screens carry
+ * the demo note — auth then runs against the device-local demo store
  * (src/demoAuth.ts), never the network.
  */
 export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
-  const { login, register, demoMode } = useAuth();
+  const { login, register, loginWithAnilist, demoMode } = useAuth();
 
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -42,6 +44,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
   const [focused, setFocused] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [anilistBusy, setAnilistBusy] = useState(false);
   const [anilistTapped, setAnilistTapped] = useState(false);
 
   const isLogin = mode === 'login';
@@ -78,6 +81,31 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
     styles.input,
     focused === name && styles.inputFocused,
   ];
+
+  const onAnilist = async () => {
+    // Fixture mode has no API to run OAuth against, and web has no
+    // custom-scheme auth session to return to — both keep the
+    // placeholder note instead of a flow that cannot complete.
+    if (demoMode || Platform.OS === 'web') {
+      setAnilistTapped(true);
+      return;
+    }
+    if (anilistBusy) return;
+    setAnilistBusy(true);
+    setError(null);
+    try {
+      await loginWithAnilist();
+      goBack();
+    } catch (e: unknown) {
+      setError(
+        e instanceof Error
+          ? e.message
+          : 'AniList sign-in failed. Please try again.',
+      );
+    } finally {
+      setAnilistBusy(false);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -177,11 +205,16 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
           </Pressable>
 
           <Pressable
-            onPress={() => setAnilistTapped(true)}
-            style={styles.ghost}
+            onPress={() => void onAnilist()}
+            disabled={anilistBusy}
+            style={[styles.ghost, anilistBusy && styles.disabled]}
             accessibilityRole="button"
           >
-            <Text style={styles.ghostLabel}>Continue with AniList</Text>
+            {anilistBusy ? (
+              <ActivityIndicator color={theme.text} />
+            ) : (
+              <Text style={styles.ghostLabel}>Continue with AniList</Text>
+            )}
           </Pressable>
           {anilistTapped && (
             <Text style={styles.note}>

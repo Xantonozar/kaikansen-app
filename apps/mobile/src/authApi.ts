@@ -1,4 +1,7 @@
 import type {
+  AnilistLinkRequest,
+  AnilistLinkResponse,
+  AnilistUrlResponse,
   AuthResponse,
   AuthTokens,
   LoginRequest,
@@ -73,4 +76,50 @@ export async function fetchMe(accessToken: string): Promise<UserProfile> {
   });
   if (!res.ok) throw await toApiError(res);
   return (await res.json()) as UserProfile;
+}
+
+/* ------------------------------------------------------------------ */
+/* AniList OAuth                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The AniList authorize URL to open in an auth-session browser.
+ * `state` is forwarded verbatim by the API into the authorize URL and
+ * echoed back by AniList to the API's GET callback, where it switches
+ * the redirect home: `login` comes back with session tokens, `link`
+ * comes back with the raw authorization code (see anilistAuth.ts).
+ */
+export async function fetchAnilistAuthorizeUrl(
+  state: 'login' | 'link',
+): Promise<string> {
+  const res = await fetch(
+    `${apiBaseUrl}/auth/anilist/url?state=${state}`,
+  );
+  if (!res.ok) throw await toApiError(res);
+  const body = (await res.json()) as AnilistUrlResponse;
+  return body.url;
+}
+
+/**
+ * Link an AniList account to the signed-in user. The authorization
+ * code comes from the state=link redirect; the call itself carries
+ * the caller's access token, which is what binds the AniList account
+ * to THIS Kaikansen account. Answers 409 (ApiError.status) when the
+ * AniList account already belongs to a different user.
+ */
+export async function linkAnilistAccount(
+  code: string,
+  accessToken: string,
+): Promise<AnilistLinkResponse> {
+  const body: AnilistLinkRequest = { code };
+  const res = await fetch(`${apiBaseUrl}/auth/anilist/link`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await toApiError(res);
+  return (await res.json()) as AnilistLinkResponse;
 }

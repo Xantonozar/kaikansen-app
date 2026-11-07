@@ -14,7 +14,20 @@ import type {
   UserProfile,
 } from '@kaikansen/contracts';
 import { fixtureMode } from './api';
-import { fetchMe, loginAccount, refreshTokens, registerAccount } from './authApi';
+import {
+  ApiError,
+  fetchAnilistAuthorizeUrl,
+  fetchMe,
+  linkAnilistAccount,
+  loginAccount,
+  refreshTokens,
+  registerAccount,
+} from './authApi';
+import {
+  AnilistDismissedError,
+  AnilistFlowError,
+  openAnilistFlow,
+} from './anilistAuth';
 import {
   DEMO_ACCESS_TOKEN,
   DEMO_REFRESH_TOKEN,
@@ -23,6 +36,7 @@ import {
   demoRegister,
 } from './demoAuth';
 import {
+  getAccessToken,
   registerRefreshHandler,
   registerSessionExpiredHandler,
   setAccessToken,
@@ -54,8 +68,20 @@ interface AuthContextValue {
   status: AuthStatus;
   user: UserProfile | null;
   demoMode: boolean;
+  /**
+   * AniList username linked to the current account, when known.
+   * Session-local only: GET /auth/me does not expose the linked
+   * AniList account, so this is set by a successful link in this
+   * session and is null again after an app restart (the link itself
+   * persists server-side regardless).
+   */
+  anilistUsername: string | null;
   login: (email: string, password: string) => Promise<void>;
   register: (input: RegisterRequest) => Promise<void>;
+  /** Live mode, native only — the full AniList OAuth round-trip. */
+  loginWithAnilist: () => Promise<void>;
+  /** Live mode, native only — resolves with the linked AniList username. */
+  linkAnilist: () => Promise<string>;
   logout: () => Promise<void>;
 }
 
@@ -64,6 +90,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [anilistUsername, setAnilistUsername] = useState<string | null>(null);
   const refreshTokenRef = useRef<string | null>(null);
 
   const applySession = useCallback(async (res: AuthResponse) => {
@@ -79,6 +106,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAccessToken(null);
     await secureRemove(REFRESH_KEY);
     setUser(null);
+    setAnilistUsername(null);
     setStatus('signedOut');
   }, []);
 
@@ -183,13 +211,99 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [applySession],
   );
 
+  /**
+   * AniList login (live mode, native): the API's GET callback answers
+   * the auth session with a token pair but no profile, so the session
+   * is established through the same pieces the password flow and the
+   * start-up restore use — refresh token into secure storage, access
+   * token into memory (session.ts), profile hydrated via /auth/me.
+   */
+  const loginWithAnilist = useCallback(async () => {
+    const authorizeUrl = await fetchAnilistAuthorizeUrl('login');
+    const result = await openAnilistFlow(authorizeUrl);
+    if (result.kind !== 'tokens') {
+      throw new AnilistFlowError(null);
+    }
+    refreshTokenRef.current = result.tokens.refreshToken;
+    setAccessToken(result.tokens.accessToken);
+    await secureSet(REFRESH_KEY, result.tokens.refreshToken);
+    try {
+      const profile = await fetchMe(result.tokens.accessToken);
+      setUser(profile);
+      setStatus('signedIn');
+    } catch {
+      await clearSession();
+      throw new Error('AniList sign-in failed. Please try again.');
+    }
+  }, [clearSession]);
+
+  /**
+   * AniList linking (live mode, native, signed-in): with state=link
+   * the redirect home carries the authorization code instead of
+   * tokens; the code is POSTed to /auth/anilist/link with the current
+   * access token, which is what binds the link to this account.
+   * Resolves with the linked AniList username.
+   */
+  const linkAnilist = useCallback(async (): Promise<string> => {
+    const token = getAccessToken();
+    if (!token) {
+      throw new Error('Your session has expired. Please log in again.');
+    }
+    let code: string;
+    try {
+      const authorizeUrl = await fetchAnilistAuthorizeUrl('link');
+      const result = await openAnilistFlow(authorizeUrl);
+      if (result.kind !== 'code') throw new AnilistFlowError(null);
+      code = result.code;
+    } catch (e: unknown) {
+      if (e instanceof AnilistDismissedError) {
+        throw new Error('AniList linking was cancelled.');
+      }
+      if (e instanceof AnilistFlowError) {
+        throw new Error('AniList linking failed. Please try again.');
+      }
+      throw e;
+    }
+    try {
+      const res = await linkAnilistAccount(code, token);
+      setAnilistUsername(res.anilist.username);
+      return res.anilist.username;
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.status === 409) {
+        throw new Error(
+          'That AniList account is already linked to a different Kaikansen account.',
+        );
+      }
+      throw e;
+    }
+  }, []);
+
   const logout = useCallback(async () => {
     await clearSession();
   }, [clearSession]);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ status, user, demoMode: fixtureMode, login, register, logout }),
-    [status, user, login, register, logout],
+    () => ({
+      status,
+      user,
+      demoMode: fixtureMode,
+      anilistUsername,
+      login,
+      register,
+      loginWithAnilist,
+      linkAnilist,
+      logout,
+    }),
+    [
+      status,
+      user,
+      anilistUsername,
+      login,
+      register,
+      loginWithAnilist,
+      linkAnilist,
+      logout,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

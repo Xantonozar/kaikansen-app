@@ -1,0 +1,1 @@
+{"build":{"preview":{"android":{"buildType":"apk"},"distribution":"internal","env":{"EXPO_PUBLIC_API_URL":"https://kaikansen-api.onrender.com"}}},"cli":{"version":">= 16.0.0"}}

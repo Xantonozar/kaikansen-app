@@ -1,5 +1,7 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,17 +16,52 @@ import { useTheme, useThemeMode, type ThemeMode } from '../src/theme-context';
 import { useAuth } from '../src/auth';
 
 /**
- * Settings (DESIGN.md §6.27): account summary, the Theme selection
- * (Dark default / Light — the Gate 4 decision, wired here in Slice 2),
- * and sign-out. Reached from the header avatar when signed in.
+ * Settings (DESIGN.md §6.27): account summary, the AniList link
+ * action, the Theme selection (Dark default / Light — the Gate 4
+ * decision, wired here in Slice 2), and sign-out. Reached from the
+ * header avatar when signed in.
  * (Profile editing is §6.28 — a later slice, not this one.)
+ *
+ * The linked AniList username shown here is session-local: it comes
+ * from the link response in this session, because GET /auth/me does
+ * not expose the linked account. After an app restart the action
+ * shows again even though the link itself persists server-side.
  */
 export default function SettingsScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const { mode, setMode } = useThemeMode();
-  const { status, user, demoMode, logout } = useAuth();
+  const { status, user, demoMode, anilistUsername, linkAnilist, logout } =
+    useAuth();
   const router = useRouter();
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [linkNote, setLinkNote] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
+
+  const onLinkAnilist = async () => {
+    // Fixture/demo mode has no API, and web has no custom-scheme
+    // auth session to return to — say so instead of starting a
+    // flow that cannot complete.
+    if (demoMode || Platform.OS === 'web') {
+      setLinkError(null);
+      setLinkNote('AniList linking isn’t available in this build.');
+      return;
+    }
+    if (linkBusy) return;
+    setLinkBusy(true);
+    setLinkNote(null);
+    setLinkError(null);
+    try {
+      const username = await linkAnilist();
+      setLinkNote(`AniList account linked as ${username}.`);
+    } catch (e: unknown) {
+      setLinkError(
+        e instanceof Error ? e.message : 'AniList linking failed. Please try again.',
+      );
+    } finally {
+      setLinkBusy(false);
+    }
+  };
 
   const goBack = () => {
     if (router.canGoBack()) router.back();
@@ -95,6 +132,38 @@ export default function SettingsScreen() {
             >
               <Text style={styles.primaryLabel}>Log in</Text>
             </Pressable>
+          </>
+        )}
+
+        {status === 'signedIn' && (
+          <>
+            <Text style={styles.sectionLabel}>AniList</Text>
+            <View style={styles.card}>
+              {anilistUsername ? (
+                <View style={[styles.row, styles.rowLast]}>
+                  <Text style={styles.rowLabel}>Linked account</Text>
+                  <Text style={styles.rowValue}>{anilistUsername}</Text>
+                </View>
+              ) : (
+                <Pressable
+                  onPress={() => void onLinkAnilist()}
+                  disabled={linkBusy}
+                  style={styles.optionRow}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.optionLabel}>Link AniList account</Text>
+                  {linkBusy && (
+                    <ActivityIndicator color={theme.accent} />
+                  )}
+                </Pressable>
+              )}
+            </View>
+            {linkNote !== null && (
+              <Text style={styles.note}>{linkNote}</Text>
+            )}
+            {linkError !== null && (
+              <Text style={styles.error}>{linkError}</Text>
+            )}
           </>
         )}
 
@@ -196,6 +265,11 @@ const createStyles = (theme: Theme) =>
       color: theme.muted,
       marginTop: spacing.md,
       lineHeight: 16,
+    },
+    error: {
+      ...typeStyles.bodySmall,
+      color: theme.accent,
+      marginTop: spacing.md,
     },
     primary: {
       backgroundColor: theme.accent,
