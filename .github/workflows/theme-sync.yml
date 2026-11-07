@@ -1,0 +1,111 @@
+name: Theme sync
+
+# Weekly trigger for the Kaikansen API's theme-catalogue sync engine.
+# The API (Render, free tier) sleeps when idle: the trigger POST wakes
+# it, and the status polling below keeps it awake for the whole run.
+# All calls are gated by the SYNC_SECRET repo secret (header
+# `x-sync-secret`), which must match the API's SYNC_SECRET env var.
+# No secret values live in this file.
+
+on:
+  schedule:
+    # Mondays 03:00 UTC.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Anime year to sync (defaults to the current year)"
+        required: false
+        type: string
+
+env:
+  API_BASE: https://kaikansen-api.onrender.com
+
+jobs:
+  sync:
+    name: Sync themes + popular flags
+    runs-on: ubuntu-latest
+    # A full year scan is slow by design (polite per-anime enrichment
+    # delays on the API side); stay just under GitHub's 360-minute cap.
+    timeout-minutes: 355
+    steps:
+      - name: Trigger themes sync
+        env:
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+          YEAR_INPUT: ${{ inputs.year }}
+        run: |
+          YEAR="${YEAR_INPUT:-$(date -u +%Y)}"
+          echo "Triggering themes sync for year $YEAR"
+          # The service may be asleep — waking it can take a minute and
+          # early attempts can 502; retry the trigger a few times.
+          for attempt in 1 2 3 4 5; do
+            if curl -f -sS --max-time 300 -X POST "$API_BASE/internal/sync/themes" \
+                 -H "x-sync-secret: $SYNC_SECRET" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"year\": $YEAR}"; then
+              echo
+              echo "Themes sync accepted"
+              exit 0
+            fi
+            echo "Trigger attempt $attempt failed — retrying in 30s"
+            sleep 30
+          done
+          echo "Could not trigger the themes sync"
+          exit 1
+
+      - name: Wait for themes sync
+        env:
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+        run: |
+          # Poll every 120s; the polling itself keeps the Render
+          # service awake while the job runs on it.
+          for i in $(seq 1 140); do
+            body="$(curl -sS --max-time 120 -H "x-sync-secret: $SYNC_SECRET" "$API_BASE/internal/sync/status" || true)"
+            state="$(printf '%s' "$body" | jq -r '.state // "unknown"' 2>/dev/null || echo unknown)"
+            echo "poll $i: state=$state"
+            printf '%s\n' "$body"
+            case "$state" in
+              completed) exit 0 ;;
+              failed) echo "Themes sync job failed"; exit 1 ;;
+            esac
+            sleep 120
+          done
+          echo "Timed out waiting for the themes sync"
+          exit 1
+
+      - name: Trigger popular sync
+        env:
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if curl -f -sS --max-time 300 -X POST "$API_BASE/internal/sync/popular" \
+                 -H "x-sync-secret: $SYNC_SECRET" \
+                 -H "Content-Type: application/json" \
+                 -d "{}"; then
+              echo
+              echo "Popular sync accepted"
+              exit 0
+            fi
+            echo "Trigger attempt $attempt failed — retrying in 30s"
+            sleep 30
+          done
+          echo "Could not trigger the popular sync"
+          exit 1
+
+      - name: Wait for popular sync
+        env:
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+        run: |
+          for i in $(seq 1 30); do
+            body="$(curl -sS --max-time 120 -H "x-sync-secret: $SYNC_SECRET" "$API_BASE/internal/sync/status" || true)"
+            state="$(printf '%s' "$body" | jq -r '.state // "unknown"' 2>/dev/null || echo unknown)"
+            echo "poll $i: state=$state"
+            printf '%s\n' "$body"
+            case "$state" in
+              completed) exit 0 ;;
+              failed) echo "Popular sync job failed"; exit 1 ;;
+            esac
+            sleep 120
+          done
+          echo "Timed out waiting for the popular sync"
+          exit 1
