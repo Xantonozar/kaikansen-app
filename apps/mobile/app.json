@@ -34,6 +34,12 @@
       "expo-font",
       "expo-secure-store",
       "expo-web-browser"
-    ]
+    ],
+    "owner": "zadid",
+    "extra": {
+      "eas": {
+        "projectId": "e48ef2e7-6561-40b9-bab9-5f668f9855ed"
+      }
+    }
   }
 }
