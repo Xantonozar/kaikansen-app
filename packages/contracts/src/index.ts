@@ -193,3 +193,65 @@ export interface RefreshRequest {
 
 /** Response body of POST /auth/refresh: a ROTATED pair (both tokens are new). */
 export type RefreshResponse = AuthTokens;
+
+/* ------------------------------------------------------------------ */
+/* AniList OAuth (login + linking)                                     */
+/*                                                                     */
+/* Native port of the web's app/api/auth/anilist/* flow: the web rides */
+/* a browser redirect + popup postMessage; the API instead hands the  */
+/* client an authorize URL to open, then accepts the returned code    */
+/* in a POST body and answers with the standard auth payload.         */
+/* ------------------------------------------------------------------ */
+
+/** Response body of GET /auth/anilist/url — open this in a browser / web view. */
+export interface AnilistUrlResponse {
+  url: string;
+}
+
+/**
+ * GET /auth/anilist/url accepts an optional ?state=login|link, forwarded
+ * verbatim into the authorize URL; AniList echoes it back to the
+ * callback, where it switches the GET callback's behaviour (see the
+ * GET callback note below).
+ */
+
+/** Request body of POST /auth/anilist/callback — the OAuth authorization code. */
+export interface AnilistCallbackRequest {
+  code: string;
+}
+
+/** Response body of POST /auth/anilist/callback — identical to password login. */
+export type AnilistCallbackResponse = AuthResponse;
+
+/**
+ * GET /auth/anilist/callback?code=… — the server-side OAuth landing
+ * (AniList client 56177's registered redirect points at the API).
+ * Not a JSON endpoint: it answers 302 to ANILIST_POST_LOGIN_REDIRECT
+ * with this fragment on success —
+ *   #accessToken=…&refreshToken=…&userId=…
+ * — or #error=auth_failed | exchange_failed | internal_error on
+ * failure. It answers 503 JSON (no redirect) when the API is booted
+ * without a database, the AniList env trio, or the redirect target.
+ *
+ * With state=link echoed back, the GET callback exchanges NOTHING:
+ * it 302s with #code=…&state=link instead, so the already-signed-in
+ * app can POST the code to /auth/anilist/link with its Bearer token —
+ * linking stays bound to the caller's session, which a redirect
+ * cannot carry.
+ */
+
+/** Request body of POST /auth/anilist/link (Bearer access token required). */
+export interface AnilistLinkRequest {
+  code: string;
+}
+
+/** Response body of POST /auth/anilist/link. */
+export interface AnilistLinkResponse {
+  linked: true;
+  anilist: {
+    /** The linked AniList account's id. */
+    userId: number;
+    /** The linked AniList account's username. */
+    username: string;
+  };
+}

@@ -1,6 +1,7 @@
 import { type DynamicModule, Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { AccessTokenGuard } from './access-token.guard';
+import { AnilistClient } from './anilist.client';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { User, UserSchema } from './user.schema';
@@ -20,7 +21,10 @@ export class AuthModule {
         ? [MongooseModule.forFeature([{ name: User.name, schema: UserSchema }])]
         : [],
       controllers: [AuthController],
-      providers: [AuthService, AccessTokenGuard],
+      // AnilistClient is registered unconditionally (it holds no config);
+      // AuthService answers 503 from the AniList endpoints when the
+      // ANILIST_* env trio is unset, exactly as it does model-less.
+      providers: [AuthService, AccessTokenGuard, AnilistClient],
     };
   }
 }

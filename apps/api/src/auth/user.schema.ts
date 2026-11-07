@@ -10,22 +10,50 @@ import { HydratedDocument } from 'mongoose';
  * username, displayName, email, passwordHash, avatarUrl, bio,
  * totalRatings, totalFollowers, totalFollowing, isPublic + timestamps.
  *
- * Deliberate omissions / differences from the web schema:
+ * Deliberate differences from the web schema:
  * - `passwordHash` is `select: false` (the web queries it with
  *   `.select('+passwordHash')` on login — same behaviour here).
- * - The web's `anilist` sub-document is NOT modelled in this slice: the
- *   sampled production user doc carried no AniList fields, and AniList
- *   login/linking is a later slice. Documents that have it keep it —
- *   this schema simply doesn't read or write it.
  * - `autoIndex: false` and NO cross-model middleware hooks: the web
  *   maintains denormalised counters (totalFollowers etc. on follow /
  *   unfollow etc.) through hooks in other models' operations. Porting
- *   that counter maintenance is v1 work; this slice only ever creates
+ *   that counter maintenance is v1 work; these slices only ever create
  *   a user (counters start at 0, exactly as on web registration) and
- *   reads profiles back.
+ *   read profiles back.
+ *
+ * The `anilist` sub-document below IS modelled (AniList login slice),
+ * field-for-field as the web declares it — including
+ * `completedMediaIds`, which the web's AniList sync fills; this API
+ * does not write it yet. NOTE: `anilist.accessToken` is stored in
+ * PLAINTEXT, exactly as the web stores it — mirrored deliberately;
+ * hardening that storage is OPEN item O-05 (specs/DECISIONS.md).
  */
 
 export type UserDocument = HydratedDocument<User>;
+
+/**
+ * The `anilist` sub-document — field-for-field the web's shape
+ * (lib/models/index.ts). `accessToken` is the user's AniList OAuth
+ * token, stored in plaintext as on the web (OPEN item O-05).
+ */
+@Schema({ _id: false })
+export class AnilistLink {
+  @Prop({ type: String })
+  accessToken?: string;
+
+  @Prop({ type: Number })
+  userId?: number;
+
+  @Prop({ type: String })
+  username?: string;
+
+  @Prop({ type: Date })
+  syncedAt?: Date;
+
+  @Prop({ type: [Number] })
+  completedMediaIds?: number[];
+}
+
+export const AnilistLinkSchema = SchemaFactory.createForClass(AnilistLink);
 
 @Schema({ collection: 'users', timestamps: true, autoIndex: false })
 export class User {
@@ -58,6 +86,9 @@ export class User {
 
   @Prop({ type: Boolean, default: true })
   isPublic: boolean;
+
+  @Prop({ type: AnilistLinkSchema, default: undefined })
+  anilist?: AnilistLink;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

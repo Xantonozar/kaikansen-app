@@ -4,11 +4,17 @@ import {
   Get,
   HttpCode,
   Post,
+  Query,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import type {
+  AnilistCallbackRequest,
+  AnilistLinkRequest,
+  AnilistLinkResponse,
+  AnilistUrlResponse,
   AuthResponse,
   AuthTokens,
   LoginRequest,
@@ -61,5 +67,55 @@ export class AuthController {
   @ApiOkResponse({ description: 'The caller’s own profile.' })
   me(@Req() req: { user: TokenPayload }): Promise<UserProfile> {
     return this.auth.me(req.user.userId);
+  }
+
+  @Get('anilist/url')
+  @ApiOkResponse({
+    description:
+      'The AniList authorize URL to open in a browser / web view. Optional ?state=login|link is forwarded to AniList and echoed back to the callback. 503 when AniList is not configured.',
+  })
+  anilistUrl(@Query('state') state?: string): Promise<AnilistUrlResponse> {
+    return this.auth.anilistUrl(state);
+  }
+
+  @Post('anilist/callback')
+  @HttpCode(200)
+  @ApiOkResponse({
+    description:
+      'Exchanges the AniList code, finds-or-creates the user, returns tokens + profile (same shape as login).',
+  })
+  anilistCallback(
+    @Body() body: AnilistCallbackRequest,
+  ): Promise<AuthResponse> {
+    return this.auth.anilistCallback(body);
+  }
+
+  @Get('anilist/callback')
+  @ApiOkResponse({
+    description:
+      'Server-side OAuth landing (AniList client 56177’s registered redirect): 302 to ANILIST_POST_LOGIN_REDIRECT with the session in the URL fragment, or #error=<code> on failure. With state=link it exchanges nothing and bounces #code=…&state=link for the authenticated app to POST to /auth/anilist/link. 503 JSON when unconfigured.',
+  })
+  async anilistCallbackRedirect(
+    @Query('code') code: string | undefined,
+    @Query('state') state: string | undefined,
+    @Res() res: { redirect: (status: number, url: string) => void },
+  ): Promise<void> {
+    const url = await this.auth.anilistCallbackRedirectUrl(code, state);
+    res.redirect(302, url);
+  }
+
+  @Post('anilist/link')
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @UseGuards(AccessTokenGuard)
+  @ApiOkResponse({
+    description:
+      'Links the AniList account from the code to the caller’s account. 409 if that AniList account belongs to another user.',
+  })
+  anilistLink(
+    @Req() req: { user: TokenPayload },
+    @Body() body: AnilistLinkRequest,
+  ): Promise<AnilistLinkResponse> {
+    return this.auth.anilistLink(req.user.userId, body);
   }
 }
