@@ -135,6 +135,109 @@ describe('ThemesService.getHome', () => {
     expect(home.seasonRail[0]).not.toHaveProperty('embedding');
     expect(home.popular).toHaveLength(1);
     expect(home.popular[0].slug).toBe('popular-theme');
+    // Current season has data: no fallback queries are issued.
+    const railQueries = find.mock.calls.filter(
+      ([filter]) => 'animeSeason' in filter,
+    );
+    expect(railQueries).toHaveLength(1);
+  });
+
+  /**
+   * A find mock serving a catalogue described by a season map:
+   * keys are "SEASON YEAR", values the docs that season holds.
+   * The popular rail always serves one doc.
+   */
+  function serviceWithSeasons(catalogue: Record<string, unknown[]>) {
+    const find = jest.fn((filter: Record<string, unknown>) => {
+      if ('animeSeason' in filter) {
+        return queryOf(
+          catalogue[`${filter.animeSeason} ${filter.animeSeasonYear}`] ?? [],
+        );
+      }
+      if ('isPopular' in filter) {
+        return queryOf([makeDoc({ slug: 'popular-theme', popularRank: 7 })]);
+      }
+      throw new Error(`unexpected filter ${JSON.stringify(filter)}`);
+    });
+    return { service: serviceWith({ find }), find };
+  }
+
+  it('falls back to the previous season, under its true label, when the current season is empty', async () => {
+    const summerDoc = makeDoc({
+      slug: 'summer-theme',
+      animeSeason: 'SUMMER',
+      isPopular: false,
+    });
+    const { service } = serviceWithSeasons({ 'SUMMER 2026': [summerDoc] });
+
+    // 2026-11-07 → FALL 2026, which the catalogue does not hold yet.
+    const home = await service.getHome(new Date(2026, 10, 7));
+
+    expect(home.season).toEqual({ season: 'SUMMER', year: 2026 });
+    expect(home.seasonRail).toHaveLength(1);
+    expect(home.seasonRail[0].slug).toBe('summer-theme');
+    // The popular rail is untouched by the fallback.
+    expect(home.popular).toHaveLength(1);
+    expect(home.popular[0].slug).toBe('popular-theme');
+  });
+
+  it('skips multiple empty seasons to the latest one with data', async () => {
+    const winterDoc = makeDoc({
+      slug: 'winter-theme',
+      animeSeason: 'WINTER',
+      isPopular: false,
+    });
+    const { service, find } = serviceWithSeasons({
+      'WINTER 2026': [winterDoc],
+    });
+
+    const home = await service.getHome(new Date(2026, 10, 7));
+
+    expect(home.season).toEqual({ season: 'WINTER', year: 2026 });
+    expect(home.seasonRail[0].slug).toBe('winter-theme');
+    // FALL, SUMMER, SPRING were each probed (and empty) before WINTER.
+    const probed = find.mock.calls
+      .filter(([filter]) => 'animeSeason' in filter)
+      .map(
+        ([filter]) => `${filter.animeSeason} ${filter.animeSeasonYear}`,
+      );
+    expect(probed).toEqual([
+      'FALL 2026',
+      'SUMMER 2026',
+      'SPRING 2026',
+      'WINTER 2026',
+    ]);
+  });
+
+  it('crosses the year boundary when walking back (WINTER 2026 → FALL 2025)', async () => {
+    const fallDoc = makeDoc({
+      slug: 'last-fall-theme',
+      animeSeason: 'FALL',
+      animeSeasonYear: 2025,
+      isPopular: false,
+    });
+    const { service } = serviceWithSeasons({ 'FALL 2025': [fallDoc] });
+
+    // Mid-January 2026 → current season is WINTER 2026, still empty.
+    const home = await service.getHome(new Date(2026, 0, 15));
+
+    expect(home.season).toEqual({ season: 'FALL', year: 2025 });
+    expect(home.seasonRail[0].slug).toBe('last-fall-theme');
+  });
+
+  it('keeps the empty rail under the current season label when no season has data', async () => {
+    const { service, find } = serviceWithSeasons({});
+
+    const home = await service.getHome(new Date(2026, 10, 7));
+
+    expect(home.season).toEqual({ season: 'FALL', year: 2026 });
+    expect(home.seasonRail).toEqual([]);
+    expect(home.popular).toHaveLength(1);
+    // The walk is bounded: current season + 8 steps back, no more.
+    const railQueries = find.mock.calls.filter(
+      ([filter]) => 'animeSeason' in filter,
+    );
+    expect(railQueries).toHaveLength(9);
   });
 });
 

@@ -23,3 +23,23 @@ export function currentSeason(date: Date = new Date()): {
   if (month <= 7) return { season: 'SUMMER', year };
   return { season: 'FALL', year };
 }
+
+/** Seasons in chronological order within one season-year. */
+const SEASON_ORDER: Season[] = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
+
+/**
+ * The season immediately before the given one, chronologically:
+ * FALL 2026 → SUMMER 2026 → SPRING 2026 → WINTER 2026 → FALL 2025 …
+ * (WINTER of year Y spans Dec Y−1 – Feb Y, so its predecessor is
+ * FALL of Y−1 — the same year convention as `currentSeason`.)
+ */
+export function previousSeason(current: {
+  season: Season;
+  year: number;
+}): { season: Season; year: number } {
+  const index = SEASON_ORDER.indexOf(current.season);
+  if (index > 0) {
+    return { season: SEASON_ORDER[index - 1], year: current.year };
+  }
+  return { season: 'FALL', year: current.year - 1 };
+}

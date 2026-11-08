@@ -20,7 +20,10 @@ export class ThemesController {
   constructor(private readonly themes: ThemesService) {}
 
   @Get('home')
-  @ApiOkResponse({ description: 'Current-season rail + popular themes.' })
+  @ApiOkResponse({
+    description:
+      'Current-season rail + popular themes. When the current season has no themes yet, the rail falls back to the most recent earlier season that does, and `season` names the season actually served.',
+  })
   home(): Promise<HomeResponse> {
     return this.themes.getHome();
   }

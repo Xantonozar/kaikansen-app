@@ -18,11 +18,17 @@ import {
   type AnimeCacheDocument,
 } from '../sync/anime-cache.schema';
 import { ThemeCache, type ThemeCacheDocument } from './theme-cache.schema';
-import { currentSeason } from './season';
+import { currentSeason, previousSeason } from './season';
 import { toRelatedAnime, type AnimeDoc } from './anime.mapper';
 import { toThemeDetail, toThemeSummary, type ThemeDoc } from './theme.mapper';
 
 const RAIL_LIMIT = 20;
+/**
+ * How far back the /home season rail may walk when the current season
+ * has no themes yet (owner's order, 2026-11-08): two full years of
+ * seasons. Beyond that the rail honestly stays empty.
+ */
+const SEASON_FALLBACK_STEPS = 8;
 /* Search constants — the web's own values (app/api/search/route.ts). */
 const SEARCH_PAGE_SIZE = 20; // per-type limit of the web's SONGS view
 const SEARCH_MODIFIER_LIMIT = 50; // songs limit when an OP/ED modifier is used
@@ -120,18 +126,35 @@ export class ThemesService {
     return this.animeModel;
   }
 
-  /** GET /home — current-season rail + the popular ("hall of fame") list. */
+  /**
+   * GET /home — current-season rail + the popular ("hall of fame") list.
+   *
+   * Season fallback (owner's order, 2026-11-08): when the catalogue
+   * holds no themes for the current season yet (the real DB had no
+   * FALL 2026 data while SUMMER 2026 was fully synced), an empty rail
+   * is a dead home page. So on an empty current season the rail walks
+   * BACK season by season to the first season that has themes, and
+   * the response's `season` names the season actually served — the
+   * label always tells the truth, summer data is never dressed up as
+   * fall. When the current season has data, behaviour is exactly the
+   * pre-fallback one (a single query). If no season within
+   * SEASON_FALLBACK_STEPS back has anything, the rail stays empty
+   * under the current season's label, as before.
+   */
   async getHome(now: Date = new Date()): Promise<HomeResponse> {
     const model = this.requireModel();
-    const { season, year } = currentSeason(now);
+    const current = currentSeason(now);
 
-    const [railDocs, popularDocs] = await Promise.all([
+    const fetchRail = (s: typeof current.season, y: number) =>
       model
-        .find({ animeSeason: season, animeSeasonYear: year })
+        .find({ animeSeason: s, animeSeasonYear: y })
         .sort({ totalWatches: -1 })
         .limit(RAIL_LIMIT)
         .lean()
-        .exec(),
+        .exec();
+
+    const [firstRail, popularDocs] = await Promise.all([
+      fetchRail(current.season, current.year),
       model
         .find({ isPopular: true })
         .sort({ popularRank: 1 })
@@ -140,9 +163,25 @@ export class ThemesService {
         .exec(),
     ]);
 
+    // The served season only advances to a walked-back season when
+    // that season actually has themes; an all-empty walk leaves the
+    // label on the current season (the pre-fallback behaviour).
+    let served = current;
+    let cursor = current;
+    let railDocs = firstRail as ThemeDoc[];
+    for (
+      let step = 0;
+      railDocs.length === 0 && step < SEASON_FALLBACK_STEPS;
+      step++
+    ) {
+      cursor = previousSeason(cursor);
+      railDocs = (await fetchRail(cursor.season, cursor.year)) as ThemeDoc[];
+      if (railDocs.length > 0) served = cursor;
+    }
+
     return {
-      season: { season, year },
-      seasonRail: (railDocs as ThemeDoc[]).map(toThemeSummary),
+      season: served,
+      seasonRail: railDocs.map(toThemeSummary),
       popular: (popularDocs as ThemeDoc[]).map(toThemeSummary),
     };
   }
