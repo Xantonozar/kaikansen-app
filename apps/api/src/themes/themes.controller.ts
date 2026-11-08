@@ -2,7 +2,9 @@ import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import type {
   HomeResponse,
+  RelatedAnimeResponse,
   SearchResponse,
+  SimilarThemesResponse,
   ThemeDetail,
 } from '@kaikansen/contracts';
 import { ThemesService } from './themes.service';
@@ -39,5 +41,23 @@ export class ThemesController {
   ): Promise<SearchResponse> {
     const parsed = Number.parseInt(page ?? '', 10);
     return this.themes.search(q, Number.isNaN(parsed) ? 1 : parsed);
+  }
+
+  @Get('themes/:slug/similar')
+  @ApiOkResponse({
+    description:
+      'Themes sharing this theme’s anime, artist, mood or first-entry tags (web order: totalRatings desc, avgRating desc; cap 20). 404 for an unknown slug.',
+  })
+  similar(@Param('slug') slug: string): Promise<SimilarThemesResponse> {
+    return this.themes.getSimilarThemes(slug);
+  }
+
+  @Get('anime/:id/related')
+  @ApiOkResponse({
+    description:
+      'Other anime in the same series as this AniList id (web order: seasonYear asc; cap 10). 404 for an unknown id.',
+  })
+  related(@Param('id') id: string): Promise<RelatedAnimeResponse> {
+    return this.themes.getRelatedAnime(id);
   }
 }

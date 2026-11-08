@@ -36,6 +36,12 @@ interface FakeUser {
   totalFollowers: number;
   totalFollowing: number;
   isPublic: boolean;
+  anilist?: {
+    accessToken?: string;
+    userId?: number;
+    username?: string;
+    syncedAt?: Date;
+  };
 }
 
 /* Chainable Mongoose-query stand-in (same pattern as themes spec). */
@@ -67,6 +73,15 @@ function makeModel() {
     }),
     findById: jest.fn((id: string) =>
       queryOf(users.find((u) => u._id === id) ?? null),
+    ),
+    findByIdAndUpdate: jest.fn(
+      (id: string, update: { $set: Record<string, unknown> }) => {
+        const doc = users.find((u) => u._id === id) ?? null;
+        if (doc && update.$set) {
+          Object.assign(doc, update.$set);
+        }
+        return queryOf(doc);
+      },
     ),
     create: jest.fn(async (data: Partial<FakeUser>) => {
       const doc: FakeUser = {
@@ -139,6 +154,7 @@ describe('AuthService', () => {
         totalFollowers: 0,
         totalFollowing: 0,
         isPublic: true,
+        anilist: null,
       });
       expect(JSON.stringify(res)).not.toContain('passwordHash');
     });
@@ -358,10 +374,240 @@ describe('AuthService', () => {
       expect(JSON.stringify(profile)).not.toContain('passwordHash');
     });
 
+    it('exposes the AniList linkage (id + username, never the token) for a linked user', async () => {
+      const { model, service } = makeService();
+      const seeded = await model.create({
+        username: 'linked',
+        displayName: 'Linked',
+        email: 'linked@example.com',
+        passwordHash: 'hashed',
+        anilist: {
+          accessToken: '<redacted>',
+          userId: 42,
+          username: 'AniUser',
+          syncedAt: new Date(),
+        },
+      });
+      const profile = await service.me(seeded._id);
+      expect(profile.anilist).toEqual({ userId: 42, username: 'AniUser' });
+      expect(JSON.stringify(profile)).not.toContain('accessToken');
+    });
+
+    it('reports anilist: null when the sub-document carries no user id', async () => {
+      const { model, service } = makeService();
+      const seeded = await model.create({
+        username: 'half',
+        displayName: 'Half',
+        email: 'half@example.com',
+        passwordHash: 'hashed',
+        anilist: {},
+      });
+      const profile = await service.me(seeded._id);
+      expect(profile.anilist).toBeNull();
+    });
+
     it('rejects an unknown user id', async () => {
       const { service } = makeService();
       await expect(service.me('no-such-user')).rejects.toBeInstanceOf(
         UnauthorizedException,
+      );
+    });
+  });
+
+  describe('updateProfile', () => {
+    async function seeded() {
+      const ctx = makeService();
+      const reg = await ctx.service.register({
+        username: 'editable',
+        email: 'edit@example.com',
+        password: 'edit-fake-password',
+        displayName: 'Original Name',
+      });
+      ctx.model.findByIdAndUpdate.mockClear();
+      return { ...ctx, reg };
+    }
+
+    it('edits all three fields and returns the updated profile', async () => {
+      const { model, service, reg } = await seeded();
+      const res = await service.updateProfile(reg.user.id, {
+        displayName: 'New Name',
+        bio: 'A short bio',
+        avatarUrl: 'https://example.com/avatar.png',
+      });
+      expect(res).toMatchObject({
+        id: reg.user.id,
+        displayName: 'New Name',
+        bio: 'A short bio',
+        avatarUrl: 'https://example.com/avatar.png',
+      });
+      expect(JSON.stringify(res)).not.toContain('passwordHash');
+      const stored = model.users[0];
+      expect(stored.displayName).toBe('New Name');
+      expect(stored.bio).toBe('A short bio');
+      expect(stored.avatarUrl).toBe('https://example.com/avatar.png');
+      // What PATCH returns is exactly what GET /auth/me serves.
+      await expect(service.me(reg.user.id)).resolves.toEqual(res);
+    });
+
+    it('applies a partial update: omitted fields keep their stored values', async () => {
+      const { model, service, reg } = await seeded();
+      const before = { ...model.users[0] };
+      const res = await service.updateProfile(reg.user.id, {
+        bio: 'Only the bio changed',
+      });
+      expect(model.findByIdAndUpdate).toHaveBeenCalledTimes(1);
+      expect(model.findByIdAndUpdate).toHaveBeenCalledWith(
+        reg.user.id,
+        { $set: { bio: 'Only the bio changed' } },
+        { new: true },
+      );
+      expect(res.displayName).toBe(before.displayName);
+      expect(res.avatarUrl).toBe(before.avatarUrl);
+      expect(model.users[0].displayName).toBe(before.displayName);
+    });
+
+    it('an empty patch writes nothing and answers the current profile', async () => {
+      const { model, service, reg } = await seeded();
+      const res = await service.updateProfile(reg.user.id, {});
+      expect(model.findByIdAndUpdate).not.toHaveBeenCalled();
+      expect(res).toEqual(reg.user);
+    });
+
+    it('avatarUrl: null clears the avatar (the web’s nullable field)', async () => {
+      const { service, reg } = await seeded();
+      expect(reg.user.avatarUrl).toContain('dicebear');
+      const res = await service.updateProfile(reg.user.id, {
+        avatarUrl: null,
+      });
+      expect(res.avatarUrl).toBeNull();
+    });
+
+    it('ignores unknown fields — email, username and counters are not editable', async () => {
+      const { model, service, reg } = await seeded();
+      const res = await service.updateProfile(reg.user.id, {
+        displayName: 'Still Me',
+        email: 'hijack@example.com',
+        username: 'hijacked',
+        totalRatings: 999,
+      } as never);
+      expect(res.displayName).toBe('Still Me');
+      expect(res.email).toBe('edit@example.com');
+      expect(res.username).toBe('editable');
+      expect(model.users[0].totalRatings).toBe(0);
+      expect(model.findByIdAndUpdate).toHaveBeenCalledWith(
+        reg.user.id,
+        { $set: { displayName: 'Still Me' } },
+        { new: true },
+      );
+    });
+
+    it('accepts the boundary values (50-char name, 200-char bio, empty bio)', async () => {
+      const { service, reg } = await seeded();
+      const res = await service.updateProfile(reg.user.id, {
+        displayName: 'n'.repeat(50),
+        bio: 'b'.repeat(200),
+      });
+      expect(res.displayName).toHaveLength(50);
+      expect(res.bio).toHaveLength(200);
+      const cleared = await service.updateProfile(reg.user.id, { bio: '' });
+      expect(cleared.bio).toBe('');
+    });
+
+    const invalidCases: [string, unknown, string][] = [
+      [
+        'an empty displayName',
+        { displayName: '' },
+        'Too small: expected string to have >=1 characters',
+      ],
+      [
+        'a 51-char displayName',
+        { displayName: 'n'.repeat(51) },
+        'Too big: expected string to have <=50 characters',
+      ],
+      [
+        'a 201-char bio',
+        { bio: 'b'.repeat(201) },
+        'Too big: expected string to have <=200 characters',
+      ],
+      ['a non-URL avatarUrl', { avatarUrl: 'not-a-url' }, 'Invalid URL'],
+      [
+        'a numeric displayName',
+        { displayName: 42 },
+        'Invalid input: expected string, received number',
+      ],
+      [
+        'a null bio',
+        { bio: null },
+        'Invalid input: expected string, received null',
+      ],
+      [
+        'a boolean avatarUrl',
+        { avatarUrl: true },
+        'Invalid input: expected string, received boolean',
+      ],
+      [
+        'an array body',
+        [],
+        'Invalid input: expected object, received array',
+      ],
+      [
+        'a string body',
+        'just text',
+        'Invalid input: expected object, received string',
+      ],
+      ['a null body', null, 'Invalid input: expected object, received null'],
+    ];
+
+    it.each(invalidCases)(
+      'rejects %s with the web’s first-issue 400 and writes nothing',
+      async (_label, body, message) => {
+        const { model, service, reg } = await seeded();
+        const err = await service
+          .updateProfile(reg.user.id, body as never)
+          .catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(BadRequestException);
+        expect((err as BadRequestException).getStatus()).toBe(400);
+        expect((err as BadRequestException).message).toBe(message);
+        expect(model.findByIdAndUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    it('validates the WHOLE body before writing: a valid field is not saved when a sibling is invalid', async () => {
+      const { model, service, reg } = await seeded();
+      const err = await service
+        .updateProfile(reg.user.id, {
+          displayName: 'Perfectly Valid',
+          bio: 'b'.repeat(201),
+        })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(model.findByIdAndUpdate).not.toHaveBeenCalled();
+      expect(model.users[0].displayName).toBe('Original Name');
+    });
+
+    it('reports the first issue in SCHEMA order, not body order (zod parity)', async () => {
+      const { service, reg } = await seeded();
+      const err = await service
+        .updateProfile(reg.user.id, {
+          avatarUrl: 'not-a-url',
+          bio: 'b'.repeat(201),
+          displayName: '',
+        })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).message).toBe(
+        'Too small: expected string to have >=1 characters',
+      );
+    });
+
+    it('rejects an unknown user id like GET /auth/me does', async () => {
+      const { service } = makeService();
+      const err = await service
+        .updateProfile('no-such-user', { displayName: 'X' })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnauthorizedException);
+      expect((err as UnauthorizedException).message).toBe(
+        'Account no longer exists',
       );
     });
   });
@@ -381,6 +627,9 @@ describe('AuthService', () => {
       await expect(service.me('x')).rejects.toBeInstanceOf(
         ServiceUnavailableException,
       );
+      await expect(
+        service.updateProfile('x', { displayName: 'New' }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
     });
   });
 });

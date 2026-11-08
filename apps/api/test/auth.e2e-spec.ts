@@ -61,6 +61,13 @@ describe('Auth without a database (e2e)', () => {
   it('GET /auth/me without a token returns 401', () => {
     return request(app.getHttpServer()).get('/auth/me').expect(401);
   });
+
+  it('PATCH /auth/me without a token returns 401', () => {
+    return request(app.getHttpServer())
+      .patch('/auth/me')
+      .send({ displayName: 'Nope' })
+      .expect(401);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -102,6 +109,16 @@ function makeFakeModel() {
     },
     findById: (id: string) =>
       queryOf(users.find((u) => u._id === id) ?? null),
+    findByIdAndUpdate: (
+      id: string,
+      update: { $set: Record<string, unknown> },
+    ) => {
+      const doc = users.find((u) => u._id === id) ?? null;
+      if (doc && update.$set) {
+        Object.assign(doc, update.$set);
+      }
+      return queryOf(doc);
+    },
     create: async (data: Record<string, unknown>) => {
       const doc: FakeUser = {
         _id: `http-user-${++seq}`,
@@ -226,6 +243,60 @@ describe('Auth flow with a mocked model (e2e)', () => {
       .get('/auth/me')
       .set('Authorization', `Bearer ${refreshToken}`)
       .expect(401);
+  });
+
+  it('PATCH /auth/me edits the profile (200) and GET /auth/me reflects it', async () => {
+    const http = request(app.getHttpServer());
+    const edited = await http
+      .patch('/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({
+        displayName: 'Edited Name',
+        bio: 'Edited bio',
+        avatarUrl: 'https://example.com/me.png',
+      })
+      .expect(200);
+    expect(edited.body).toMatchObject({
+      username: 'httpuser',
+      displayName: 'Edited Name',
+      bio: 'Edited bio',
+      avatarUrl: 'https://example.com/me.png',
+    });
+    expect(JSON.stringify(edited.body)).not.toContain('passwordHash');
+
+    const after = await http
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    expect(after.body).toEqual(edited.body);
+  });
+
+  it('PATCH /auth/me with an invalid field returns the web’s 400 and changes nothing', async () => {
+    const http = request(app.getHttpServer());
+    const res = await http
+      .patch('/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ displayName: 'Should Not Stick', bio: 'b'.repeat(201) })
+      .expect(400);
+    expect(res.body.message).toBe(
+      'Too big: expected string to have <=200 characters',
+    );
+
+    const after = await http
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    expect(after.body.displayName).toBe('Edited Name');
+  });
+
+  it('PATCH /auth/me with avatarUrl null clears the avatar', async () => {
+    const res = await request(app.getHttpServer())
+      .patch('/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ avatarUrl: null })
+      .expect(200);
+    expect(res.body.avatarUrl).toBeNull();
+    expect(res.body.displayName).toBe('Edited Name');
   });
 
   it('POST /auth/refresh rotates the pair (200, new refresh token)', async () => {

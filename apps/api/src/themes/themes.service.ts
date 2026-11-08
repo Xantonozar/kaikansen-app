@@ -8,11 +8,18 @@ import { InjectModel } from '@nestjs/mongoose';
 import type { Model } from 'mongoose';
 import type {
   HomeResponse,
+  RelatedAnimeResponse,
   SearchResponse,
+  SimilarThemesResponse,
   ThemeDetail,
 } from '@kaikansen/contracts';
+import {
+  AnimeCache,
+  type AnimeCacheDocument,
+} from '../sync/anime-cache.schema';
 import { ThemeCache, type ThemeCacheDocument } from './theme-cache.schema';
 import { currentSeason } from './season';
+import { toRelatedAnime, type AnimeDoc } from './anime.mapper';
 import { toThemeDetail, toThemeSummary, type ThemeDoc } from './theme.mapper';
 
 const RAIL_LIMIT = 20;
@@ -90,6 +97,9 @@ export class ThemesService {
     @Optional()
     @InjectModel(ThemeCache.name)
     private readonly themeModel?: Model<ThemeCacheDocument>,
+    @Optional()
+    @InjectModel(AnimeCache.name)
+    private readonly animeModel?: Model<AnimeCacheDocument>,
   ) {}
 
   private requireModel(): Model<ThemeCacheDocument> {
@@ -99,6 +109,15 @@ export class ThemesService {
       );
     }
     return this.themeModel;
+  }
+
+  private requireAnimeModel(): Model<AnimeCacheDocument> {
+    if (!this.animeModel) {
+      throw new ServiceUnavailableException(
+        'Anime data unavailable — API booted without MONGODB_URI',
+      );
+    }
+    return this.animeModel;
   }
 
   /** GET /home — current-season rail + the popular ("hall of fame") list. */
@@ -260,5 +279,99 @@ export class ThemesService {
       themeTypeFilter,
       themeSeqFilter,
     };
+  }
+
+  /**
+   * GET /themes/:slug/similar — the web's similar-themes read
+   * (`app/api/themes/[slug]/similar/route.ts`), query for query:
+   * themes (excluding the theme itself) that share its anime title,
+   * its artist name, any of its moods, or any tag of its FIRST
+   * entry — sorted totalRatings desc / avgRating desc, capped at
+   * 20. Unknown slug 404s with this API's message (the web's 404
+   * body says just 'Theme not found').
+   *
+   * Mirrored quirks: the web passes `theme.artistName` into the
+   * $or unguarded, so a theme with a null artist matches the other
+   * null-artist themes; an empty mood list / tag list simply
+   * matches nothing on that clause. The web serves the raw
+   * documents; this API projects ThemeSummary, as everywhere here.
+   */
+  async getSimilarThemes(slug: string): Promise<SimilarThemesResponse> {
+    const model = this.requireModel();
+    const theme = (await model
+      .findOne({ slug })
+      .lean()
+      .exec()) as ThemeDoc | null;
+    if (!theme) {
+      throw new NotFoundException(`Theme not found: ${slug}`);
+    }
+
+    const docs = await model
+      .find({
+        $and: [
+          { slug: { $ne: slug } },
+          {
+            $or: [
+              { animeTitle: theme.animeTitle },
+              { artistName: theme.artistName },
+              { mood: { $in: theme.mood ?? [] } },
+              {
+                entries: {
+                  $elemMatch: { tags: { $in: theme.entries?.[0]?.tags ?? [] } },
+                },
+              },
+            ],
+          },
+        ],
+      })
+      .sort({ totalRatings: -1, avgRating: -1 })
+      .limit(20)
+      .lean()
+      .exec();
+
+    return { themes: (docs as ThemeDoc[]).map(toThemeSummary) };
+  }
+
+  /**
+   * GET /anime/:id/related — the web's related-anime read
+   * (`app/api/anime/[id]/related/route.ts`): the OTHER anime whose
+   * `series` list shares a name with the requested anime's,
+   * chronological (seasonYear asc), capped at 10. The web parses
+   * the id with parseInt — '42x' reads as 42 and a non-numeric id
+   * becomes NaN, which matches no document and 404s; mirrored.
+   * An anime with no series recorded answers an empty list, not
+   * a 404. The web serves raw documents; this API projects them
+   * (see anime.mapper.ts).
+   */
+  async getRelatedAnime(idParam: string): Promise<RelatedAnimeResponse> {
+    const model = this.requireAnimeModel();
+    const animeId = Number.parseInt(idParam, 10);
+
+    const anime = (await model
+      .findOne({ anilistId: animeId })
+      .lean()
+      .exec()) as AnimeDoc | null;
+    if (!anime) {
+      throw new NotFoundException('Anime not found');
+    }
+
+    const seriesNames = anime.series ?? [];
+    if (seriesNames.length === 0) {
+      return { related: [] };
+    }
+
+    const docs = await model
+      .find({
+        $and: [
+          { anilistId: { $ne: animeId } },
+          { series: { $in: seriesNames } },
+        ],
+      })
+      .sort({ seasonYear: 1 })
+      .limit(10)
+      .lean()
+      .exec();
+
+    return { related: (docs as AnimeDoc[]).map(toRelatedAnime) };
   }
 }

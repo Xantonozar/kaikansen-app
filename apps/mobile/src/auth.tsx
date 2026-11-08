@@ -83,6 +83,13 @@ interface AuthContextValue {
   /** Live mode, native only — resolves with the linked AniList username. */
   linkAnilist: () => Promise<string>;
   logout: () => Promise<void>;
+  /**
+   * Replace the session profile with a fresher copy (Slice M5 — the
+   * Settings profile edit saves through PATCH /auth/me and hands the
+   * response here, so the header, drawer and Settings reflect the
+   * new name/avatar without a re-login).
+   */
+  updateUser: (profile: UserProfile) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -282,6 +289,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await clearSession();
   }, [clearSession]);
 
+  const updateUser = useCallback((profile: UserProfile) => {
+    setUser(profile);
+  }, []);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       status,
@@ -293,6 +304,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loginWithAnilist,
       linkAnilist,
       logout,
+      updateUser,
     }),
     [
       status,
@@ -303,6 +315,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loginWithAnilist,
       linkAnilist,
       logout,
+      updateUser,
     ],
   );
 

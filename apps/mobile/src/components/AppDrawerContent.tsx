@@ -12,6 +12,7 @@ import {
 } from 'expo-router/drawer';
 import { usePathname, useRouter, type Href } from 'expo-router';
 import {
+  Bell,
   Check,
   ChevronRight,
   House,
@@ -29,6 +30,8 @@ import {
 import { fontFamilies, spacing, typeStyles, withOpacity, type Theme } from '../theme';
 import { useTheme, useThemeMode } from '../theme-context';
 import { useAuth } from '../auth';
+import { Avatar } from './Avatar';
+import { useUnreadNotifications } from '../notificationsStore';
 import { useAnilistLink } from '../hooks/useAnilistLink';
 
 type IconComponent = ComponentType<{
@@ -93,6 +96,7 @@ export function AppDrawerContent({
   const { status, user, logout } = useAuth();
   const { anilistUsername, linkBusy, linkNote, linkError, startLink } =
     useAnilistLink();
+  const unread = useUnreadNotifications();
   const router = useRouter();
   const pathname = usePathname();
 
@@ -148,16 +152,21 @@ export function AppDrawerContent({
   return (
     <DrawerContentScrollView contentContainerStyle={styles.panel}>
       {signedIn ? (
-        <View style={styles.profile}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarInitial}>
-              {(user.displayName || user.username).charAt(0).toUpperCase()}
-            </Text>
-          </View>
+        <Pressable
+          onPress={() => go(`/user/${user.username}`)}
+          accessibilityRole="button"
+          accessibilityLabel="Open your profile"
+          style={styles.profile}
+        >
+          <Avatar
+            url={user.avatarUrl}
+            name={user.displayName || user.username}
+            size={40}
+          />
           <Text style={styles.profileName} numberOfLines={1}>
             {user.displayName || user.username}
           </Text>
-        </View>
+        </Pressable>
       ) : (
         item({
           Icon: LogIn,
@@ -196,6 +205,25 @@ export function AppDrawerContent({
           active: pathname === '/settings',
           onPress: () => go('/settings'),
         })}
+        {signedIn &&
+          item({
+            Icon: Bell,
+            label: 'Notifications',
+            accessibilityLabel:
+              unread > 0
+                ? `Go to Notifications, ${unread} unread`
+                : 'Go to Notifications',
+            active: pathname === '/notifications',
+            trailing:
+              unread > 0 ? (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>
+                    {unread > 99 ? '99+' : unread}
+                  </Text>
+                </View>
+              ) : undefined,
+            onPress: () => go('/notifications'),
+          })}
       </View>
 
       <View style={styles.spacer} />
@@ -271,20 +299,6 @@ const createStyles = (theme: Theme) =>
       borderRadius: 14,
       backgroundColor: theme.surface,
     },
-    avatar: {
-      width: 40,
-      height: 40,
-      borderRadius: 20,
-      backgroundColor: theme.accentContainer,
-      alignItems: 'center',
-      justifyContent: 'center',
-      flexShrink: 0,
-    },
-    avatarInitial: {
-      ...typeStyles.body,
-      fontFamily: fontFamilies.bodyStrong,
-      color: theme.onAccentContainer,
-    },
     profileName: {
       ...typeStyles.body,
       fontFamily: fontFamilies.bodyStrong,
@@ -336,6 +350,20 @@ const createStyles = (theme: Theme) =>
     itemLabelActive: {
       fontFamily: fontFamilies.bodyStrong,
       color: theme.onAccentContainer,
+    },
+    badge: {
+      minWidth: 20,
+      height: 20,
+      borderRadius: 10,
+      paddingHorizontal: 6,
+      backgroundColor: theme.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    badgeText: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.onAccent,
     },
     feedback: {
       ...typeStyles.caption,

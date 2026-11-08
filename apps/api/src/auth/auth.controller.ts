@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   HttpCode,
+  Patch,
   Post,
   Query,
   Req,
@@ -20,6 +21,7 @@ import type {
   LoginRequest,
   RefreshRequest,
   RegisterRequest,
+  UpdateProfileRequest,
   UserProfile,
 } from '@kaikansen/contracts';
 import { AccessTokenGuard } from './access-token.guard';
@@ -67,6 +69,20 @@ export class AuthController {
   @ApiOkResponse({ description: 'The caller’s own profile.' })
   me(@Req() req: { user: TokenPayload }): Promise<UserProfile> {
     return this.auth.me(req.user.userId);
+  }
+
+  @Patch('me')
+  @ApiBearerAuth()
+  @UseGuards(AccessTokenGuard)
+  @ApiOkResponse({
+    description:
+      'Edit the caller’s own profile (the web’s PATCH /api/users/me): partial update of displayName / bio / avatarUrl under the web’s validation; returns the updated profile in the GET /auth/me shape.',
+  })
+  updateMe(
+    @Req() req: { user: TokenPayload },
+    @Body() body: UpdateProfileRequest,
+  ): Promise<UserProfile> {
+    return this.auth.updateProfile(req.user.userId, body);
   }
 
   @Get('anilist/url')

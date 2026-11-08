@@ -1,7 +1,9 @@
 import type {
   HomeResponse,
+  RecordWatchRequest,
   SearchResponse,
   Season,
+  SimilarThemesResponse,
   ThemeDetail,
   ThemeSummary,
   ThemeType,
@@ -39,10 +41,23 @@ export const apiBaseUrl: string | undefined = apiUrl;
  * (it signs out) and the 401 response stands. Requests made signed-out
  * never trigger a refresh.
  */
-async function apiFetch(path: string): Promise<Response> {
+interface ApiFetchInit {
+  method?: string;
+  /** JSON-serialisable body; sets Content-Type: application/json. */
+  body?: unknown;
+}
+
+async function apiFetch(path: string, init?: ApiFetchInit): Promise<Response> {
   const send = (token: string | null) =>
     fetch(`${apiUrl}${path}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      method: init?.method ?? 'GET',
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(init?.body !== undefined
+          ? { 'Content-Type': 'application/json' }
+          : {}),
+      },
+      body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
     });
 
   const token = getAccessToken();
@@ -62,6 +77,54 @@ async function getJson<T>(path: string): Promise<T> {
   const res = await apiFetch(path);
   if (!res.ok) {
     throw new Error(`API ${path} answered ${res.status}`);
+  }
+  return (await res.json()) as T;
+}
+
+/** Error thrown by apiJson — carries the HTTP status alongside the message. */
+export class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/**
+ * Authenticated JSON request with a body (Slice M2): apiFetch plus
+ * response handling — resolves the parsed body on success; on failure
+ * throws an ApiRequestError carrying the API's own message when it
+ * sent one (the ApiErrorResponse shape), so library/playlist callers
+ * can surface the web-parity reason instead of a bare status. Shared
+ * by the sibling client modules (libraryApi.ts); authApi.ts keeps its
+ * own plain-fetch client because its calls create the session this
+ * one relies on.
+ */
+export async function apiJson<T>(
+  path: string,
+  init?: ApiFetchInit,
+): Promise<T> {
+  const res = await apiFetch(path, init);
+  if (!res.ok) {
+    let message = `API ${path} answered ${res.status}`;
+    try {
+      const body: unknown = await res.json();
+      if (body !== null && typeof body === 'object' && 'message' in body) {
+        const m = (body as { message: unknown }).message;
+        if (typeof m === 'string') {
+          message = m;
+        } else if (
+          Array.isArray(m) &&
+          m.every((x) => typeof x === 'string')
+        ) {
+          message = m.join(' ');
+        }
+      }
+    } catch {
+      // Non-JSON error body — keep the status message.
+    }
+    throw new ApiRequestError(res.status, message);
   }
   return (await res.json()) as T;
 }
@@ -250,4 +313,43 @@ export async function searchThemes(query: string): Promise<SearchResponse> {
   return getJson<SearchResponse>(
     `/search?q=${encodeURIComponent(query.trim())}`,
   );
+}
+
+/**
+ * Similar themes for the detail screen's bottom rail (Slice S8):
+ * GET /themes/:slug/similar — the web's similar-themes read (themes
+ * sharing the anime, artist, mood or first-entry tags; most-rated
+ * first, cap 20). FIXTURE MODE resolves [] — the bundled snapshot
+ * cannot answer similarity honestly, so the rail hides, exactly as
+ * it does for an empty or failed live read (the caller swallows
+ * errors into the same empty state).
+ */
+export async function fetchSimilarThemes(
+  slug: string,
+): Promise<ThemeSummary[]> {
+  if (fixtureMode) return [];
+  const res = await getJson<SimilarThemesResponse>(
+    `/themes/${encodeURIComponent(slug)}/similar`,
+  );
+  return res.themes;
+}
+
+/**
+ * Record a watch/listen (Slice M1): POST /library/history, which writes
+ * the caller's history row AND moves the theme/user counters with the
+ * web's hook parity. Deliberately narrow about when it fires — the
+ * player calls it once playback genuinely starts, and only for a real
+ * signed-in session against the real API: fixture mode resolves
+ * silently (fixture themes are not real catalogue rows) and a
+ * signed-out caller has nobody to record against (the endpoint is
+ * Bearer-guarded anyway). Failures reject — the player treats history
+ * as fire-and-forget and swallows them.
+ */
+export async function recordWatch(body: RecordWatchRequest): Promise<void> {
+  if (fixtureMode) return;
+  if (!getAccessToken()) return;
+  const res = await apiFetch('/library/history', { method: 'POST', body });
+  if (!res.ok) {
+    throw new Error(`API /library/history answered ${res.status}`);
+  }
 }

@@ -12,6 +12,7 @@ import { useRouter } from 'expo-router';
 import { ChevronLeft, Search, X } from 'lucide-react-native';
 import type { ThemeSummary } from '@kaikansen/contracts';
 import { searchThemes } from '../../src/api';
+import { useFavorites } from '../../src/favoritesStore';
 import { ThemeRow } from '../../src/components/ThemeRow';
 import { radii, spacing, typeStyles, type Theme } from '../../src/theme';
 import { useTheme } from '../../src/theme-context';
@@ -35,6 +36,7 @@ export default function SearchScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
+  const favorites = useFavorites();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<ThemeSummary[] | null>(null);
   const [searching, setSearching] = useState(false);
@@ -122,11 +124,23 @@ export default function SearchScreen() {
             keyboardShouldPersistTaps="handled"
           >
             <Text style={styles.groupHeading}>Themes</Text>
+            {favorites.lastError && (
+              <Pressable
+                onPress={favorites.clearError}
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss"
+              >
+                <Text style={styles.saveError}>{favorites.lastError}</Text>
+              </Pressable>
+            )}
             {results.map((item) => (
               <ThemeRow
                 key={item.slug}
                 item={item}
                 onPress={() => router.push(`/theme/${item.slug}`)}
+                saved={favorites.isFavorite(item.slug)}
+                savePending={favorites.isPending(item.slug)}
+                onToggleSave={() => void favorites.toggle(item.slug)}
               />
             ))}
           </ScrollView>
@@ -217,6 +231,12 @@ const createStyles = (theme: Theme) =>
     ...typeStyles.heading,
     color: theme.text,
     marginTop: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  saveError: {
+    ...typeStyles.bodySmall,
+    color: theme.accent,
+    lineHeight: 18,
     marginBottom: spacing.sm,
   },
 });

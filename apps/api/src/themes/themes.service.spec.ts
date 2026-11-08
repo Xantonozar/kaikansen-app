@@ -3,6 +3,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import type { Model } from 'mongoose';
+import type { AnimeCacheDocument } from '../sync/anime-cache.schema';
 import type { ThemeCacheDocument } from './theme-cache.schema';
 import { ThemesService } from './themes.service';
 
@@ -86,6 +87,18 @@ describe('ThemesService — no database configured', () => {
 
   it('search answers 503', async () => {
     await expect(service.search('test')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('getSimilarThemes answers 503', async () => {
+    await expect(service.getSimilarThemes('x')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('getRelatedAnime answers 503', async () => {
+    await expect(service.getRelatedAnime('42')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
   });
@@ -370,5 +383,195 @@ describe('ThemesService.search', () => {
     });
     expect(find).not.toHaveBeenCalled();
     expect(countDocuments).not.toHaveBeenCalled();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Slice S8 — similar themes + related anime                           */
+/* ------------------------------------------------------------------ */
+
+describe('ThemesService.getSimilarThemes', () => {
+  it('404s for an unknown slug', async () => {
+    const findOne = jest.fn(() => queryOf(null));
+    const service = serviceWith({ findOne });
+
+    const error = await service
+      .getSimilarThemes('nope')
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NotFoundException);
+    expect((error as NotFoundException).getResponse()).toMatchObject({
+      statusCode: 404,
+      message: 'Theme not found: nope',
+    });
+  });
+
+  it('queries the web’s $or (anime / artist / mood / first-entry tags), web order, cap 20', async () => {
+    const source = makeDoc({
+      slug: 'source-theme',
+      animeTitle: 'Source Anime',
+      artistName: 'Source Artist',
+      mood: ['epic', 'calm'],
+      entries: [{ tags: ['NC', 'BD'] }, { tags: ['Lyrics'] }],
+    });
+    const hit = makeDoc({ slug: 'similar-hit' });
+    const findOne = jest.fn(() => queryOf(source));
+    const findQuery = queryOf([hit]);
+    const find = jest.fn((_filter: Record<string, unknown>) => findQuery);
+    const service = serviceWith({ findOne, find });
+
+    const res = await service.getSimilarThemes('source-theme');
+
+    expect(find).toHaveBeenCalledTimes(1);
+    const filter = find.mock.calls[0][0] as {
+      $and: [Record<string, unknown>, { $or: Record<string, unknown>[] }];
+    };
+    // Excludes itself, then the web's four-way $or.
+    expect(filter.$and[0]).toEqual({ slug: { $ne: 'source-theme' } });
+    expect(filter.$and[1].$or).toEqual([
+      { animeTitle: 'Source Anime' },
+      { artistName: 'Source Artist' },
+      { mood: { $in: ['epic', 'calm'] } },
+      // Tags come from the FIRST entry only (the web's entries[0]).
+      { entries: { $elemMatch: { tags: { $in: ['NC', 'BD'] } } } },
+    ]);
+    // Web order + cap.
+    expect(findQuery.sort).toHaveBeenCalledWith({
+      totalRatings: -1,
+      avgRating: -1,
+    });
+    expect(findQuery.limit).toHaveBeenCalledWith(20);
+
+    // Projected summaries: no detail-only fields leak in.
+    expect(res.themes.map((t) => t.slug)).toEqual(['similar-hit']);
+    expect(res.themes[0]).not.toHaveProperty('entries');
+    expect(res.themes[0]).not.toHaveProperty('embedding');
+  });
+
+  it('an entry-less theme queries with an empty tag list (web quirk)', async () => {
+    const source = makeDoc({ slug: 'bare-theme', entries: [], mood: [] });
+    const findOne = jest.fn(() => queryOf(source));
+    const find = jest.fn((_filter: Record<string, unknown>) => queryOf([]));
+    const service = serviceWith({ findOne, find });
+
+    await service.getSimilarThemes('bare-theme');
+
+    const filter = find.mock.calls[0][0] as {
+      $and: [unknown, { $or: Record<string, unknown>[] }];
+    };
+    expect(filter.$and[1].$or[2]).toEqual({ mood: { $in: [] } });
+    expect(filter.$and[1].$or[3]).toEqual({
+      entries: { $elemMatch: { tags: { $in: [] } } },
+    });
+  });
+});
+
+function makeAnimeDoc(overrides: Record<string, unknown> = {}) {
+  return {
+    _id: 'anime-1',
+    anilistId: 42,
+    malId: 4001,
+    kitsuId: null,
+    titleRomaji: 'Series Anime',
+    titleEnglish: 'Series Anime EN',
+    titleNative: null,
+    titleAlternative: [],
+    synonyms: [],
+    season: 'SPRING',
+    seasonYear: 2020,
+    genres: ['Action'],
+    coverImageLarge: 'https://example.com/large.jpg',
+    coverImageMedium: 'https://example.com/medium.jpg',
+    bannerImage: null,
+    atCoverImage: null,
+    atGrillImage: null,
+    studios: ['Studio Test'],
+    series: ['Series'],
+    totalEpisodes: 12,
+    status: 'FINISHED',
+    averageScore: 80,
+    syncedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function serviceWithAnime(animeModel: unknown): ThemesService {
+  return new ThemesService(
+    undefined,
+    animeModel as Model<AnimeCacheDocument>,
+  );
+}
+
+describe('ThemesService.getRelatedAnime', () => {
+  it('404s with the web’s message for an unknown id', async () => {
+    const findOne = jest.fn(() => queryOf(null));
+    const service = serviceWithAnime({ findOne });
+
+    const error = await service
+      .getRelatedAnime('999')
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NotFoundException);
+    expect((error as NotFoundException).getResponse()).toMatchObject({
+      statusCode: 404,
+      message: 'Anime not found',
+    });
+    expect(findOne).toHaveBeenCalledWith({ anilistId: 999 });
+  });
+
+  it('parses the id the web way: parseInt (a non-numeric id matches nothing)', async () => {
+    const findOne = jest.fn(() => queryOf(null));
+    const service = serviceWithAnime({ findOne });
+
+    await service.getRelatedAnime('not-a-number').catch(() => undefined);
+    expect(findOne).toHaveBeenCalledWith({ anilistId: NaN });
+  });
+
+  it('answers an empty list when the anime has no series recorded', async () => {
+    const findOne = jest.fn(() => queryOf(makeAnimeDoc({ series: [] })));
+    const find = jest.fn(() => queryOf([]));
+    const service = serviceWithAnime({ findOne, find });
+
+    await expect(service.getRelatedAnime('42')).resolves.toEqual({
+      related: [],
+    });
+    expect(find).not.toHaveBeenCalled();
+  });
+
+  it('finds the other series members, chronological, cap 10, projected', async () => {
+    const findOne = jest.fn(() => queryOf(makeAnimeDoc()));
+    const findQuery = queryOf([
+      makeAnimeDoc({
+        _id: 'anime-2',
+        anilistId: 43,
+        titleRomaji: 'Series Anime S2',
+        seasonYear: 2022,
+      }),
+    ]);
+    const find = jest.fn((_filter: Record<string, unknown>) => findQuery);
+    const service = serviceWithAnime({ findOne, find });
+
+    const res = await service.getRelatedAnime('42');
+
+    const filter = find.mock.calls[0][0] as Record<string, unknown>;
+    expect(filter).toEqual({
+      $and: [
+        { anilistId: { $ne: 42 } },
+        { series: { $in: ['Series'] } },
+      ],
+    });
+    expect(findQuery.sort).toHaveBeenCalledWith({ seasonYear: 1 });
+    expect(findQuery.limit).toHaveBeenCalledWith(10);
+
+    expect(res.related).toHaveLength(1);
+    expect(res.related[0]).toMatchObject({
+      anilistId: 43,
+      titleRomaji: 'Series Anime S2',
+      season: 'SPRING',
+      seasonYear: 2022,
+      series: ['Series'],
+    });
+    // Projection: bookkeeping fields stay server-side.
+    expect(res.related[0]).not.toHaveProperty('syncedAt');
+    expect(res.related[0]).not.toHaveProperty('synonyms');
+    expect(res.related[0]).not.toHaveProperty('atCoverImage');
   });
 });

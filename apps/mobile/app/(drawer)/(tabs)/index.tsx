@@ -11,6 +11,7 @@ import { useRouter } from 'expo-router';
 import { Shuffle } from 'lucide-react-native';
 import type { HomeResponse, ThemeType } from '@kaikansen/contracts';
 import { fetchHome, fixtureMode } from '../../../src/api';
+import { useFavorites } from '../../../src/favoritesStore';
 import { PosterCard } from '../../../src/components/PosterCard';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import { radii, spacing, typeStyles, type Theme } from '../../../src/theme';
@@ -33,6 +34,7 @@ export default function HomeScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
+  const favorites = useFavorites();
   const [home, setHome] = useState<HomeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -110,6 +112,15 @@ export default function HomeScreen() {
             Fixture mode — showing the bundled catalogue snapshot (no API URL
             configured).
           </Text>
+        )}
+        {favorites.lastError && (
+          <Pressable
+            onPress={favorites.clearError}
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss"
+          >
+            <Text style={styles.saveError}>{favorites.lastError}</Text>
+          </Pressable>
         )}
 
         {/* Season poster rail */}
@@ -202,6 +213,9 @@ export default function HomeScreen() {
               key={item.slug}
               item={item}
               onPress={() => openTheme(item.slug)}
+              saved={favorites.isFavorite(item.slug)}
+              savePending={favorites.isPending(item.slug)}
+              onToggleSave={() => void favorites.toggle(item.slug)}
             />
           ))}
           {popular.length === 0 && (
@@ -270,6 +284,13 @@ const createStyles = (theme: Theme) =>
     color: theme.muted,
     paddingHorizontal: spacing.screenEdge,
     paddingTop: spacing.md,
+  },
+  saveError: {
+    ...typeStyles.bodySmall,
+    color: theme.accent,
+    paddingHorizontal: spacing.screenEdge,
+    paddingTop: spacing.md,
+    lineHeight: 18,
   },
   sectionHeader: {
     paddingHorizontal: spacing.screenEdge,

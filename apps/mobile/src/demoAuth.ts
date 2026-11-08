@@ -2,6 +2,7 @@ import type {
   AuthResponse,
   LoginRequest,
   RegisterRequest,
+  UpdateProfileRequest,
   UserProfile,
 } from '@kaikansen/contracts';
 import { plainStorage } from './storage';
@@ -69,6 +70,7 @@ export async function demoRegister(
     totalFollowers: 0,
     totalFollowing: 0,
     isPublic: true,
+    anilist: null,
   };
   const account: DemoAccount = {
     username,
@@ -97,4 +99,38 @@ export async function demoLogin(input: LoginRequest): Promise<AuthResponse> {
 export async function demoProfile(): Promise<UserProfile | null> {
   const account = await loadAccount();
   return account?.profile ?? null;
+}
+
+/**
+ * Demo profile edit (Slice M5) — the fixture-mode PATCH /auth/me:
+ * a partial update of the stored demo profile with the web's field
+ * rules (displayName 1–50 chars, bio up to 200, avatarUrl a URL or
+ * null to clear; omitted fields keep their values). Resolves the
+ * full updated profile, like the real endpoint.
+ */
+export async function demoUpdateProfile(
+  input: UpdateProfileRequest,
+): Promise<UserProfile> {
+  const account = await loadAccount();
+  if (!account) throw new Error('Log in to edit your profile.');
+  const profile = { ...account.profile };
+  if (input.displayName !== undefined) {
+    const name = input.displayName;
+    if (name.length < 1 || name.length > 50) {
+      throw new Error('Display name must be between 1 and 50 characters.');
+    }
+    profile.displayName = name;
+  }
+  if (input.bio !== undefined) {
+    if (input.bio.length > 200) {
+      throw new Error('Bio must be at most 200 characters.');
+    }
+    profile.bio = input.bio;
+  }
+  if (input.avatarUrl !== undefined) {
+    profile.avatarUrl = input.avatarUrl;
+  }
+  account.profile = profile;
+  await plainStorage.set(ACCOUNT_KEY, JSON.stringify(account));
+  return profile;
 }

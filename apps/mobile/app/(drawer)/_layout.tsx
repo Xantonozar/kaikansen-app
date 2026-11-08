@@ -33,6 +33,22 @@ export default function DrawerLayout() {
         name="theme/[slug]"
         options={{ drawerItemStyle: { display: 'none' } }}
       />
+      <Drawer.Screen name="player" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen name="quiz/solo" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen name="quiz/lobby" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen name="quiz/room" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen
+        name="playlist/[id]"
+        options={{ drawerItemStyle: { display: 'none' } }}
+      />
+      <Drawer.Screen
+        name="user/[username]"
+        options={{ drawerItemStyle: { display: 'none' } }}
+      />
+      <Drawer.Screen
+        name="notifications"
+        options={{ drawerItemStyle: { display: 'none' } }}
+      />
     </Drawer>
   );
 }

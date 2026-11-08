@@ -1,12 +1,17 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useNavigation, useRouter } from 'expo-router';
+import { useNavigation, usePathname, useRouter } from 'expo-router';
 import { DrawerActions } from '@react-navigation/native';
 import { Bell, Menu, Search, User } from 'lucide-react-native';
 import { shell, spacing, typeStyles, withOpacity, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
 import { useAuth } from '../auth';
+import { Avatar } from './Avatar';
+import {
+  refreshUnreadCount,
+  useUnreadNotifications,
+} from '../notificationsStore';
 
 /**
  * App shell header (DESIGN.md §5): 64px, translucent, centred "Kaikansen"
@@ -15,8 +20,10 @@ import { useAuth } from '../auth';
  * hamburger (opens the drawer sidebar — the header renders inside the
  * tab navigator, which is nested in the drawer, and the OPEN_DRAWER
  * action bubbles up to it) + avatar. Right: Search (opens the Search
- * screen) and Bell (still a visual placeholder — notifications are
- * not part of the prototype).
+ * screen) and, signed in, the notifications Bell (Slice M5 — a real
+ * button to the notifications screen, badged with the unread count
+ * from the shared notifications store). Signed out the bell is not
+ * rendered at all: there is nobody to notify.
  *
  * The avatar is the auth entry point (Slice 2): signed out it shows the
  * User glyph and taps through to Login; signed in it shows the user's
@@ -29,9 +36,18 @@ export function AppHeader() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const navigation = useNavigation();
+  const pathname = usePathname();
   const { status, user } = useAuth();
+  const unread = useUnreadNotifications();
 
   const signedIn = status === 'signedIn' && user !== null;
+
+  /* Badge freshness: on mount, on sign-in, and whenever the route
+     changes (returning from the notifications screen included — the
+     screen also keeps the count exact itself as it marks rows). */
+  useEffect(() => {
+    if (signedIn) void refreshUnreadCount();
+  }, [signedIn, pathname]);
 
   return (
     <View
@@ -57,15 +73,17 @@ export function AppHeader() {
           accessibilityLabel={signedIn ? 'Open settings' : 'Log in'}
           style={styles.iconButton}
         >
-          <View style={[styles.avatar, signedIn && styles.avatarSignedIn]}>
-            {signedIn ? (
-              <Text style={styles.avatarInitial}>
-                {(user.displayName || user.username).charAt(0).toUpperCase()}
-              </Text>
-            ) : (
+          {signedIn ? (
+            <Avatar
+              url={user.avatarUrl}
+              name={user.displayName || user.username}
+              size={32}
+            />
+          ) : (
+            <View style={styles.avatar}>
               <User size={16} color={theme.muted} strokeWidth={2} />
-            )}
-          </View>
+            </View>
+          )}
         </Pressable>
       </View>
 
@@ -81,9 +99,28 @@ export function AppHeader() {
         >
           <Search size={20} color={theme.text} strokeWidth={2} />
         </Pressable>
-        <View style={styles.iconButton} accessibilityLabel="Notifications">
-          <Bell size={20} color={theme.text} strokeWidth={2} />
-        </View>
+        {signedIn && (
+          <Pressable
+            onPress={() => router.push('/notifications')}
+            hitSlop={4}
+            accessibilityRole="button"
+            accessibilityLabel={
+              unread > 0
+                ? `Notifications, ${unread} unread`
+                : 'Notifications'
+            }
+            style={styles.iconButton}
+          >
+            <Bell size={20} color={theme.text} strokeWidth={2} />
+            {unread > 0 && (
+              <View style={styles.badge}>
+                <Text style={styles.badgeText}>
+                  {unread > 99 ? '99+' : unread}
+                </Text>
+              </View>
+            )}
+          </Pressable>
+        )}
       </View>
     </View>
   );
@@ -115,6 +152,23 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
     },
+    badge: {
+      position: 'absolute',
+      top: 4,
+      right: 0,
+      minWidth: 17,
+      height: 17,
+      borderRadius: 9,
+      paddingHorizontal: 4,
+      backgroundColor: theme.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    badgeText: {
+      fontSize: 10,
+      fontFamily: 'Inter_600SemiBold',
+      color: theme.onAccent,
+    },
     avatar: {
       width: 32,
       height: 32,
@@ -122,13 +176,6 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.raised,
       alignItems: 'center',
       justifyContent: 'center',
-    },
-    avatarSignedIn: {
-      backgroundColor: theme.accentContainer,
-    },
-    avatarInitial: {
-      ...typeStyles.body,
-      color: theme.onAccentContainer,
     },
     wordmark: {
       ...typeStyles.wordmark,

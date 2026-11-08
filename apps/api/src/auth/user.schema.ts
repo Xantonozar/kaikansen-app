@@ -9,16 +9,20 @@ import { HydratedDocument } from 'mongoose';
  * 2026-11-07 database inspection verified on production documents:
  * username, displayName, email, passwordHash, avatarUrl, bio,
  * totalRatings, totalFollowers, totalFollowing, isPublic + timestamps.
+ * (`totalTime` is declared on the web schema too; the sampled document
+ * predates it. It is modelled here because the watch-history write
+ * path increments it — see library/watch-history.schema.ts.)
  *
  * Deliberate differences from the web schema:
  * - `passwordHash` is `select: false` (the web queries it with
  *   `.select('+passwordHash')` on login — same behaviour here).
  * - `autoIndex: false` and NO cross-model middleware hooks: the web
  *   maintains denormalised counters (totalFollowers etc. on follow /
- *   unfollow etc.) through hooks in other models' operations. Porting
- *   that counter maintenance is v1 work; these slices only ever create
- *   a user (counters start at 0, exactly as on web registration) and
- *   read profiles back.
+ *   unfollow etc.) through hooks in other models' operations. Auth
+ *   itself only ever creates a user (counters start at 0, exactly as
+ *   on web registration) and reads profiles back; the counter
+ *   maintenance for ratings and watch history lives in the library
+ *   module's service layer (Slice S1), ported hook-for-hook.
  *
  * The `anilist` sub-document below IS modelled (AniList login slice),
  * field-for-field as the web declares it — including
@@ -83,6 +87,15 @@ export class User {
 
   @Prop({ type: Number, default: 0 })
   totalFollowing: number;
+
+  /**
+   * Cumulative seconds watched/listened, maintained by the
+   * watch-history write path (the web's WatchHistory post-save hook
+   * $incs it by the played entry's duration). Not exposed on
+   * UserProfile — the web's /api/users/me does not return it either.
+   */
+  @Prop({ type: Number, default: 0 })
+  totalTime: number;
 
   @Prop({ type: Boolean, default: true })
   isPublic: boolean;

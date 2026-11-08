@@ -24,6 +24,7 @@ import type {
   LoginRequest,
   RefreshRequest,
   RegisterRequest,
+  UpdateProfileRequest,
   UserProfile,
 } from '@kaikansen/contracts';
 import {
@@ -167,6 +168,18 @@ export class AuthService {
       totalFollowers: user.totalFollowers,
       totalFollowing: user.totalFollowing,
       isPublic: user.isPublic,
+      // The web /api/users/me shape, verbatim: the linkage is exposed
+      // only when an AniList user id is actually stored, and the stored
+      // access token NEVER leaves the API. This is what lets the app
+      // persist "AniList linked" across restarts instead of holding it
+      // in session-local state.
+      anilist:
+        user.anilist && user.anilist.userId
+          ? {
+              userId: user.anilist.userId,
+              username: user.anilist.username as string,
+            }
+          : null,
     };
   }
 
@@ -286,6 +299,39 @@ export class AuthService {
   async me(userId: string): Promise<UserProfile> {
     const model = this.requireModel();
     const user = await model.findById(userId).exec();
+    if (!user) {
+      throw new UnauthorizedException('Account no longer exists');
+    }
+    return this.toProfile(user);
+  }
+
+  /**
+   * PATCH /auth/me — the web's PATCH /api/users/me (this API's /auth/me
+   * is where the web's /api/users/me GET already lives, so the edit
+   * hangs off the same path): validate the WHOLE body first (the web's
+   * zod schema — see parseProfileUpdate, whose messages are zod v4's
+   * first-issue texts, verified against the web's zod), then write
+   * ONCE with a $set of exactly the provided fields. Omitted fields
+   * keep their stored values; unknown fields are ignored, as the
+   * web's parser strips them. A body with no editable fields answers
+   * the current profile, like the web's empty-$set update.
+   *
+   * Not-found follows THIS API's /auth/me convention (401 'Account no
+   * longer exists' — see me()) rather than the web route's 404, so
+   * the paired read/edit endpoints answer consistently.
+   */
+  async updateProfile(
+    userId: string,
+    dto: UpdateProfileRequest,
+  ): Promise<UserProfile> {
+    const model = this.requireModel();
+    const updates = parseProfileUpdate(dto);
+    if (Object.keys(updates).length === 0) {
+      return this.me(userId);
+    }
+    const user = await model
+      .findByIdAndUpdate(userId, { $set: updates }, { new: true })
+      .exec();
     if (!user) {
       throw new UnauthorizedException('Account no longer exists');
     }
@@ -600,4 +646,107 @@ export class AuthService {
       anilist: { userId: viewer.id, username: viewer.name },
     };
   }
+}
+
+/** The `received` word zod v4 puts in its invalid-type messages. */
+function zodReceived(value: unknown): string {
+  if (value === null) {
+    return 'null';
+  }
+  if (Array.isArray(value)) {
+    return 'array';
+  }
+  return typeof value;
+}
+
+/**
+ * The web's profile-edit schema (app/api/users/me/route.ts), ported
+ * check for check:
+ *   displayName: string, 1–50 chars, optional
+ *   bio:         string, ≤200 chars, optional
+ *   avatarUrl:   string holding a valid URL, optional AND nullable
+ * The web answers 400 with the FIRST zod issue's message; zod
+ * evaluates fields in shape order (displayName, bio, avatarUrl), so
+ * the checks run in that order here and the first failure throws —
+ * before anything is written, so a bad field can never leave a
+ * partial update behind. Message texts are zod v4's defaults,
+ * verified against the web's zod (^4.3.6). Unknown fields are
+ * ignored (zod strips them), and a field explicitly sent as
+ * undefined counts as omitted, exactly as it parses there.
+ *
+ * Returns the $set-ready update: only the provided fields.
+ */
+function parseProfileUpdate(dto: UpdateProfileRequest): {
+  displayName?: string;
+  bio?: string;
+  avatarUrl?: string | null;
+} {
+  const body: unknown = dto;
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new BadRequestException(
+      `Invalid input: expected object, received ${zodReceived(body)}`,
+    );
+  }
+  const raw = body as Record<string, unknown>;
+  const updates: {
+    displayName?: string;
+    bio?: string;
+    avatarUrl?: string | null;
+  } = {};
+
+  if (raw.displayName !== undefined) {
+    const value = raw.displayName;
+    if (typeof value !== 'string') {
+      throw new BadRequestException(
+        `Invalid input: expected string, received ${zodReceived(value)}`,
+      );
+    }
+    if (value.length < 1) {
+      throw new BadRequestException(
+        'Too small: expected string to have >=1 characters',
+      );
+    }
+    if (value.length > 50) {
+      throw new BadRequestException(
+        'Too big: expected string to have <=50 characters',
+      );
+    }
+    updates.displayName = value;
+  }
+
+  if (raw.bio !== undefined) {
+    const value = raw.bio;
+    if (typeof value !== 'string') {
+      throw new BadRequestException(
+        `Invalid input: expected string, received ${zodReceived(value)}`,
+      );
+    }
+    if (value.length > 200) {
+      throw new BadRequestException(
+        'Too big: expected string to have <=200 characters',
+      );
+    }
+    updates.bio = value;
+  }
+
+  if (raw.avatarUrl !== undefined) {
+    const value = raw.avatarUrl;
+    if (value !== null) {
+      if (typeof value !== 'string') {
+        throw new BadRequestException(
+          `Invalid input: expected string, received ${zodReceived(value)}`,
+        );
+      }
+      try {
+        // zod v4's .url() delegates to the WHATWG URL parser — the
+        // same check, so the same strings pass and fail.
+        new URL(value);
+      } catch {
+        throw new BadRequestException('Invalid URL');
+      }
+    }
+    updates.avatarUrl = value as string | null;
+  }
+
+  return updates;
 }

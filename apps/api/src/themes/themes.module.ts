@@ -1,5 +1,9 @@
 import { type DynamicModule, Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import {
+  AnimeCache,
+  AnimeCacheSchema,
+} from '../sync/anime-cache.schema';
 import { ThemeCache, ThemeCacheSchema } from './theme-cache.schema';
 import { ThemesController } from './themes.controller';
 import { ThemesService } from './themes.service';
@@ -9,6 +13,11 @@ import { ThemesService } from './themes.service';
  * WITH a database (see AppModule): without MONGODB_URI there is no
  * connection for the model to attach to, so the module registers the
  * controller + service alone and the service answers 503.
+ *
+ * AnimeCache is registered here a second time (SyncModule has it
+ * too) for the related-anime read — safe per the established
+ * precedent: @nestjs/mongoose reuses the already-compiled model
+ * for a name on the same connection.
  */
 @Module({})
 export class ThemesModule {
@@ -19,6 +28,7 @@ export class ThemesModule {
         ? [
             MongooseModule.forFeature([
               { name: ThemeCache.name, schema: ThemeCacheSchema },
+              { name: AnimeCache.name, schema: AnimeCacheSchema },
             ]),
           ]
         : [],

@@ -1,10 +1,11 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -14,10 +15,12 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Image as ImageIcon,
   Link2,
   LogOut,
   Mail,
   Moon,
+  Pencil,
   Sun,
   User,
 } from 'lucide-react-native';
@@ -30,15 +33,19 @@ import {
 } from '../../src/theme';
 import { useTheme, useThemeMode, type ThemeMode } from '../../src/theme-context';
 import { useAuth } from '../../src/auth';
+import { Avatar } from '../../src/components/Avatar';
 import { useAnilistLink } from '../../src/hooks/useAnilistLink';
+import { updateMyProfile } from '../../src/socialApi';
 import { CONTENT_MAX_WIDTH } from '../../src/layout';
 
 /**
- * Settings (DESIGN.md §6.27): account summary, the AniList link
+ * Settings (DESIGN.md §6.27): account summary, the Edit profile card
+ * (§6.28, Slice M5 — PATCH /auth/me; the response replaces the
+ * session profile, so the account rows above, the header and the
+ * drawer all reflect the save immediately), the AniList link
  * action, the Theme selection (Dark default / Light — the Gate 4
  * decision, wired here in Slice 2), and sign-out. Reached from the
  * header avatar when signed in.
- * (Profile editing is §6.28 — a later slice, not this one.)
  *
  * Compact/icon-led chrome (approved mockup v1): a tile back button,
  * small muted section labels, and every row led by an icon slot —
@@ -53,13 +60,58 @@ export default function SettingsScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const { mode, setMode } = useThemeMode();
-  const { status, user, demoMode, logout } = useAuth();
+  const { status, user, demoMode, logout, updateUser } = useAuth();
   // The link action itself (busy state, note/error wording, the
   // fixture-mode placeholder) is shared with the drawer — see
   // src/hooks/useAnilistLink.ts.
   const { anilistUsername, linkBusy, linkNote, linkError, startLink } =
     useAnilistLink();
   const router = useRouter();
+
+  /* Edit profile (Slice M5) — fields prefill from the session
+     profile; the session user's id changing (sign in/out) re-seeds
+     them, an ordinary save does not (its values are already here). */
+  const [editName, setEditName] = useState('');
+  const [editBio, setEditBio] = useState('');
+  const [editAvatar, setEditAvatar] = useState('');
+  const [editBusy, setEditBusy] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editSaved, setEditSaved] = useState(false);
+  const userId = user?.id;
+  useEffect(() => {
+    if (user) {
+      setEditName(user.displayName);
+      setEditBio(user.bio);
+      setEditAvatar(user.avatarUrl ?? '');
+      setEditError(null);
+      setEditSaved(false);
+    }
+    // Re-seed only when the signed-in account changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+
+  const onSaveProfile = () => {
+    if (editBusy) return;
+    setEditBusy(true);
+    setEditError(null);
+    setEditSaved(false);
+    const avatar = editAvatar.trim();
+    updateMyProfile({
+      displayName: editName,
+      bio: editBio,
+      avatarUrl: avatar.length > 0 ? avatar : null,
+    })
+      .then((updated) => {
+        updateUser(updated);
+        setEditSaved(true);
+      })
+      .catch((e: unknown) =>
+        setEditError(
+          e instanceof Error ? e.message : 'Could not save your profile.',
+        ),
+      )
+      .finally(() => setEditBusy(false));
+  };
 
   const onLinkAnilist = () => void startLink();
 
@@ -145,6 +197,83 @@ export default function SettingsScreen() {
                 Demo account — stored only on this device.
               </Text>
             )}
+
+            <Text style={styles.sectionLabel}>Edit profile</Text>
+            <View style={styles.card}>
+              <View style={styles.editPreview}>
+                <Avatar
+                  url={editAvatar.trim().length > 0 ? editAvatar.trim() : null}
+                  name={editName || user.username}
+                  size={44}
+                />
+                <Text style={styles.editPreviewText}>
+                  This is how your profile appears to others.
+                </Text>
+              </View>
+              <View style={styles.field}>
+                {iconSlot(User)}
+                <TextInput
+                  style={styles.input}
+                  value={editName}
+                  onChangeText={setEditName}
+                  placeholder="Display name"
+                  placeholderTextColor={theme.muted}
+                  maxLength={60}
+                  accessibilityLabel="Display name"
+                />
+              </View>
+              <View style={styles.field}>
+                {iconSlot(Pencil)}
+                <TextInput
+                  style={[styles.input, styles.inputMultiline]}
+                  value={editBio}
+                  onChangeText={setEditBio}
+                  placeholder="Bio"
+                  placeholderTextColor={theme.muted}
+                  multiline
+                  maxLength={240}
+                  accessibilityLabel="Bio"
+                />
+              </View>
+              <Text style={styles.counter}>{editBio.length}/200</Text>
+              <View style={styles.field}>
+                {iconSlot(ImageIcon)}
+                <TextInput
+                  style={styles.input}
+                  value={editAvatar}
+                  onChangeText={setEditAvatar}
+                  placeholder="Avatar URL (empty clears it)"
+                  placeholderTextColor={theme.muted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="url"
+                  accessibilityLabel="Avatar URL"
+                />
+              </View>
+              <Pressable
+                onPress={onSaveProfile}
+                disabled={editBusy}
+                style={({ pressed }) => [
+                  styles.saveButton,
+                  pressed && styles.pressed,
+                  editBusy && styles.saveButtonBusy,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Save profile"
+              >
+                {editBusy ? (
+                  <ActivityIndicator size="small" color={theme.onAccent} />
+                ) : (
+                  <Text style={styles.saveButtonText}>Save changes</Text>
+                )}
+              </Pressable>
+              {editSaved && (
+                <Text style={styles.savedNote}>Profile saved.</Text>
+              )}
+              {editError !== null && (
+                <Text style={styles.error}>{editError}</Text>
+              )}
+            </View>
           </>
         ) : (
           <>
@@ -322,6 +451,74 @@ const createStyles = (theme: Theme) =>
     divider: {
       height: StyleSheet.hairlineWidth,
       backgroundColor: theme.border,
+    },
+    editPreview: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      paddingVertical: spacing.md,
+    },
+    editPreviewText: {
+      ...typeStyles.caption,
+      color: theme.muted,
+      flex: 1,
+      lineHeight: 16,
+    },
+    field: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: theme.background,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.base,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: spacing.xs,
+      marginBottom: spacing.sm,
+    },
+    input: {
+      flex: 1,
+      ...typeStyles.body,
+      color: theme.text,
+      minHeight: 40,
+      paddingVertical: 0,
+    },
+    inputMultiline: {
+      maxHeight: 84,
+      paddingVertical: spacing.sm,
+      textAlignVertical: 'top',
+    },
+    counter: {
+      ...typeStyles.caption,
+      color: theme.muted,
+      textAlign: 'right',
+      marginTop: -spacing.xs,
+      marginBottom: spacing.sm,
+    },
+    saveButton: {
+      backgroundColor: theme.accent,
+      borderRadius: radii.base,
+      minHeight: 46,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginTop: spacing.xs,
+      marginBottom: spacing.md,
+    },
+    saveButtonBusy: {
+      opacity: 0.6,
+    },
+    saveButtonText: {
+      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.onAccent,
+    },
+    savedNote: {
+      ...typeStyles.bodySmall,
+      color: theme.onAccentContainer,
+      marginBottom: spacing.md,
+    },
+    pressed: {
+      opacity: 0.85,
     },
     note: {
       ...typeStyles.caption,
