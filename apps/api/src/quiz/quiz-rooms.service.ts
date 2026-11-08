@@ -24,6 +24,7 @@ import {
   ThemeCache,
   type ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
+import { resolveAudioUrl } from '../themes/audio-url';
 import { QuizRoom, type QuizRoomDocument } from './quiz-room.schema';
 import {
   buildRoundOptions,
@@ -1278,7 +1279,11 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
   private buildMediaCandidates(theme: RoomThemeDoc): string[] {
     const direct = [
       theme.videoUrl,
-      theme.audioUrl,
+      // The audio candidate: stored audioUrl, else the derived .ogg
+      // twin of the theme's video (audio-url.ts) — most catalogue
+      // themes store no audioUrl, so without derivation the listen
+      // candidate behind the artwork would never exist.
+      resolveAudioUrl(theme.audioUrl, theme.videoUrl),
       ...(Array.isArray(theme.entries)
         ? theme.entries.flatMap((entry) =>
             Array.isArray(entry?.videoSources)

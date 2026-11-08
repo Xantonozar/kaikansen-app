@@ -339,6 +339,29 @@ function makeFakeModels() {
       anilistId: 42,
       animeSeasonYear: 2023,
     }),
+    makeTheme({
+      _id: 't-derived',
+      slug: 'derived-op',
+      songTitle: 'Derived Song',
+      animeTitle: 'Derived Anime',
+      artistName: 'Derived Artist',
+      videoUrl: 'https://v.animethemes.moe/DerivedAnime-OP1.webm',
+      audioUrl: null,
+      entries: [
+        {
+          atEntryId: 9,
+          version: 'v1',
+          episodes: null,
+          spoiler: false,
+          nsfw: false,
+          tags: [],
+          videoSources: [],
+          videoUrl: 'https://v.animethemes.moe/DerivedAnime-OP1.webm',
+          audioUrl: null,
+          duration: 90,
+        },
+      ],
+    }),
   ];
 
   const anime: Doc[] = [
@@ -545,6 +568,22 @@ describe('Residual reads with mocked models (e2e)', () => {
     await app.close();
     delete process.env.JWT_SECRET;
     delete process.env.JWT_REFRESH_SECRET;
+  });
+
+  it('GET /themes/:slug — a null audioUrl is served as the derived .ogg twin', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/themes/derived-op')
+      .expect(200);
+    expect(res.body.audioUrl).toBe(
+      'https://a.animethemes.moe/DerivedAnime-OP1.ogg',
+    );
+    expect(res.body.entries[0].audioUrl).toBe(
+      'https://a.animethemes.moe/DerivedAnime-OP1.ogg',
+    );
+    // The stored video side is untouched by the derivation.
+    expect(res.body.videoUrl).toBe(
+      'https://v.animethemes.moe/DerivedAnime-OP1.webm',
+    );
   });
 
   it('GET /themes/:slug/similar — matches anime/artist/mood, web order, self excluded', async () => {

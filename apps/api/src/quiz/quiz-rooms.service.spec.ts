@@ -502,6 +502,29 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect(doc.timerAuthority).toBeTruthy();
   });
 
+  it('round media candidates carry the derived .ogg when the theme stores no audio', async () => {
+    const m = makeFakeModels();
+    // The catalogue's common case: audioUrl null, AnimeThemes video.
+    const correct = m.themeModel.docs.find((t) => t._id === 'theme-correct')!;
+    correct.audioUrl = null;
+    correct.videoUrl = 'https://v.animethemes.moe/Correct-OP1.webm';
+
+    const create = await m.service.createRoom(HOST, partyCreate);
+    const roomId = create.roomId!;
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    await m.service.toggleReady(HOST, roomId);
+    await m.service.toggleReady(GUEST, roomId);
+    await m.service.startGame(HOST, roomId);
+
+    const event = m.events.find((e) => e.event === 'room:round-started');
+    const theme = (event!.payload.theme ?? {}) as Record<string, unknown>;
+    expect(theme.videoUrl).toBe('https://v.animethemes.moe/Correct-OP1.webm');
+    expect(theme.mediaCandidates).toContain(
+      'https://a.animethemes.moe/Correct-OP1.ogg',
+    );
+    expect(theme.mediaCandidates).not.toContain('https://audio/main.webm');
+  });
+
   it('party scoring: server-timed base + first-correct bonus, last player auto-locked, game ends with RP scheduled', async () => {
     const m = makeFakeModels();
     const { roomId } = await startedParty(m);

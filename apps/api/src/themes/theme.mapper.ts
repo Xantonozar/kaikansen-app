@@ -5,6 +5,7 @@ import type {
   ThemeType,
 } from '@kaikansen/contracts';
 import type { ThemeCache } from './theme-cache.schema';
+import { resolveAudioUrl } from './audio-url';
 
 /**
  * Lean (plain-object) shape of a themecaches document as it comes back from
@@ -72,11 +73,15 @@ export function toThemeDetail(doc: ThemeDoc): ThemeDetail {
         mime: source.mime ?? 'video/webm',
       })),
       videoUrl: entry.videoUrl ?? null,
-      audioUrl: entry.audioUrl ?? null,
+      // Stored audio wins; a missing one falls back to the derived
+      // .ogg twin of the entry's own video file (see audio-url.ts) —
+      // the catalogue's audioUrl is null for most entries, and the
+      // player/downloads read this field first.
+      audioUrl: resolveAudioUrl(entry.audioUrl, entry.videoUrl),
       duration: entry.duration ?? null,
     })),
     videoUrl: doc.videoUrl,
-    audioUrl: doc.audioUrl ?? null,
+    audioUrl: resolveAudioUrl(doc.audioUrl, doc.videoUrl),
     mood: doc.mood ?? [],
     duration: doc.duration ?? null,
     syncedAt: iso(doc.syncedAt) ?? '',

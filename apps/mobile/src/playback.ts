@@ -19,22 +19,104 @@ import type {
  *   `audioUrl`. (The web disables its listen toggle when the entry has
  *   no audioUrl; the theme-level fallback is what the catalogue data
  *   itself provides — the theme-level URL is the primary entry's link.)
+ *   When NO stored audio exists, the derived .ogg twin of the video
+ *   file steps in (see deriveAudioUrl): most of the catalogue stores
+ *   `audioUrl: null`, and without the derivation listen mode — and
+ *   audio downloads, which resolve through this same module — would
+ *   have nothing to play for those themes. The API derives the same
+ *   way into its payloads; the rule is mirrored here so resolution
+ *   stays whole even against a payload that predates it.
  */
 export function resolvePlaybackUrl(
   detail: ThemeDetail,
   entry: ThemeEntry | null,
   mode: PlaybackMode,
 ): string | null {
+  if (mode === 'listen') {
+    return storedListenUrl(detail, entry) ?? derivedListenUrl(detail, entry);
+  }
   if (!entry) {
-    return mode === 'watch' ? detail.videoUrl : detail.audioUrl;
+    return detail.videoUrl;
   }
-  if (mode === 'watch') {
-    const best = [...entry.videoSources].sort(
-      (a, b) => b.resolution - a.resolution,
-    )[0];
-    return best?.url ?? entry.videoUrl ?? detail.videoUrl;
-  }
+  const best = [...entry.videoSources].sort(
+    (a, b) => b.resolution - a.resolution,
+  )[0];
+  return best?.url ?? entry.videoUrl ?? detail.videoUrl;
+}
+
+/* ------------------------------------------------------------------ */
+/* Derived .ogg audio (mirror of the API's themes/audio-url.ts)        */
+/* ------------------------------------------------------------------ */
+
+const AT_VIDEO_PREFIX = 'https://v.animethemes.moe/';
+const AT_AUDIO_PREFIX = 'https://a.animethemes.moe/';
+const AT_VIDEO_SUFFIX = '.webm';
+
+/**
+ * The .ogg audio twin of an AnimeThemes video URL —
+ * `https://v.animethemes.moe/<File>.webm` →
+ * `https://a.animethemes.moe/<File>.ogg` — or null when the video URL
+ * does not follow that one verified pattern (any other host/shape).
+ * AnimeThemes hosts the twin for every theme video; the catalogue
+ * simply never stored the link.
+ */
+export function deriveAudioUrl(videoUrl: string | null): string | null {
+  if (videoUrl === null) return null;
+  if (!videoUrl.startsWith(AT_VIDEO_PREFIX)) return null;
+  if (!videoUrl.endsWith(AT_VIDEO_SUFFIX)) return null;
+  const file = videoUrl.slice(
+    AT_VIDEO_PREFIX.length,
+    videoUrl.length - AT_VIDEO_SUFFIX.length,
+  );
+  if (file.length === 0) return null;
+  return `${AT_AUDIO_PREFIX}${file}.ogg`;
+}
+
+/** Stored audio only: the entry's audioUrl, then the theme-level one. */
+function storedListenUrl(
+  detail: ThemeDetail,
+  entry: ThemeEntry | null,
+): string | null {
+  if (!entry) return detail.audioUrl;
   return entry.audioUrl ?? detail.audioUrl;
+}
+
+/**
+ * Derived audio only: the .ogg twin of the entry's own video file,
+ * then of the theme-level video file.
+ */
+function derivedListenUrl(
+  detail: ThemeDetail,
+  entry: ThemeEntry | null,
+): string | null {
+  if (!entry) return deriveAudioUrl(detail.videoUrl);
+  return deriveAudioUrl(entry.videoUrl) ?? deriveAudioUrl(detail.videoUrl);
+}
+
+/**
+ * The listen-mode fallback chain for the player, in order: stored
+ * audio, the derived .ogg, then — only when an audio source exists —
+ * the watch video file itself (the player keeps the surface hidden,
+ * so it plays as audio). Empty when the theme has no audio source at
+ * all: listen then reports unavailable, exactly as before. Downloads
+ * do NOT use this chain — an audio download resolves through
+ * resolvePlaybackUrl and never substitutes the video file.
+ */
+export function resolveListenCandidates(
+  detail: ThemeDetail,
+  entry: ThemeEntry | null,
+): string[] {
+  const audio = [
+    storedListenUrl(detail, entry),
+    derivedListenUrl(detail, entry),
+  ].filter((url, i, all): url is string => {
+    return isPlausibleUrl(url) && all.indexOf(url) === i;
+  });
+  if (audio.length === 0) return [];
+  const watch = resolvePlaybackUrl(detail, entry, 'watch');
+  return isPlausibleUrl(watch) && !audio.includes(watch)
+    ? [...audio, watch]
+    : audio;
 }
 
 /** Whether listen mode has anything to play for this entry. */

@@ -27,6 +27,7 @@ import {
   ThemeCache,
   type ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
+import { resolveAudioUrl } from '../themes/audio-url';
 import { QuizAttempt, type QuizAttemptDocument } from './quiz-attempt.schema';
 import {
   buildSoloOptions,
@@ -313,7 +314,10 @@ export class SoloQuizService {
       theme: {
         slug: correctTheme.slug,
         videoUrl: correctTheme.videoUrl,
-        audioUrl: correctTheme.audioUrl ?? null,
+        // Stored audio, else the derived .ogg twin (audio-url.ts):
+        // most catalogue themes store no audioUrl, and the quiz's
+        // audio candidate would otherwise be missing entirely.
+        audioUrl: resolveAudioUrl(correctTheme.audioUrl, correctTheme.videoUrl),
         coverImage:
           correctTheme.animeCoverImage ?? correctTheme.animeCoverImageSmall ?? null,
         type: correctTheme.type,
@@ -398,7 +402,10 @@ export class SoloQuizService {
         theme: {
           slug: session.current.theme.slug,
           videoUrl: session.current.theme.videoUrl,
-          audioUrl: session.current.theme.audioUrl ?? null,
+          audioUrl: resolveAudioUrl(
+            session.current.theme.audioUrl,
+            session.current.theme.videoUrl,
+          ),
           coverImage:
             session.current.theme.animeCoverImage ??
             session.current.theme.animeCoverImageSmall ??

@@ -31,6 +31,7 @@ import { downloadFileUri, useDownloads } from '../../src/downloads';
 import {
   formatTime,
   isPlausibleUrl,
+  resolveListenCandidates,
   resolvePlaybackUrl,
 } from '../../src/playback';
 import {
@@ -58,6 +59,14 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * instead (audio-only presentation, no video frame). Controls are
  * custom and icon-led: play/pause (replay once ended), a tap-to-seek
  * bar with time labels, fullscreen (watch only) and close.
+ *
+ * Listen source chain: most of the catalogue stores no audioUrl, so
+ * listen resolves stored audio → the derived .ogg twin of the video
+ * file (playback.ts mirrors the API's derivation) → the video file
+ * itself behind the artwork, advancing one step per player error;
+ * only when every candidate fails does the error state show. Audio
+ * downloads resolve through the same playback.ts but stop at the
+ * audio steps — a download never substitutes the video file.
  *
  * History: the first time playback genuinely starts (the player's
  * playing flag turns true) for a given entry+mode, POST
@@ -143,7 +152,30 @@ export default function PlayerScreen() {
 
   const rawUrl = detail ? resolvePlaybackUrl(detail, entry, mode) : null;
   const remoteUrl = isPlausibleUrl(rawUrl) ? rawUrl : null;
-  const url = localUsable ? downloadFileUri(localUsable) : remoteUrl;
+
+  // Listen fallback chain (playback.ts): stored audio → derived .ogg
+  // → the video file behind the artwork. A local download, watch mode
+  // and fixture details (whose stored audio always resolves) stay on
+  // the single resolved URL; the chain only engages for remote listen
+  // playback, advancing one step per player error (below).
+  const listenCandidates = useMemo(
+    () =>
+      detail && mode === 'listen'
+        ? resolveListenCandidates(detail, entry)
+        : [],
+    [detail, entry, mode],
+  );
+  const [candidateIndex, setCandidateIndex] = useState(0);
+  // A different theme/entry/mode restarts the chain from the top.
+  useEffect(() => {
+    setCandidateIndex(0);
+  }, [params.slug, mode, entry?.atEntryId]);
+
+  const url = localUsable
+    ? downloadFileUri(localUsable)
+    : mode === 'listen' && detail
+      ? (listenCandidates[candidateIndex] ?? null)
+      : remoteUrl;
   const offline = localUsable !== undefined;
 
   const player = useVideoPlayer(null, (p) => {
@@ -189,12 +221,22 @@ export default function PlayerScreen() {
   }, [url, player]);
 
   useEventListener(player, 'statusChange', ({ status: next, error }) => {
-    if (next === 'error') {
-      setPlayerError(
-        error?.message ??
-          'This source could not be played. It may be unavailable or in a format this device cannot play.',
-      );
+    if (next !== 'error') return;
+    // Listen chain: a failed candidate hands over to the next one
+    // instead of dying — only the LAST candidate's failure surfaces
+    // as the error state (QuizMedia's fall-through pattern).
+    if (
+      !localUsable &&
+      mode === 'listen' &&
+      candidateIndex + 1 < listenCandidates.length
+    ) {
+      setCandidateIndex(candidateIndex + 1);
+      return;
     }
+    setPlayerError(
+      error?.message ??
+        'This source could not be played. It may be unavailable or in a format this device cannot play.',
+    );
   });
 
   useEventListener(player, 'timeUpdate', ({ currentTime }) => {
@@ -307,6 +349,19 @@ export default function PlayerScreen() {
   };
 
   const onRetry = () => {
+    // Retry restarts the listen chain from its first candidate; the
+    // index change alone reloads it, so only force the load when the
+    // first candidate is already the one showing.
+    if (
+      !localUsable &&
+      mode === 'listen' &&
+      listenCandidates.length > 0 &&
+      candidateIndex !== 0
+    ) {
+      setPlayerError(null);
+      setCandidateIndex(0);
+      return;
+    }
     if (!url) return;
     setPlayerError(null);
     loadedUrlRef.current = null;

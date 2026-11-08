@@ -303,6 +303,93 @@ describe('ThemesService.getThemeBySlug', () => {
       message: expect.stringContaining('nope'),
     });
   });
+
+  it('fills a null audioUrl with the derived .ogg twin (theme + entry)', async () => {
+    const entry = {
+      atEntryId: 11,
+      version: 'v1',
+      episodes: null,
+      spoiler: false,
+      nsfw: false,
+      tags: [],
+      videoSources: [
+        {
+          resolution: 720,
+          url: 'https://v.animethemes.moe/TestAnime-OP1.webm',
+          source: null,
+          mime: 'video/webm',
+        },
+      ],
+      videoUrl: 'https://v.animethemes.moe/TestAnime-OP1.webm',
+      audioUrl: null,
+      duration: 90,
+    };
+    const findOne = jest.fn(() =>
+      queryOf(
+        makeDoc({
+          videoUrl: 'https://v.animethemes.moe/TestAnime-OP1.webm',
+          audioUrl: null,
+          entries: [entry],
+        }),
+      ),
+    );
+    const service = serviceWith({ findOne });
+
+    const detail = await service.getThemeBySlug('test_anime-op1-1');
+
+    expect(detail.audioUrl).toBe(
+      'https://a.animethemes.moe/TestAnime-OP1.ogg',
+    );
+    expect(detail.entries[0].audioUrl).toBe(
+      'https://a.animethemes.moe/TestAnime-OP1.ogg',
+    );
+  });
+
+  it('never overwrites a stored audioUrl with the derivation', async () => {
+    const entry = {
+      atEntryId: 11,
+      version: 'v1',
+      episodes: null,
+      spoiler: false,
+      nsfw: false,
+      tags: [],
+      videoSources: [],
+      videoUrl: 'https://v.animethemes.moe/TestAnime-OP1.webm',
+      audioUrl: 'https://v.animethemes.moe/TestAnime-OP1.webm',
+      duration: 90,
+    };
+    const findOne = jest.fn(() =>
+      queryOf(
+        makeDoc({
+          videoUrl: 'https://v.animethemes.moe/TestAnime-OP1.webm',
+          audioUrl: 'https://v.animethemes.moe/TestAnime-OP1.webm',
+          entries: [entry],
+        }),
+      ),
+    );
+    const service = serviceWith({ findOne });
+
+    const detail = await service.getThemeBySlug('test_anime-op1-1');
+
+    expect(detail.audioUrl).toBe(
+      'https://v.animethemes.moe/TestAnime-OP1.webm',
+    );
+    expect(detail.entries[0].audioUrl).toBe(
+      'https://v.animethemes.moe/TestAnime-OP1.webm',
+    );
+  });
+
+  it('leaves audioUrl null when the video is not on the AnimeThemes host', async () => {
+    const findOne = jest.fn(() =>
+      queryOf(makeDoc({ audioUrl: null })),
+    );
+    const service = serviceWith({ findOne });
+
+    const detail = await service.getThemeBySlug('test_anime-op1-1');
+
+    // makeDoc's videoUrl is example.com — outside the derivation rule.
+    expect(detail.audioUrl).toBeNull();
+  });
 });
 
 /**

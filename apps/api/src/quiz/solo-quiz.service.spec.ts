@@ -200,6 +200,37 @@ describe('SoloQuizService — game flow', () => {
     expect(wire).not.toContain('Artist 1');
   });
 
+  it('serves the derived .ogg as question audio when the theme stores none', async () => {
+    const { service, models } = makeService();
+    // The catalogue's common case: audioUrl null, AnimeThemes video.
+    models.themes.forEach((t, idx) => {
+      t.audioUrl = null;
+      t.videoUrl = `https://v.animethemes.moe/Anime${idx + 1}-OP1.webm`;
+    });
+
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+
+    expect(state.question?.theme.videoUrl).toBe(
+      'https://v.animethemes.moe/Anime1-OP1.webm',
+    );
+    expect(state.question?.theme.audioUrl).toBe(
+      'https://a.animethemes.moe/Anime1-OP1.ogg',
+    );
+
+    // The re-served question (GET state) derives the same way.
+    const again = await service.getGame(USER_1, state.gameId);
+    expect(again.question?.theme.audioUrl).toBe(
+      'https://a.animethemes.moe/Anime1-OP1.ogg',
+    );
+  });
+
+  it('keeps a stored audioUrl on the question theme (never derived over)', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    // Factory themes store https://audio/<i>.webm with a non-AT video.
+    expect(state.question?.theme.audioUrl).toBe('https://audio/1.webm');
+  });
+
   it('scores a correct answer with the web formula and persists the attempt', async () => {
     const { service, models } = makeService();
     const state = await service.createGame(USER_1, { quizType: 'anime' });
