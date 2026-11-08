@@ -658,7 +658,7 @@ describe('LibraryService — watch history', () => {
 });
 
 describe('LibraryService — library count', () => {
-  /** Give a seeded user a stored AniList link with completed ids. */
+  /** Give a seeded user a stored AniList link with stored library ids. */
   function linkAnilist(
     models: ReturnType<typeof makeModels>,
     userId: string,
@@ -994,7 +994,7 @@ describe('LibraryService — ratings', () => {
 /* ------------------------------------------------------------------ */
 
 function makeServiceWithClient(client?: {
-  fetchCompletedMediaIds: jest.Mock;
+  fetchLibraryMediaIds: jest.Mock;
 }) {
   const models = makeModels();
   const service = new LibraryService(
@@ -1080,7 +1080,7 @@ describe('LibraryService.listLibraryThemes', () => {
   it('unions in a FRESH stored AniList cache without fetching', async () => {
     const fetchIds = jest.fn(async () => [999]);
     const { models, service } = makeServiceWithClient({
-      fetchCompletedMediaIds: fetchIds,
+      fetchLibraryMediaIds: fetchIds,
     });
     models.userModel.docs.push({
       _id: 'user-3',
@@ -1107,7 +1107,7 @@ describe('LibraryService.listLibraryThemes', () => {
   it('serves a STALE cache, flags it deferred+stale, and refreshes in the background', async () => {
     const fetchIds = jest.fn(async () => [43]);
     const { models, service } = makeServiceWithClient({
-      fetchCompletedMediaIds: fetchIds,
+      fetchLibraryMediaIds: fetchIds,
     });
     models.userModel.docs.push({
       _id: 'user-3',
@@ -1145,7 +1145,7 @@ describe('LibraryService.listLibraryThemes', () => {
   it('does the awaited first sync when there is no stored cache, and persists it', async () => {
     const fetchIds = jest.fn(async () => [42]);
     const { models, service } = makeServiceWithClient({
-      fetchCompletedMediaIds: fetchIds,
+      fetchLibraryMediaIds: fetchIds,
     });
     models.userModel.docs.push({
       _id: 'user-3',
@@ -1172,10 +1172,113 @@ describe('LibraryService.listLibraryThemes', () => {
     );
   });
 
+  it('unions in a CURRENT (watching) id from the widened fetch — and /library/count agrees on the same stored set', async () => {
+    // The widened client returns completed (42) + watching (44) ids
+    // merged; 44 exists only on the user's CURRENT list.
+    const fetchIds = jest.fn(async () => [42, 44]);
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryMediaIds: fetchIds,
+    });
+    models.userModel.docs.push({
+      _id: 'user-3',
+      username: 'three',
+      totalRatings: 0,
+      totalTime: 0,
+      anilist: {
+        accessToken: 'token-3',
+        userId: 42,
+        username: 'AniThree',
+        completedMediaIds: [],
+      },
+    });
+    models.themeModel.docs.push(
+      makeTheme({
+        _id: 'theme-watching',
+        slug: 'watching_anime-op1-9',
+        animeTitle: 'Watching Anime',
+        animeSeasonYear: 2027,
+        anilistId: 44,
+        audioUrl: 'https://example.com/watching.ogg',
+      }),
+    );
+
+    const res = await service.listLibraryThemes('user-3');
+    // Both the completed theme (42) and the watching theme (44)
+    // join the union; 2027 sorts before 2026.
+    expect(res.total).toBe(2);
+    expect(res.themes.map((t) => t.slug)).toEqual([
+      'watching_anime-op1-9',
+      'test_anime-op1-1',
+    ]);
+    // The combined set is what lands in the stored field.
+    expect(models.userModel.findByIdAndUpdate).toHaveBeenCalledWith(
+      'user-3',
+      expect.objectContaining({ 'anilist.completedMediaIds': [42, 44] }),
+    );
+
+    // The count reads the SAME stored set. (The fake model's
+    // applyUpdate cannot resolve the dotted 'anilist.*' path the
+    // service writes through Mongoose, so apply the persisted
+    // state the assertion above verified, as Mongoose would.)
+    const user3 = models.userModel.docs.find((u) => u._id === 'user-3') as
+      | { anilist?: { completedMediaIds?: number[] } }
+      | undefined;
+    if (!user3?.anilist) throw new Error('user-3 lost its AniList link');
+    user3.anilist.completedMediaIds = [42, 44];
+    // Only the watching theme has an audio source (theme-1's
+    // audioUrl is null), so the two endpoints agree on the id set
+    // and differ only by the count's audio filter.
+    await expect(service.getLibraryCount('user-3')).resolves.toEqual({
+      count: 1,
+    });
+    expect(models.themeModel.countDocuments).toHaveBeenLastCalledWith({
+      audioUrl: { $ne: null },
+      $or: [{ anilistId: { $in: [42, 44] } }],
+    });
+  });
+
+  it('self-heals a stale COMPLETED-only cache to the widened set via the deferred refresh', async () => {
+    const fetchIds = jest.fn(async () => [42, 44]);
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryMediaIds: fetchIds,
+    });
+    models.userModel.docs.push({
+      _id: 'user-3',
+      username: 'three',
+      totalRatings: 0,
+      totalTime: 0,
+      anilist: {
+        accessToken: 'token-3',
+        userId: 42,
+        username: 'AniThree',
+        syncedAt: new Date(Date.now() - 7 * 60 * 60 * 1000), // stale
+        // Yesterday's cache: completed ids only.
+        completedMediaIds: [42],
+      },
+    });
+
+    const res = await service.listLibraryThemes('user-3');
+    // The stale cache is served as-is for THIS response…
+    expect(res.themes.map((t) => t.slug)).toEqual(['test_anime-op1-1']);
+    expect(res.anilistSyncDeferred).toBe(true);
+
+    // …and the background refresh replaces it with the widened
+    // completed+watching set — no migration, no manual write.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(models.userModel.findByIdAndUpdate).toHaveBeenCalledWith(
+      'user-3',
+      expect.objectContaining({
+        'anilist.completedMediaIds': [42, 44],
+        'anilist.syncedAt': expect.any(Date),
+      }),
+    );
+  });
+
   it('falls back to the early return when the first-sync fetch fails (null)', async () => {
     const fetchIds = jest.fn(async () => null);
     const { models, service } = makeServiceWithClient({
-      fetchCompletedMediaIds: fetchIds,
+      fetchLibraryMediaIds: fetchIds,
     });
     models.userModel.docs.push({
       _id: 'user-3',

@@ -2,6 +2,7 @@ import type {
   CreatePlaylistRequest,
   FavoriteState,
   FavoritesResponse,
+  LibraryThemesResponse,
   PlaylistDeletedResponse,
   PlaylistDetail,
   PlaylistsResponse,
@@ -82,6 +83,44 @@ export async function fetchFavoriteState(
 export async function fetchHistory(): Promise<WatchHistoryResponse> {
   if (fixtureMode) return { entries: [] };
   return apiJson<WatchHistoryResponse>('/library/history');
+}
+
+/* ------------------------------------------------------------------ */
+/* Library themes (watch history ∪ AniList completed + watching)     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * GET /library/themes — the web's /api/themes/library union, ported
+ * verbatim by the API: catalogue themes the caller has watched or
+ * listened to locally UNION themes whose anime is on their AniList
+ * COMPLETED + CURRENT (watching) lists (the API deliberately
+ * widens the web's completed-only read — planning stays out).
+ * Flat and paged on the wire (page 1, limit 50
+ * by default, animeSeasonYear desc / animeTitle asc); the AniList
+ * segment groups by anime client-side, so this pages through the
+ * whole set (100 a page, bounded) and resolves the first page's
+ * response shape with every theme filled in. The response's
+ * `anilistUser` is the linked AniList username (absent entirely when
+ * both sides of the union are empty — the web's early return).
+ */
+export async function fetchLibraryThemes(): Promise<LibraryThemesResponse> {
+  if (fixtureMode) return { themes: [], total: 0, page: 1, limit: 100 };
+  const PAGE_LIMIT = 100;
+  const MAX_PAGES = 25;
+  const first = await apiJson<LibraryThemesResponse>(
+    `/library/themes?page=1&limit=${PAGE_LIMIT}`,
+  );
+  const themes = [...first.themes];
+  let page = 1;
+  while (themes.length < first.total && page < MAX_PAGES) {
+    page += 1;
+    const res = await apiJson<LibraryThemesResponse>(
+      `/library/themes?page=${page}&limit=${PAGE_LIMIT}`,
+    );
+    if (res.themes.length === 0) break;
+    themes.push(...res.themes);
+  }
+  return { ...first, themes, page: 1, limit: themes.length };
 }
 
 /* ------------------------------------------------------------------ */

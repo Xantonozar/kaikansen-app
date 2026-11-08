@@ -26,8 +26,12 @@ import { HydratedDocument } from 'mongoose';
  *
  * The `anilist` sub-document below IS modelled (AniList login slice),
  * field-for-field as the web declares it — including
- * `completedMediaIds`, which the web's AniList sync fills; this API
- * does not write it yet. NOTE: `anilist.accessToken` is stored in
+ * `completedMediaIds`, which the web's AniList sync fills. NOTE:
+ * since the 2026-11-08 widening, THIS API's library sync stores
+ * the combined COMPLETED + CURRENT (watching) id set in that
+ * field — the name is the web's and stays for schema
+ * compatibility (see AnilistLibraryClient's DEVIATION note).
+ * NOTE: `anilist.accessToken` is stored in
  * PLAINTEXT, exactly as the web stores it — mirrored deliberately;
  * hardening that storage is OPEN item O-05 (specs/DECISIONS.md).
  */

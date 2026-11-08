@@ -22,6 +22,7 @@ import {
   Download,
   Headphones,
   Library as LibraryIcon,
+  Link2,
   ListMusic,
   Lock,
   Play,
@@ -30,7 +31,9 @@ import {
 } from 'lucide-react-native';
 import type {
   FavoritesResponse,
+  LibraryThemesResponse,
   PlaylistSummary,
+  ThemeSummary,
   WatchHistoryEntry,
 } from '@kaikansen/contracts';
 import { fixtureMode } from '../../../src/api';
@@ -43,6 +46,7 @@ import {
   createPlaylist,
   fetchFavorites,
   fetchHistory,
+  fetchLibraryThemes,
   fetchPlaylists,
 } from '../../../src/libraryApi';
 import {
@@ -62,7 +66,9 @@ import {
 import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
-type Section = 'saved' | 'recent' | 'playlists' | 'offline';
+type Section = 'saved' | 'recent' | 'playlists' | 'anilist' | 'offline';
+
+type TypeFilter = 'ALL' | 'OP' | 'ED';
 
 type IconComponent = ComponentType<{
   size?: number;
@@ -74,6 +80,7 @@ const SECTIONS: { key: Section; label: string; Icon: IconComponent }[] = [
   { key: 'saved', label: 'Saved', Icon: Bookmark },
   { key: 'recent', label: 'Recent', Icon: Clock },
   { key: 'playlists', label: 'Playlists', Icon: ListMusic },
+  { key: 'anilist', label: 'AniList', Icon: Link2 },
   { key: 'offline', label: 'Offline', Icon: Download },
 ];
 
@@ -103,6 +110,16 @@ function relativeTime(iso: string): string {
  * prompt as a body state. Tapping a download opens the player on the
  * local file.
  *
+ * The AniList segment reads GET /library/themes — the union
+ * of the caller's watch history and the themes of anime on their
+ * AniList COMPLETED + CURRENT (watching) lists (the API widens
+ * the web's completed-only read) — grouped by anime with an
+ * All / OP / ED filter. Signed-in
+ * but unlinked gets a prompt to link AniList in Settings; the link
+ * state comes from the session profile's `anilist` field (with the
+ * session-local link username as a fallback for a link made moments
+ * ago), never guessed.
+ *
  * Honest states throughout: signed-out gets a log-in prompt, fixture
  * mode gets clearly-labelled demo empties (a demo library stores
  * nothing), and each section carries its own loading / error /
@@ -112,7 +129,7 @@ export default function LibraryScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
-  const { status } = useAuth();
+  const { status, user, anilistUsername } = useAuth();
   const favorites = useFavorites();
   const downloads = useDownloads();
 
@@ -129,6 +146,12 @@ export default function LibraryScreen() {
   const [playlists, setPlaylists] = useState<PlaylistSummary[] | null>(null);
   const [playlistsError, setPlaylistsError] = useState<string | null>(null);
 
+  const [libThemes, setLibThemes] = useState<LibraryThemesResponse | null>(
+    null,
+  );
+  const [libError, setLibError] = useState<string | null>(null);
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>('ALL');
+
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newPublic, setNewPublic] = useState(true);
@@ -137,7 +160,20 @@ export default function LibraryScreen() {
 
   const signedIn = status === 'signedIn';
 
-  /* Load all three sections; each lands (or fails) independently. */
+  /* AniList link state: the session profile's `anilist` field is
+     the durable signal (GET /auth/me and the login responses carry
+     it); the context's session-local username covers a link made
+     moments ago in this session, before any profile refresh. The
+     endpoint's own `anilistUser` meta is a third, post-fetch
+     confirmation used only for the header label. */
+  const anilistLinked = Boolean(user?.anilist || anilistUsername);
+  const anilistName =
+    user?.anilist?.username ??
+    anilistUsername ??
+    libThemes?.anilistUser ??
+    null;
+
+  /* Load all account sections; each lands (or fails) independently. */
   const loadAll = useCallback(() => {
     if (!signedIn || fixtureMode) return;
     fetchFavorites(1)
@@ -170,7 +206,25 @@ export default function LibraryScreen() {
           e instanceof Error ? e.message : 'Could not load playlists.',
         ),
       );
-  }, [signedIn]);
+    /* The AniList union is only fetched when a link is known to
+       exist — unlinked, the segment renders its link prompt and
+       there is nothing AniList-side to load. */
+    if (anilistLinked) {
+      fetchLibraryThemes()
+        .then((res) => {
+          setLibThemes(res);
+          setLibError(null);
+          syncFavoriteSlugs(res.themes);
+        })
+        .catch((e: unknown) =>
+          setLibError(
+            e instanceof Error
+              ? e.message
+              : 'Could not load your AniList themes.',
+          ),
+        );
+    }
+  }, [signedIn, anilistLinked]);
 
   /* Refetch on focus — the tab stays mounted, so freshness is
      focus-driven (returning from the player shows the new history
@@ -263,6 +317,52 @@ export default function LibraryScreen() {
       )
       .finally(() => setCreateBusy(false));
   }, [newName, newPublic]);
+
+  /* AniList segment: group the flat union by anime. The endpoint's
+     order (newest season first, then title) fixes the group order;
+     inside a group, OPs come before EDs, each by sequence. The
+     All / OP / ED filter applies before grouping, so a group only
+     ever shows the filtered types. */
+  const anilistGroups = useMemo(() => {
+    if (!libThemes) return [];
+    const filtered =
+      typeFilter === 'ALL'
+        ? libThemes.themes
+        : libThemes.themes.filter((t) => t.type === typeFilter);
+    const groups: {
+      key: string;
+      title: string;
+      year: number | null;
+      cover: string | null;
+      themes: ThemeSummary[];
+    }[] = [];
+    const byKey = new Map<string, (typeof groups)[number]>();
+    for (const item of filtered) {
+      const title = item.animeTitleEnglish ?? item.animeTitle;
+      const key = title.toLowerCase();
+      let group = byKey.get(key);
+      if (!group) {
+        group = {
+          key,
+          title,
+          year: item.animeSeasonYear,
+          cover: item.animeCoverImageSmall ?? item.animeCoverImage,
+          themes: [],
+        };
+        byKey.set(key, group);
+        groups.push(group);
+      }
+      group.themes.push(item);
+    }
+    for (const group of groups) {
+      group.themes.sort(
+        (a, b) =>
+          (a.type === b.type ? 0 : a.type === 'OP' ? -1 : 1) ||
+          a.sequence - b.sequence,
+      );
+    }
+    return groups;
+  }, [libThemes, typeFilter]);
 
   /* ---------------- early states ---------------- */
 
@@ -609,6 +709,143 @@ export default function LibraryScreen() {
     );
   };
 
+  const renderAnilist = () => {
+    if (!fixtureMode && !signedIn) return renderLoginPrompt();
+    if (fixtureMode) {
+      return (
+        <Text style={styles.emptyText}>
+          Demo mode — themes from your AniList completed and
+          watching lists live in your account on the live API.
+          Nothing is stored here.
+        </Text>
+      );
+    }
+    if (!anilistLinked) {
+      return (
+        <View style={styles.promptBody}>
+          <View style={styles.tile}>
+            <Link2 size={26} color={theme.accent} strokeWidth={2} />
+          </View>
+          <Text style={styles.centerTitle}>AniList not linked</Text>
+          <Text style={styles.centerNote}>
+            Link your AniList account to fill this list with the
+            openings and endings of anime you have completed or
+            are watching on AniList.
+          </Text>
+          <Pressable
+            onPress={() => router.push('/settings')}
+            accessibilityRole="button"
+            accessibilityLabel="Open Settings to link AniList"
+            style={({ pressed }) => [
+              styles.primaryButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.primaryButtonText}>Open Settings</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    if (libError && !libThemes) return sectionError(libError);
+    if (!libThemes) {
+      return (
+        <View style={styles.sectionState}>
+          <ActivityIndicator color={theme.accent} />
+        </View>
+      );
+    }
+    const filteredCount = anilistGroups.reduce(
+      (n, g) => n + g.themes.length,
+      0,
+    );
+    return (
+      <>
+        <Text style={styles.dlTotal}>
+          {anilistName ? `AniList · ${anilistName} · ` : ''}
+          {libThemes.total}{' '}
+          {libThemes.total === 1 ? 'theme' : 'themes'} from your
+          completed and watching anime and watch history
+        </Text>
+        <View style={styles.filterRow}>
+          {(['ALL', 'OP', 'ED'] as const).map((f) => {
+            const active = typeFilter === f;
+            return (
+              <Pressable
+                key={f}
+                onPress={() => setTypeFilter(f)}
+                accessibilityRole="button"
+                accessibilityState={{ selected: active }}
+                accessibilityLabel={`Show ${f === 'ALL' ? 'all themes' : `${f}s`}`}
+                style={[
+                  styles.filterChip,
+                  active && { backgroundColor: theme.accent },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    active && { color: theme.onAccent },
+                  ]}
+                >
+                  {f === 'ALL' ? 'All' : f}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+        {anilistGroups.map((group) => (
+          <View key={group.key}>
+            <View style={styles.groupHeader}>
+              {group.cover ? (
+                <Image
+                  source={{ uri: group.cover }}
+                  style={styles.groupCover}
+                />
+              ) : (
+                <View style={[styles.groupCover, styles.plCoverEmpty]} />
+              )}
+              <View style={styles.plMain}>
+                <Text style={styles.plName} numberOfLines={1}>
+                  {group.title}
+                </Text>
+                <Text style={styles.plMeta} numberOfLines={1}>
+                  {group.year ? `${group.year} · ` : ''}
+                  {group.themes.length}{' '}
+                  {group.themes.length === 1 ? 'theme' : 'themes'}
+                </Text>
+              </View>
+            </View>
+            {group.themes.map((item) => (
+              <ThemeRow
+                key={item.slug}
+                item={item}
+                onPress={() => openTheme(item.slug)}
+                onPlay={() => playTheme(item.slug, 'watch')}
+                saved={favorites.isFavorite(item.slug)}
+                savePending={favorites.isPending(item.slug)}
+                onToggleSave={() => void favorites.toggle(item.slug)}
+              />
+            ))}
+          </View>
+        ))}
+        {libThemes.total === 0 && (
+          <Text style={styles.emptyText}>
+            No themes found yet — when anime from your AniList
+            completed or watching lists are in the catalogue, their
+            openings and endings will show up here.
+          </Text>
+        )}
+        {libThemes.total > 0 && filteredCount === 0 && (
+          <Text style={styles.emptyText}>
+            No {typeFilter === 'OP' ? 'openings' : 'endings'} in this
+            list.
+          </Text>
+        )}
+        {libError && <Text style={styles.inlineError}>{libError}</Text>}
+      </>
+    );
+  };
+
   const renderOffline = () => {
     if (fixtureMode) {
       return (
@@ -805,6 +1042,7 @@ export default function LibraryScreen() {
           {section === 'saved' && renderSaved()}
           {section === 'recent' && renderRecent()}
           {section === 'playlists' && renderPlaylists()}
+          {section === 'anilist' && renderAnilist()}
           {section === 'offline' && renderOffline()}
         </ScrollView>
       </View>
@@ -1127,6 +1365,41 @@ const createStyles = (theme: Theme) =>
     ...typeStyles.caption,
     color: theme.muted,
     paddingBottom: spacing.sm,
+  },
+  filterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    padding: 3,
+    borderRadius: radii.pill,
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    marginBottom: spacing.md,
+  },
+  filterChip: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 6,
+    borderRadius: radii.pill,
+  },
+  filterChipText: {
+    ...typeStyles.caption,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.muted,
+  },
+  groupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  groupCover: {
+    width: 38,
+    height: 48,
+    borderRadius: radii.base,
+    backgroundColor: theme.surface,
   },
   dlRow: {
     flexDirection: 'row',

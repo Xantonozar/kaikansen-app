@@ -507,7 +507,7 @@ describe('Residual reads with mocked models (e2e)', () => {
   let app: INestApplication;
   const models = makeFakeModels();
   const anilistLibraryStub = {
-    fetchCompletedMediaIds: jest.fn(async () => [200] as number[] | null),
+    fetchLibraryMediaIds: jest.fn(async () => [200] as number[] | null),
   };
 
   const tokenFor = (userId: string) =>
@@ -659,7 +659,7 @@ describe('Residual reads with mocked models (e2e)', () => {
     expect(res.body.anilistUser).toBe('AniTwo');
     expect(res.body.anilistSyncDeferred).toBe(false);
     expect(res.body.anilistDataStale).toBe(false);
-    expect(anilistLibraryStub.fetchCompletedMediaIds).not.toHaveBeenCalled();
+    expect(anilistLibraryStub.fetchLibraryMediaIds).not.toHaveBeenCalled();
   });
 
   it('GET /library/themes — first sync fetches, persists, and serves the fetched ids', async () => {
@@ -670,13 +670,26 @@ describe('Residual reads with mocked models (e2e)', () => {
     // The stub's [200] is other-anime-op's anilistId.
     expect(res.body.themes.map((t: Doc) => t.slug)).toEqual(['other-anime-op']);
     expect(res.body.anilistUser).toBe('AniThree');
-    expect(anilistLibraryStub.fetchCompletedMediaIds).toHaveBeenCalledWith(
+    expect(anilistLibraryStub.fetchLibraryMediaIds).toHaveBeenCalledWith(
       'tok-3',
       7,
     );
     const user3 = models.userModel.docs.find((u) => u._id === 'user-3') as Doc;
     expect((user3.anilist as Doc).completedMediaIds).toEqual([200]);
     expect((user3.anilist as Doc).syncedAt).toBeInstanceOf(Date);
+  });
+
+  it('GET /library/count — reads the same persisted AniList set the themes sync stored', async () => {
+    // Runs after the first-sync test above: user-3's stored set is
+    // the fetched [200]. other-anime-op (anilistId 200) has no
+    // audio source, so the count's audio filter excludes it — the
+    // two endpoints agree on the id set and differ only by that
+    // filter, exactly as on the themes side.
+    const res = await request(app.getHttpServer())
+      .get('/library/count')
+      .set(asUser('user-3'))
+      .expect(200);
+    expect(res.body).toEqual({ count: 0 });
   });
 
   it('GET /library/history/check — the web’s optional-auth contract', async () => {

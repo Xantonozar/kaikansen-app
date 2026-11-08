@@ -85,7 +85,8 @@ export class LibraryService {
     @InjectModel(WatchHistory.name)
     private readonly historyModel?: Model<WatchHistoryDocument>,
     /**
-     * The library-themes read's AniList completed-ids fetch (S8).
+     * The library reads' AniList library-ids fetch (S8; widened
+     * to completed+watching since — see AnilistLibraryClient).
      * Optional so model-only constructions (unit specs) keep
      * working: without it, the read serves the stored ids alone,
      * exactly the web's state when its fetch returns null.
@@ -393,12 +394,16 @@ export class LibraryService {
   /* ---------------------------------------------------------------- */
 
   /**
-   * GET /library/count — the web's computation, verbatim: how many
+   * GET /library/count — the web's computation: how many
    * catalogue themes WITH an audio source (audioUrl ≠ null) the
    * caller has in their library, where the library is the union of
    *   - themes in the caller's watch history (distinct themeId), and
    *   - themes whose anilistId is in the caller's STORED AniList
-   *     completed ids (anilist.completedMediaIds).
+   *     library ids (anilist.completedMediaIds — which in this API
+   *     holds the completed+watching set; the AniList source was
+   *     deliberately widened beyond the web's COMPLETED-only read,
+   *     see AnilistLibraryClient's DEVIATION note. This route and
+   *     /library/themes read the same stored set, so they agree).
    * A theme matching both sides counts once (a single $or query, as
    * on the web). With neither side populated the web answers 0
    * without ever querying the catalogue — mirrored. (The S6 merged-
@@ -447,10 +452,12 @@ export class LibraryService {
    * GET /library/themes — the web's themes/library read: catalogue
    * themes the caller has watched/listened to locally (their watch
    * history's theme ids) UNION themes whose anilistId is in their
-   * AniList completed list, ordered animeSeasonYear desc /
+   * AniList library set, ordered animeSeasonYear desc /
    * animeTitle asc (the same order the favourites list serves),
    * paged with the web's defaults (page 1, limit 50), `type`
-   * filtering OP/ED when given.
+   * filtering OP/ED when given. ONE deliberate deviation from the
+   * web: the AniList set covers COMPLETED + CURRENT (watching),
+   * not the web's COMPLETED only — see AnilistLibraryClient.
    *
    * The AniList side mirrors the web's cache dance exactly:
    * - the stored completedMediaIds are served as-is while fresh
@@ -494,7 +501,8 @@ export class LibraryService {
       .exec();
     const watchedThemeIds = historyDocs.map((wh) => wh.themeId);
 
-    // 2. AniList completed media ids, per the cache dance above.
+    // 2. AniList library media ids (completed+watching), per the
+    // cache dance above.
     let anilistMediaIds: number[] = [];
     let anilistSyncDeferred = false;
     let anilistDataStale = false;
@@ -514,7 +522,7 @@ export class LibraryService {
           // Stale but cached: serve the cache, refresh behind the
           // response (the web's deferred branch, verbatim intent).
           anilistSyncDeferred = true;
-          void this.refreshStoredCompletedIds(
+          void this.refreshStoredLibraryIds(
             models,
             user._id,
             accessToken,
@@ -523,7 +531,7 @@ export class LibraryService {
         } else {
           // First sync (or an empty cache): one awaited attempt.
           const freshIds = this.anilistLibrary
-            ? await this.anilistLibrary.fetchCompletedMediaIds(
+            ? await this.anilistLibrary.fetchLibraryMediaIds(
                 accessToken,
                 anilistUserId,
               )
@@ -587,7 +595,7 @@ export class LibraryService {
    * best-effort — the web fires it with `.catch(() => {})`;
    * mirrored.
    */
-  private async refreshStoredCompletedIds(
+  private async refreshStoredLibraryIds(
     models: LibraryModels,
     userId: unknown,
     accessToken: string,
@@ -595,7 +603,7 @@ export class LibraryService {
   ): Promise<void> {
     try {
       const freshIds = this.anilistLibrary
-        ? await this.anilistLibrary.fetchCompletedMediaIds(
+        ? await this.anilistLibrary.fetchLibraryMediaIds(
             accessToken,
             anilistUserId,
           )
