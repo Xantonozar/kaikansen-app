@@ -905,6 +905,26 @@ describe('ThemesService.getArtistDetail', () => {
     expect(res.themes).toHaveLength(1);
   });
 
+  it('never reports a cache counter lower than the returned theme count', async () => {
+    const service = serviceWithArtist(
+      { find: jest.fn(() => queryOf([makeDoc(), makeDoc({ slug: 'test_anime-ed1-1', type: 'ED' })])) },
+      {
+        findOne: jest.fn(() =>
+          queryOf({
+            slug: 'test_artist',
+            name: 'Test Artist',
+            aliases: [],
+            imageUrl: null,
+            totalThemes: 0,
+          }),
+        ),
+      },
+    );
+    const res = await service.getArtistDetail('test_artist');
+    expect(res.artist.totalThemes).toBe(2);
+    expect(res.themes).toHaveLength(2);
+  });
+
   it('synthesizes the header from the first theme at the slug index (web parity)', async () => {
     const service = serviceWithArtist(
       {

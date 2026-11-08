@@ -532,7 +532,11 @@ export class ThemesService {
           name: artistDoc.name,
           aliases: artistDoc.aliases ?? [],
           imageUrl: artistDoc.imageUrl ?? null,
-          totalThemes: artistDoc.totalThemes ?? themeDocs.length,
+          // The cache counter drifts in production (e.g. Youko
+          // Takahashi's document says 0 while 10 themes carry her
+          // slug) — never report fewer themes than this very
+          // response returns.
+          totalThemes: Math.max(artistDoc.totalThemes ?? 0, themeDocs.length),
         }
       : (() => {
           const t = themeDocs[0] as unknown as ThemeDoc;
