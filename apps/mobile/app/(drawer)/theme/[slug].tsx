@@ -17,17 +17,17 @@ import {
   Check,
   ChevronLeft,
   Download,
-  Eye,
   Headphones,
-  Layers,
+  LayoutGrid,
   ListMusic,
-  Mic,
+  Music,
   Play,
   Plus,
   RotateCcw,
   Share2,
   Star,
   Trash2,
+  Users,
   X,
 } from 'lucide-react-native';
 import type {
@@ -42,8 +42,8 @@ import {
   fetchThemeBySlug,
   fixtureMode,
 } from '../../../src/api';
-import { PosterCard } from '../../../src/components/PosterCard';
 import { ThemeComments } from '../../../src/components/ThemeComments';
+import { ThemeRow } from '../../../src/components/ThemeRow';
 import { useAuth } from '../../../src/auth';
 import {
   applyFavoriteState,
@@ -88,44 +88,51 @@ type IconComponent = ComponentType<{
 }>;
 
 /**
- * Theme detail (DESIGN.md §6.7), compact/icon-led treatment (approved
- * mockup v1): the artwork leads full-bleed with glass icon buttons
- * overlaid (back; bookmark; share — still visual only, no share
- * behaviour exists yet) and an accent play FAB straddling its bottom
- * edge. Below: song title, one meta line (anime · artist), the chips,
- * ONE labelled action pill (Watch) with icon squares beside it
- * (Listen; Add), a fact card of icon-led rows (artist / rating /
- * watches / listens / versions), and version tiles drawn from the
- * real entries when there is more than one.
+ * Theme detail — layout mirrors the WEBSITE's theme page
+ * (ZadidSalman/Kaisen `app/theme/[slug]/ThemePageClient.tsx`) section
+ * for section, in the app's own design system (DESIGN.md §6.7,
+ * compact/icon-led):
  *
- * Playback is REAL (Slice M1): Watch, the FAB and a version tile open
- * the player in watch mode for the selected entry; Listen opens it in
- * audio mode (disabled when the entry has no audio source, like the
- * web's toggle). Version tiles also select the entry the Watch/Listen
- * actions target.
+ *   1. Media hero — the web embeds its player; the app keeps its
+ *      artwork hero (grill/cover, glass back + save, accent play
+ *      FAB) opening the player route (Slice M1 architecture).
+ *   2. Info header — anime title as a small accent eyebrow, the
+ *      song title large, the artists line, one muted meta line
+ *      (type/sequence · season · moods).
+ *   3. Action bar — Watch/Listen segmented toggle (Listen disabled
+ *      when the selected entry has no audio, like the web's), then
+ *      Download (primary, opens the download sheet) + add-to-
+ *      playlist and share squares.
+ *   4. Version Select — pill switcher, only when entries > 1.
+ *      Like the web's VersionSwitcher it SELECTS the entry the
+ *      Watch/Listen/download actions target (the web switches its
+ *      inline player's source); it no longer auto-opens the player.
+ *      The default selection mirrors the web: the 'Standard'
+ *      version when one exists, else the first entry.
+ *   5. Stats bar — Score · Rates · Views · Plays, counts compacted
+ *      with the web's formatCount.
+ *   6. Rating card — the caller's own 1–10 rating (Slice M2).
+ *   7. Comments — the shared ThemeComments section (Slice M5).
+ *   8. Related themes — the web's categorised lists (Same Anime
+ *      Themes / Franchise & Seasons / More by this Artist /
+ *      Recommended for You) as ThemeRow lists, with the web's
+ *      empty state when there is nothing related.
  *
- * Library actions are REAL (Slice M2): the bookmark is the shared
- * save toggle (exact per-slug state fetched on load, then kept in the
- * favorites store), Add opens the add-to-playlist sheet, and the
- * rating card under the facts carries the caller's own 1–10 rating
- * (aggregate shown in the fact row, refreshed from every rating
- * response).
+ * Loading (the fix): every read this screen needs is keyed by the
+ * slug alone, so ALL of them fire in parallel the moment the slug
+ * is known — detail, similar, comments (mounted eagerly; the
+ * component fetches on mount) and, when signed in, the favorite +
+ * rating state. The page frame renders immediately: the detail
+ * zone shows a spinner until the detail payload lands, and the
+ * comments/related sections show their own local loading states
+ * and fill in progressively — nothing waits on the slowest call.
+ * (Before: detail first, similar + favorite/rating only after it
+ * landed, comments only after first render.)
  *
- * Downloads are REAL (Slice M3): the download square opens a
- * per-entry sheet (Watch video / Listen audio, each with its own
- * state — download, progress, downloaded, delete) backed by
- * src/downloads.ts. Downloads are local, so they work signed-out;
- * demo mode and web answer with the honest note instead.
- *
- * Comments are REAL (Slice M5): the section under Similar is the
- * shared ThemeComments component (list + composer over
- * GET/POST /themes/:slug/comments).
- *
- * The Similar themes rail (Slice S8) closes the screen: a
- * horizontal PosterCard rail fed by GET /themes/:slug/similar,
- * cards routing to their own detail. It renders only when the API
- * returns something — an empty result, a failed fetch and fixture
- * mode (whose client resolves [] by design) all hide it.
+ * Library/downloads behaviour is unchanged (Slices M2/M3): the save
+ * toggle is the shared favorites store, Add opens the playlist
+ * sheet, the download sheet is per selected entry, and downloads
+ * work signed-out while demo mode and web answer honestly.
  */
 export default function ThemeDetailScreen() {
   const theme = useTheme();
@@ -165,19 +172,32 @@ export default function ThemeDetailScreen() {
   const [creatingInSheet, setCreatingInSheet] = useState(false);
   const [dlSheetOpen, setDlSheetOpen] = useState(false);
 
-  /* Slice S8 — the similar-themes rail's data ([] hides the rail). */
+  /* Similar themes (Slice S8): 'loading' until the read settles;
+     a failed fetch resolves to an empty list (the web's empty
+     state), never an error surface. */
+  const [similarState, setSimilarState] = useState<
+    'loading' | 'done'
+  >('loading');
   const [similar, setSimilar] = useState<ThemeSummary[]>([]);
 
+  /* The detail read — fires immediately on slug, in parallel with
+     everything below. */
   useEffect(() => {
     let live = true;
     setState('loading');
+    setDetail(null);
     setSelectedEntryIndex(0);
-    setSimilar([]);
     fetchThemeBySlug(slug)
       .then((data) => {
         if (!live) return;
         if (data) {
           setDetail(data);
+          // Web parity: the 'Standard' version is the default
+          // selection when the theme has one.
+          const standard = data.entries.findIndex(
+            (e) => e.version === 'Standard',
+          );
+          setSelectedEntryIndex(standard >= 0 ? standard : 0);
           setState('ready');
         } else {
           setState('missing');
@@ -191,24 +211,49 @@ export default function ThemeDetailScreen() {
     };
   }, [slug]);
 
-  /* Exact library state for this theme (Slice M2): the per-slug
-     favorite check reconciles the shared store, and the rating state
-     seeds the rating card. Live API + signed-in only — signed-out and
-     demo renders derive from the detail data alone. */
+  /* Similar themes — fired in parallel with the detail read (it
+     only ever needed the slug). Fixture mode resolves [] from the
+     client by design. */
+  useEffect(() => {
+    let live = true;
+    setSimilarState('loading');
+    setSimilar([]);
+    fetchSimilarThemes(slug)
+      .then((list) => {
+        if (live) {
+          setSimilar(list);
+          setSimilarState('done');
+        }
+      })
+      .catch(() => {
+        if (live) {
+          setSimilar([]);
+          setSimilarState('done');
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, [slug]);
+
+  /* Exact library state for this theme (Slice M2) — also keyed by
+     the slug alone, so it fires in parallel with the detail read
+     instead of waiting for it. Live API + signed-in only — signed-
+     out and demo renders derive from the detail data alone. */
   useEffect(() => {
     setRatingState(null);
     setRatingError(null);
     setActionError(null);
-    if (state !== 'ready' || !detail || !signedIn || fixtureMode) return;
+    if (!signedIn || fixtureMode) return;
     let live = true;
-    fetchFavoriteState(detail.slug)
+    fetchFavoriteState(slug)
       .then((s) => {
         if (live) applyFavoriteState(s.slug, s.isFavorite);
       })
       .catch(() => {
         // The store's set stands; a failed check is not user-facing.
       });
-    fetchRatingState(detail.slug)
+    fetchRatingState(slug)
       .then((r) => {
         if (live) setRatingState(r);
       })
@@ -218,26 +263,7 @@ export default function ThemeDetailScreen() {
     return () => {
       live = false;
     };
-  }, [state, detail, signedIn]);
-
-  /* Similar themes (Slice S8): fetched once the detail is ready.
-     Fixture mode resolves [] from the client, so the rail stays
-     hidden there; a failed fetch hides it too — the rail is a
-     bonus read, never an error surface. */
-  useEffect(() => {
-    if (state !== 'ready' || !detail) return;
-    let live = true;
-    fetchSimilarThemes(detail.slug)
-      .then((list) => {
-        if (live) setSimilar(list);
-      })
-      .catch(() => {
-        if (live) setSimilar([]);
-      });
-    return () => {
-      live = false;
-    };
-  }, [state, detail]);
+  }, [slug, signedIn]);
 
   /** Rounded-square back button; `glass` floats it over the artwork. */
   const backTile = (glass: boolean) => (
@@ -254,36 +280,7 @@ export default function ThemeDetailScreen() {
     </Pressable>
   );
 
-  /** Visual-only glass action over the artwork (no behaviour this slice). */
-  const glassAction = (Icon: IconComponent, label: string) => (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      style={({ pressed }) => [
-        styles.backHit,
-        pressed && styles.pressed,
-      ]}
-    >
-      <View style={[styles.tile, styles.tileGlass]}>
-        <Icon size={19} color={theme.text} strokeWidth={2} />
-      </View>
-    </Pressable>
-  );
-
-  if (state === 'loading') {
-    return (
-      <View style={styles.screen}>
-        <View style={[styles.topRow, { paddingTop: insets.top + spacing.sm }]}>
-          {backTile(false)}
-        </View>
-        <View style={styles.center}>
-          <ActivityIndicator color={theme.accent} />
-        </View>
-      </View>
-    );
-  }
-
-  if (state !== 'ready' || !detail) {
+  if (state === 'missing' || state === 'error') {
     return (
       <View style={styles.screen}>
         <View style={[styles.topRow, { paddingTop: insets.top + spacing.sm }]}>
@@ -300,33 +297,36 @@ export default function ThemeDetailScreen() {
     );
   }
 
-  const cover = detail.animeGrillImage ?? detail.animeCoverImage;
-  const artists = detail.artistName ?? detail.allArtists.join(', ') ?? '';
-  const chips: string[] = [`${detail.type} ${detail.sequence}`];
-  if (detail.animeSeason && detail.animeSeasonYear) {
-    chips.push(`${detail.animeSeason} ${detail.animeSeasonYear}`);
+  const ready = state === 'ready' && detail !== null;
+
+  const cover = detail
+    ? (detail.animeGrillImage ?? detail.animeCoverImage)
+    : null;
+  const artists = detail
+    ? detail.allArtists.length > 0
+      ? detail.allArtists.join(' / ')
+      : (detail.artistName ?? '')
+    : '';
+  const metaParts: string[] = detail ? [`${detail.type} ${detail.sequence}`] : [];
+  if (detail?.animeSeason && detail?.animeSeasonYear) {
+    metaParts.push(`${detail.animeSeason} ${detail.animeSeasonYear}`);
   }
-  for (const mood of detail.mood) chips.push(mood);
+  if (detail) {
+    for (const mood of detail.mood) metaParts.push(mood);
+  }
 
-  const factRow = (
-    Icon: IconComponent,
-    label: string,
-    value: string,
-    last: boolean,
-  ) => (
-    <View style={[styles.factRow, last && styles.factRowLast]}>
-      <Icon size={16} color={theme.muted} strokeWidth={2} />
-      <Text style={styles.factLabel}>{label}</Text>
-      <Text style={styles.factValue}>{value}</Text>
-    </View>
-  );
-
-  const hasMultipleVersions = detail.entries.length > 1;
-  const selectedEntry = detail.entries[selectedEntryIndex] ?? null;
-  const listenAvailable = selectedEntry !== null && entryHasAudio(detail, selectedEntry);
+  const hasMultipleVersions = (detail?.entries.length ?? 0) > 1;
+  const selectedEntry = detail
+    ? (detail.entries[selectedEntryIndex] ?? null)
+    : null;
+  const listenAvailable =
+    detail !== null &&
+    selectedEntry !== null &&
+    entryHasAudio(detail, selectedEntry);
 
   /** Open the player for an entry (defaults to the selected one). */
   const openPlayer = (mode: PlaybackMode, entryIndex = selectedEntryIndex) => {
+    if (!detail) return;
     const entry = detail.entries[entryIndex];
     if (!entry) return;
     setSelectedEntryIndex(entryIndex);
@@ -338,10 +338,11 @@ export default function ThemeDetailScreen() {
 
   /* ---------------- Slice M2: save / rating / playlists ---------------- */
 
-  const saved = favorites.isFavorite(detail.slug);
-  const savePending = favorites.isPending(detail.slug);
+  const saved = detail ? favorites.isFavorite(detail.slug) : false;
+  const savePending = detail ? favorites.isPending(detail.slug) : false;
 
   const onToggleSave = () => {
+    if (!detail) return;
     setActionError(null);
     void favorites.toggle(detail.slug).then((err) => {
       if (err) setActionError(err);
@@ -349,7 +350,7 @@ export default function ThemeDetailScreen() {
   };
 
   const onRate = (score: number) => {
-    if (ratingBusy) return;
+    if (!detail || ratingBusy) return;
     setRatingBusy(true);
     setRatingError(null);
     putRating(detail.slug, score)
@@ -363,7 +364,7 @@ export default function ThemeDetailScreen() {
   };
 
   const onClearRating = () => {
-    if (ratingBusy) return;
+    if (!detail || ratingBusy) return;
     setRatingBusy(true);
     setRatingError(null);
     deleteRating(detail.slug)
@@ -377,6 +378,7 @@ export default function ThemeDetailScreen() {
   };
 
   const openSheet = () => {
+    if (!detail) return;
     if (fixtureMode) {
       setActionError('Playlists are not available in demo mode.');
       return;
@@ -418,7 +420,7 @@ export default function ThemeDetailScreen() {
   };
 
   const addToPlaylist = (playlist: PlaylistSummary) => {
-    if (sheetBusyId) return;
+    if (!detail || sheetBusyId) return;
     if (containedIds.has(playlist.id)) {
       setSheetMessage(`Already in “${playlist.name}”.`);
       return;
@@ -439,7 +441,7 @@ export default function ThemeDetailScreen() {
   };
 
   const createAndAdd = () => {
-    if (creatingInSheet) return;
+    if (!detail || creatingInSheet) return;
     const name = newPlaylistName.trim();
     if (name.length === 0) {
       setSheetMessage('Give the playlist a name.');
@@ -463,21 +465,65 @@ export default function ThemeDetailScreen() {
       .finally(() => setCreatingInSheet(false));
   };
 
-  /** Aggregate shown in the fact row — the rating state's copy is
+  /** Aggregates shown in the stats bar — the rating state's copy is
       the freshest (every rating response carries it). */
-  const aggAvg = ratingState?.avgRating ?? detail.avgRating;
-  const aggTotal = ratingState?.totalRatings ?? detail.totalRatings;
+  const aggAvg = ratingState?.avgRating ?? detail?.avgRating ?? 0;
+  const aggTotal = ratingState?.totalRatings ?? detail?.totalRatings ?? 0;
   const myScore = ratingState?.myScore ?? null;
+
+  /* ---------------- Related themes (web categorisation) ------------ */
+
+  /** The web's buckets, in the web's order and with its tests:
+      exact anime title → franchise/seasons (first-word match) →
+      same artist (name or shared allArtists) → the rest. */
+  const relatedGroups = useMemo(() => {
+    if (!detail || similarState !== 'done') return [];
+    const baseFirstWord = detail.animeTitle
+      .split(':')[0]
+      .split(' ')[0]
+      .toLowerCase();
+    const buckets: Record<string, ThemeSummary[]> = {
+      sameAnime: [],
+      otherSeasons: [],
+      sameArtist: [],
+      others: [],
+    };
+    for (const t of similar) {
+      if (t.animeTitle === detail.animeTitle) {
+        buckets.sameAnime.push(t);
+      } else if (t.animeTitle.toLowerCase().includes(baseFirstWord)) {
+        buckets.otherSeasons.push(t);
+      } else if (
+        (t.artistName &&
+          detail.artistName &&
+          t.artistName === detail.artistName) ||
+        t.allArtists.some((a) => detail.allArtists.includes(a))
+      ) {
+        buckets.sameArtist.push(t);
+      } else {
+        buckets.others.push(t);
+      }
+    }
+    const defs: { key: string; label: string; Icon: IconComponent }[] = [
+      { key: 'sameAnime', label: 'Same Anime Themes', Icon: Music },
+      { key: 'otherSeasons', label: 'Franchise & Seasons', Icon: LayoutGrid },
+      { key: 'sameArtist', label: 'More by this Artist', Icon: Users },
+      { key: 'others', label: 'Recommended for You', Icon: Star },
+    ];
+    return defs
+      .map((d) => ({ ...d, items: buckets[d.key] }))
+      .filter((g) => g.items.length > 0);
+  }, [detail, similar, similarState]);
 
   /* ---------------- Slice M3: downloads (per selected entry) -------- */
 
   const dlModes: PlaybackMode[] = ['watch', 'listen'];
   const dlRecord = (mode: PlaybackMode) =>
-    selectedEntry
+    detail && selectedEntry
       ? downloads.find(detail.slug, selectedEntry.atEntryId, mode)
       : undefined;
   const dlProgress = (mode: PlaybackMode) =>
-    selectedEntry
+    detail && selectedEntry
       ? downloads.progressFor(
           downloadId(detail.slug, selectedEntry.atEntryId, mode),
         )
@@ -503,328 +549,398 @@ export default function ThemeDetailScreen() {
     setDlSheetOpen(true);
   };
 
+  const statCell = (value: string, label: string) => (
+    <View key={label} style={styles.statCell}>
+      <Text style={styles.statValue}>{value}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+
   return (
     <>
     <ScrollView style={styles.screen} showsVerticalScrollIndicator={false}>
       <View style={styles.column}>
-        <View style={styles.artWrap}>
-          {cover ? (
-            <Image source={{ uri: cover }} style={styles.cover} />
-          ) : (
-            <View style={[styles.cover, styles.coverPlaceholder]} />
-          )}
-          <View
-            style={[styles.overlay, { top: insets.top + spacing.sm }]}
-          >
-            {backTile(true)}
-            <View style={styles.overlayActions}>
+        {!ready || !detail ? (
+          /* Detail zone placeholder — the frame (and the sections
+             below, which fetch on their own) render immediately;
+             only this zone waits for the detail payload. */
+          <View>
+            <View style={styles.coverPlaceholder}>
+              <View
+                style={[styles.overlay, { top: insets.top + spacing.sm }]}
+              >
+                {backTile(true)}
+              </View>
+            </View>
+            <View style={styles.loadingZone}>
+              <ActivityIndicator color={theme.accent} />
+            </View>
+          </View>
+        ) : (
+          <>
+            {/* 1 — Media hero */}
+            <View style={styles.artWrap}>
+              {cover ? (
+                <Image source={{ uri: cover }} style={styles.cover} />
+              ) : (
+                <View style={[styles.cover, styles.coverEmpty]} />
+              )}
+              <View
+                style={[styles.overlay, { top: insets.top + spacing.sm }]}
+              >
+                {backTile(true)}
+                <View style={styles.overlayActions}>
+                  <Pressable
+                    onPress={onToggleSave}
+                    accessibilityRole="button"
+                    accessibilityLabel={saved ? 'Unsave theme' : 'Save theme'}
+                    accessibilityState={{ selected: saved }}
+                    style={({ pressed }) => [
+                      styles.backHit,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <View style={[styles.tile, styles.tileGlass]}>
+                      {savePending ? (
+                        <ActivityIndicator size="small" color={theme.text} />
+                      ) : (
+                        <Bookmark
+                          size={19}
+                          color={saved ? theme.accent : theme.text}
+                          fill={saved ? theme.accent : 'transparent'}
+                          strokeWidth={2}
+                        />
+                      )}
+                    </View>
+                  </Pressable>
+                </View>
+              </View>
               <Pressable
-                onPress={onToggleSave}
+                onPress={() => openPlayer('watch')}
                 accessibilityRole="button"
-                accessibilityLabel={saved ? 'Unsave theme' : 'Save theme'}
-                accessibilityState={{ selected: saved }}
+                accessibilityLabel="Play"
                 style={({ pressed }) => [
-                  styles.backHit,
+                  styles.fab,
                   pressed && styles.pressed,
                 ]}
               >
-                <View style={[styles.tile, styles.tileGlass]}>
-                  {savePending ? (
-                    <ActivityIndicator size="small" color={theme.text} />
-                  ) : (
-                    <Bookmark
-                      size={19}
-                      color={saved ? theme.accent : theme.text}
-                      fill={saved ? theme.accent : 'transparent'}
-                      strokeWidth={2}
-                    />
-                  )}
-                </View>
+                <Play size={24} color={theme.onAccent} strokeWidth={2} />
               </Pressable>
-              {glassAction(Share2, 'Share theme')}
             </View>
-          </View>
-          <Pressable
-            onPress={() => openPlayer('watch')}
-            accessibilityRole="button"
-            accessibilityLabel="Play"
-            style={({ pressed }) => [
-              styles.fab,
-              pressed && styles.pressed,
-            ]}
-          >
-            <Play size={24} color={theme.onAccent} strokeWidth={2} />
-          </Pressable>
-        </View>
 
-        <View style={styles.body}>
-          <Text style={styles.song}>{detail.songTitle}</Text>
-          <Text style={styles.meta} numberOfLines={1}>
-            {detail.animeTitle}
-            {artists.length > 0 ? ` · ${artists}` : ''}
-          </Text>
-
-          <View style={styles.chipRow}>
-            {chips.map((chip, i) => (
-              <View
-                key={`${chip}-${i}`}
-                style={[
-                  styles.chip,
-                  i === 0 && {
-                    backgroundColor:
-                      detail.type === 'ED' ? theme.tertiary : theme.accent,
-                  },
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.chipText,
-                    i === 0 && { color: theme.onAccent },
-                  ]}
-                >
-                  {chip}
-                </Text>
-              </View>
-            ))}
-          </View>
-
-          <View style={styles.actions}>
-            <Pressable
-              onPress={() => openPlayer('watch')}
-              accessibilityRole="button"
-              accessibilityLabel="Watch"
-              style={({ pressed }) => [
-                styles.watchButton,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Play size={19} color={theme.onAccent} strokeWidth={2} />
-              <Text style={styles.watchText}>Watch</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => openPlayer('listen')}
-              disabled={!listenAvailable}
-              accessibilityRole="button"
-              accessibilityLabel="Listen"
-              accessibilityState={{ disabled: !listenAvailable }}
-              style={({ pressed }) => [
-                styles.squareAction,
-                !listenAvailable && styles.squareActionDisabled,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Headphones
-                size={20}
-                color={listenAvailable ? theme.text : theme.muted}
-                strokeWidth={2}
-              />
-            </Pressable>
-            <Pressable
-              onPress={openSheet}
-              accessibilityRole="button"
-              accessibilityLabel="Add to playlist"
-              style={({ pressed }) => [
-                styles.squareAction,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Plus size={20} color={theme.text} strokeWidth={2} />
-            </Pressable>
-            <Pressable
-              onPress={openDlSheet}
-              accessibilityRole="button"
-              accessibilityLabel={
-                anyDlProgress !== undefined
-                  ? 'Downloading'
-                  : anyDlDownloaded
-                    ? 'Downloaded — manage downloads'
-                    : 'Download for offline playback'
-              }
-              style={({ pressed }) => [
-                styles.squareAction,
-                pressed && styles.pressed,
-              ]}
-            >
-              {anyDlProgress !== undefined ? (
-                anyDlProgress !== null ? (
-                  <Text style={styles.dlPercent}>
-                    {Math.floor(anyDlProgress * 100)}%
-                  </Text>
-                ) : (
-                  <ActivityIndicator size="small" color={theme.text} />
-                )
-              ) : anyDlDownloaded ? (
-                <Check size={20} color={theme.accent} strokeWidth={2} />
-              ) : (
-                <Download size={20} color={theme.text} strokeWidth={2} />
-              )}
-            </Pressable>
-          </View>
-
-          {actionError && (
-            <Text style={styles.actionError}>{actionError}</Text>
-          )}
-
-          <View style={styles.factCard}>
-            {artists.length > 0 &&
-              factRow(Mic, 'Artist', artists, false)}
-            {factRow(
-              Star,
-              'Rating',
-              `${aggAvg.toFixed(1)} · ${aggTotal}`,
-              false,
-            )}
-            {factRow(Eye, 'Watches', `${detail.totalWatches}`, false)}
-            {factRow(
-              Headphones,
-              'Listens',
-              `${detail.totalListens}`,
-              !hasMultipleVersions,
-            )}
-            {hasMultipleVersions &&
-              factRow(
-                Layers,
-                'Versions',
-                `${detail.entries.length}`,
-                true,
-              )}
-          </View>
-
-          <View style={styles.ratingCard}>
-            <View style={styles.ratingHeader}>
-              <Star size={16} color={theme.muted} strokeWidth={2} />
-              <Text style={styles.ratingLabel}>Your rating</Text>
-              {myScore !== null && (
-                <Text style={styles.ratingValue}>{myScore} / 10</Text>
-              )}
-              {myScore !== null && signedIn && !fixtureMode && (
-                <Pressable
-                  onPress={onClearRating}
-                  disabled={ratingBusy}
-                  hitSlop={6}
-                  accessibilityRole="button"
-                  accessibilityLabel="Clear your rating"
-                  style={({ pressed }) => [
-                    styles.clearRating,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <X size={13} color={theme.muted} strokeWidth={2} />
-                  <Text style={styles.clearRatingText}>Clear</Text>
-                </Pressable>
-              )}
-            </View>
-            {fixtureMode ? (
-              <Text style={styles.ratingNote}>
-                Rating is not available in demo mode.
+            <View style={styles.body}>
+              {/* 2 — Info header */}
+              <Text style={styles.eyebrow} numberOfLines={1}>
+                {detail.animeTitle.toUpperCase()}
               </Text>
-            ) : !signedIn ? (
-              <View style={styles.ratePrompt}>
-                <Text style={styles.ratingNote}>
-                  Log in to rate this theme.
+              <Text style={styles.song}>{detail.songTitle}</Text>
+              {artists.length > 0 && (
+                <Text style={styles.artists} numberOfLines={2}>
+                  {artists}
                 </Text>
+              )}
+              <Text style={styles.meta} numberOfLines={1}>
+                {metaParts.join(' · ')}
+              </Text>
+
+              {/* 3 — Action bar */}
+              <View style={styles.modeToggle}>
                 <Pressable
-                  onPress={() => router.push('/login')}
+                  onPress={() => openPlayer('watch')}
                   accessibilityRole="button"
-                  accessibilityLabel="Log in"
+                  accessibilityLabel="Watch"
                   style={({ pressed }) => [
-                    styles.loginChip,
+                    styles.modeSegment,
+                    styles.modeSegmentActive,
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Text style={styles.loginChipText}>Log in</Text>
+                  <Play size={17} color={theme.onAccent} strokeWidth={2} />
+                  <Text style={styles.modeSegmentTextActive}>Watch</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => openPlayer('listen')}
+                  disabled={!listenAvailable}
+                  accessibilityRole="button"
+                  accessibilityLabel="Listen"
+                  accessibilityState={{ disabled: !listenAvailable }}
+                  style={({ pressed }) => [
+                    styles.modeSegment,
+                    !listenAvailable && styles.modeSegmentDisabled,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Headphones
+                    size={17}
+                    color={listenAvailable ? theme.text : theme.muted}
+                    strokeWidth={2}
+                  />
+                  <Text
+                    style={[
+                      styles.modeSegmentText,
+                      !listenAvailable && { color: theme.muted },
+                    ]}
+                  >
+                    Listen
+                  </Text>
                 </Pressable>
               </View>
-            ) : (
-              <View style={styles.scoreRow}>
-                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => {
-                  const active = myScore === n;
-                  return (
+
+              <View style={styles.actions}>
+                <Pressable
+                  onPress={openDlSheet}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    anyDlProgress !== undefined
+                      ? 'Downloading'
+                      : anyDlDownloaded
+                        ? 'Downloaded — manage downloads'
+                        : 'Download for offline playback'
+                  }
+                  style={({ pressed }) => [
+                    styles.downloadButton,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  {anyDlProgress !== undefined ? (
+                    anyDlProgress !== null ? (
+                      <Text style={styles.downloadButtonText}>
+                        {Math.floor(anyDlProgress * 100)}%
+                      </Text>
+                    ) : (
+                      <ActivityIndicator
+                        size="small"
+                        color={theme.onAccent}
+                      />
+                    )
+                  ) : (
+                    <>
+                      {anyDlDownloaded ? (
+                        <Check
+                          size={19}
+                          color={theme.onAccent}
+                          strokeWidth={2}
+                        />
+                      ) : (
+                        <Download
+                          size={19}
+                          color={theme.onAccent}
+                          strokeWidth={2}
+                        />
+                      )}
+                      <Text style={styles.downloadButtonText}>Download</Text>
+                    </>
+                  )}
+                </Pressable>
+                <Pressable
+                  onPress={openSheet}
+                  accessibilityRole="button"
+                  accessibilityLabel="Add to playlist"
+                  style={({ pressed }) => [
+                    styles.squareAction,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <ListMusic size={20} color={theme.text} strokeWidth={2} />
+                </Pressable>
+                {/* Share stays visual-only, exactly as before — no
+                    share behaviour exists in the app yet; the web
+                    copies the page link. */}
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Share theme"
+                  style={({ pressed }) => [
+                    styles.squareAction,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Share2 size={19} color={theme.text} strokeWidth={2} />
+                </Pressable>
+              </View>
+
+              {actionError && (
+                <Text style={styles.actionError}>{actionError}</Text>
+              )}
+
+              {/* 4 — Version Select (web VersionSwitcher semantics:
+                  selects the entry the actions above target) */}
+              {hasMultipleVersions && (
+                <View style={styles.versionSection}>
+                  <Text style={styles.sectionEyebrow}>Version Select</Text>
+                  <View style={styles.versionRow}>
+                    {detail.entries.map((entry, i) => (
+                      <Pressable
+                        key={`${entry.atEntryId}-${i}`}
+                        onPress={() => setSelectedEntryIndex(i)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Select version ${entry.version}`}
+                        accessibilityState={{
+                          selected: i === selectedEntryIndex,
+                        }}
+                        style={({ pressed }) => [
+                          styles.versionTile,
+                          i === selectedEntryIndex &&
+                            styles.versionTileActive,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.versionText,
+                            i === selectedEntryIndex &&
+                              styles.versionTextActive,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {entry.version}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              {/* 5 — Stats bar */}
+              <View style={styles.statsBar}>
+                {statCell(aggAvg.toFixed(1), 'Score')}
+                {statCell(formatCount(aggTotal), 'Rates')}
+                {statCell(formatCount(detail.totalWatches), 'Views')}
+                {statCell(formatCount(detail.totalListens), 'Plays')}
+              </View>
+
+              {/* 6 — Rating card */}
+              <View style={styles.ratingCard}>
+                <View style={styles.ratingHeader}>
+                  <Star size={16} color={theme.muted} strokeWidth={2} />
+                  <Text style={styles.ratingLabel}>Your rating</Text>
+                  {myScore !== null && (
+                    <Text style={styles.ratingValue}>{myScore} / 10</Text>
+                  )}
+                  {myScore !== null && signedIn && !fixtureMode && (
                     <Pressable
-                      key={n}
-                      onPress={() => onRate(n)}
+                      onPress={onClearRating}
                       disabled={ratingBusy}
+                      hitSlop={6}
                       accessibilityRole="button"
-                      accessibilityState={{ selected: active }}
-                      accessibilityLabel={`Rate ${n} out of 10`}
+                      accessibilityLabel="Clear your rating"
                       style={({ pressed }) => [
-                        styles.scoreChip,
-                        active && styles.scoreChipActive,
+                        styles.clearRating,
                         pressed && styles.pressed,
                       ]}
                     >
-                      <Text
-                        style={[
-                          styles.scoreChipText,
-                          active && styles.scoreChipTextActive,
-                        ]}
-                      >
-                        {n}
-                      </Text>
+                      <X size={13} color={theme.muted} strokeWidth={2} />
+                      <Text style={styles.clearRatingText}>Clear</Text>
                     </Pressable>
-                  );
-                })}
-              </View>
-            )}
-            {ratingError && (
-              <Text style={styles.ratingErrorText}>{ratingError}</Text>
-            )}
-          </View>
-
-          {hasMultipleVersions && (
-            <View style={styles.versionRow}>
-              {detail.entries.map((entry, i) => (
-                <Pressable
-                  key={`${entry.atEntryId}-${i}`}
-                  onPress={() => openPlayer('watch', i)}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Play version ${entry.version}`}
-                  style={({ pressed }) => [
-                    styles.versionTile,
-                    i === selectedEntryIndex && styles.versionTileActive,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.versionText,
-                      i === selectedEntryIndex && styles.versionTextActive,
-                    ]}
-                    numberOfLines={1}
-                  >
-                    {entry.version}
+                  )}
+                </View>
+                {fixtureMode ? (
+                  <Text style={styles.ratingNote}>
+                    Rating is not available in demo mode.
                   </Text>
-                </Pressable>
-              ))}
+                ) : !signedIn ? (
+                  <View style={styles.ratePrompt}>
+                    <Text style={styles.ratingNote}>
+                      Log in to rate this theme.
+                    </Text>
+                    <Pressable
+                      onPress={() => router.push('/login')}
+                      accessibilityRole="button"
+                      accessibilityLabel="Log in"
+                      style={({ pressed }) => [
+                        styles.loginChip,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.loginChipText}>Log in</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <View style={styles.scoreRow}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => {
+                      const active = myScore === n;
+                      return (
+                        <Pressable
+                          key={n}
+                          onPress={() => onRate(n)}
+                          disabled={ratingBusy}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected: active }}
+                          accessibilityLabel={`Rate ${n} out of 10`}
+                          style={({ pressed }) => [
+                            styles.scoreChip,
+                            active && styles.scoreChipActive,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.scoreChipText,
+                              active && styles.scoreChipTextActive,
+                            ]}
+                          >
+                            {n}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                )}
+                {ratingError && (
+                  <Text style={styles.ratingErrorText}>{ratingError}</Text>
+                )}
+              </View>
+            </View>
+          </>
+        )}
+
+        {/* 7 — Comments (mounted eagerly: its fetch fires in
+            parallel with the detail read, and the component
+            carries its own loading state) */}
+        <View style={styles.lowerBody}>
+          <ThemeComments slug={slug} />
+
+          {/* 8 — Related themes, the web's categorised lists */}
+          {!fixtureMode && (
+            <View style={styles.relatedSection}>
+              {!ready || similarState === 'loading' ? (
+                <View style={styles.relatedLoading}>
+                  <ActivityIndicator color={theme.accent} />
+                </View>
+              ) : similar.length === 0 ? (
+                <Text style={styles.relatedEmpty}>
+                  No related themes found for this track.
+                </Text>
+              ) : (
+                relatedGroups.map((group) => (
+                  <View key={group.key} style={styles.relatedGroup}>
+                    <View style={styles.relatedHeader}>
+                      <group.Icon
+                        size={15}
+                        color={theme.accent}
+                        strokeWidth={2}
+                      />
+                      <Text style={styles.relatedHeading}>
+                        {group.label}
+                      </Text>
+                    </View>
+                    {group.items.map((item) => (
+                      <ThemeRow
+                        key={item.slug}
+                        item={item}
+                        onPress={() => router.push(`/theme/${item.slug}`)}
+                      />
+                    ))}
+                  </View>
+                ))
+              )}
             </View>
           )}
-
-          {similar.length > 0 && (
-            <>
-              <View style={styles.similarHeader}>
-                <Text style={styles.similarHeading}>Similar themes</Text>
-              </View>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.similarRail}
-              >
-                {similar.map((item) => (
-                  <PosterCard
-                    key={item.slug}
-                    item={item}
-                    onPress={() => router.push(`/theme/${item.slug}`)}
-                  />
-                ))}
-              </ScrollView>
-            </>
-          )}
-
-          <ThemeComments slug={detail.slug} />
         </View>
       </View>
     </ScrollView>
 
+    {detail && (
+      <>
     <Modal
       visible={sheetOpen}
       transparent
@@ -1097,8 +1213,19 @@ export default function ThemeDetailScreen() {
         </View>
       </View>
     </Modal>
+      </>
+    )}
     </>
   );
+}
+
+/** The web's formatCount (lib/utils), ported verbatim. */
+function formatCount(n: number): string {
+  if (n === undefined || n === null || Number.isNaN(n)) return '0';
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return Math.floor(n).toString();
 }
 
 const createStyles = (theme: Theme) =>
@@ -1158,8 +1285,18 @@ const createStyles = (theme: Theme) =>
     aspectRatio: 3 / 2,
     backgroundColor: theme.surface,
   },
-  coverPlaceholder: {
+  coverEmpty: {
     backgroundColor: theme.raised,
+  },
+  coverPlaceholder: {
+    width: '100%',
+    aspectRatio: 3 / 2,
+    backgroundColor: theme.surface,
+    position: 'relative',
+  },
+  loadingZone: {
+    paddingVertical: spacing.xxxl,
+    alignItems: 'center',
   },
   overlay: {
     position: 'absolute',
@@ -1192,42 +1329,76 @@ const createStyles = (theme: Theme) =>
   body: {
     paddingHorizontal: spacing.screenEdge,
     paddingTop: spacing.xl + 6, // clears the straddling FAB
+  },
+  lowerBody: {
+    paddingHorizontal: spacing.screenEdge,
     paddingBottom: spacing.xxxl,
+  },
+  eyebrow: {
+    ...typeStyles.caption,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.accent,
+    letterSpacing: 1.6,
   },
   song: {
     ...typeStyles.display,
-    fontSize: 24,
+    fontSize: 26,
     color: theme.text,
+    marginTop: spacing.xs,
+  },
+  artists: {
+    ...typeStyles.body,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
+    marginTop: spacing.sm,
   },
   meta: {
     ...typeStyles.bodySmall,
     color: theme.muted,
     marginTop: spacing.xs + 2,
   },
-  chipRow: {
+  modeToggle: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.md,
-  },
-  chip: {
     backgroundColor: theme.surface,
-    borderRadius: radii.pill,
-    paddingHorizontal: spacing.sm + 2,
-    paddingVertical: spacing.xs + 2,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    borderRadius: 14,
+    padding: 3,
+    gap: 3,
+    marginTop: spacing.lg,
   },
-  chipText: {
-    ...typeStyles.caption,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.muted,
+  modeSegment: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    minHeight: 40,
+    borderRadius: 11,
+  },
+  modeSegmentActive: {
+    backgroundColor: theme.accent,
+  },
+  modeSegmentDisabled: {
+    opacity: 0.45,
+  },
+  modeSegmentText: {
+    ...typeStyles.sectionLabel,
+    fontSize: 13,
+    color: theme.text,
+  },
+  modeSegmentTextActive: {
+    ...typeStyles.sectionLabel,
+    fontSize: 13,
+    color: theme.onAccent,
   },
   actions: {
     flexDirection: 'row',
     alignItems: 'stretch',
     gap: spacing.sm,
-    marginTop: spacing.lg,
+    marginTop: spacing.sm + 2,
   },
-  watchButton: {
+  downloadButton: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
@@ -1237,7 +1408,7 @@ const createStyles = (theme: Theme) =>
     borderRadius: 14,
     minHeight: 46,
   },
-  watchText: {
+  downloadButtonText: {
     ...typeStyles.sectionLabel,
     color: theme.onAccent,
   },
@@ -1251,55 +1422,36 @@ const createStyles = (theme: Theme) =>
     alignItems: 'center',
     justifyContent: 'center',
   },
-  squareActionDisabled: {
-    opacity: 0.45,
-  },
   pressed: {
     opacity: 0.85,
   },
-  factCard: {
-    marginTop: spacing.lg,
-    backgroundColor: theme.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.border,
-    borderRadius: radii.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-  },
-  factRow: {
-    minHeight: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm + 2,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: theme.border,
-  },
-  factRowLast: {
-    borderBottomWidth: 0,
-  },
-  factLabel: {
+  actionError: {
     ...typeStyles.bodySmall,
-    color: theme.muted,
+    color: theme.accent,
+    marginTop: spacing.md,
+    lineHeight: 18,
   },
-  factValue: {
-    ...typeStyles.bodySmall,
+  sectionEyebrow: {
+    ...typeStyles.caption,
     fontFamily: fontFamilies.bodyStrong,
-    color: theme.text,
-    marginLeft: 'auto',
-    flexShrink: 1,
-    textAlign: 'right',
+    color: theme.muted,
+    letterSpacing: 1.4,
+    textTransform: 'uppercase',
+  },
+  versionSection: {
+    marginTop: spacing.lg,
   },
   versionRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: spacing.sm,
-    marginTop: spacing.md,
+    marginTop: spacing.sm,
   },
   versionTile: {
-    flex: 1,
     backgroundColor: theme.raised,
-    borderRadius: radii.base,
+    borderRadius: radii.pill,
     paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.xs,
+    paddingHorizontal: spacing.md,
     alignItems: 'center',
   },
   versionTileActive: {
@@ -1313,22 +1465,30 @@ const createStyles = (theme: Theme) =>
   versionTextActive: {
     color: theme.onAccentContainer,
   },
-  similarHeader: {
-    marginTop: spacing.xl,
-    marginBottom: spacing.sm,
+  statsBar: {
+    flexDirection: 'row',
+    marginTop: spacing.lg,
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    borderRadius: radii.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
   },
-  similarHeading: {
+  statCell: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 2,
+  },
+  statValue: {
     ...typeStyles.heading,
     color: theme.text,
   },
-  similarRail: {
-    gap: spacing.sm,
-  },
-  actionError: {
-    ...typeStyles.bodySmall,
-    color: theme.accent,
-    marginTop: spacing.md,
-    lineHeight: 18,
+  statLabel: {
+    ...typeStyles.caption,
+    color: theme.muted,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
   },
   ratingCard: {
     marginTop: spacing.md,
@@ -1418,6 +1578,35 @@ const createStyles = (theme: Theme) =>
   },
   scoreChipTextActive: {
     color: theme.onAccent,
+  },
+  relatedSection: {
+    marginTop: spacing.xl,
+  },
+  relatedLoading: {
+    paddingVertical: spacing.lg,
+    alignItems: 'center',
+  },
+  relatedEmpty: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+    textAlign: 'center',
+    paddingVertical: spacing.lg,
+  },
+  relatedGroup: {
+    marginBottom: spacing.lg,
+  },
+  relatedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  relatedHeading: {
+    ...typeStyles.caption,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.muted,
+    letterSpacing: 1.4,
+    textTransform: 'uppercase',
   },
   sheetBackdrop: {
     flex: 1,
