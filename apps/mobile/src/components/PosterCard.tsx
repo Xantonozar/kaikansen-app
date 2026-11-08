@@ -7,12 +7,12 @@ import { usePosterCardWidth } from '../layout';
 
 /**
  * Season poster card — ported from the website's ThemeFeaturedCard
- * (kaisen-src/app/components/theme/ThemeFeaturedCard.tsx): 3/4 portrait
+ * (kaisen-src/app/components/theme/ThemeFeaturedCard.tsx): 2/3 portrait
  * art at radius cardLg, a bottom gradient scrim, and inside the art a
- * season chip ("SPRING '26 OP" — season, 2-digit year, type, on a dark
- * pill) above the song title in white. No below-art text: the web
- * carries the title in-art, so the old top "SEASON YEAR" sticker and
- * the below-art song/anime block are gone.
+ * type-only chip ("OP" / "ED", on a dark pill — the rail's section
+ * heading already names the season) above the song title in white. No
+ * below-art text: the web carries the title in-art, so the old top
+ * "SEASON YEAR" sticker and the below-art song/anime block are gone.
  *
  * The scrim + chip + white title are artwork-legibility treatment, not
  * theme surfaces: the web applies the identical black scrim and white
@@ -32,10 +32,8 @@ export function PosterCard({
   const width = usePosterCardWidth();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const cover = item.animeCoverImage ?? item.animeCoverImageSmall;
-  const chip =
-    item.animeSeason && item.animeSeasonYear
-      ? `${item.animeSeason} '${String(item.animeSeasonYear).slice(-2)} ${item.type}`
-      : item.type;
+  // Type-only chip: the rail's section heading already names the season.
+  const chip = item.type;
 
   return (
     <Pressable
@@ -81,7 +79,7 @@ const createStyles = (theme: Theme) =>
   },
   art: {
     width: '100%',
-    aspectRatio: 3 / 4,
+    aspectRatio: 2 / 3,
     borderRadius: radii.cardLg,
     overflow: 'hidden',
     backgroundColor: theme.surface,
