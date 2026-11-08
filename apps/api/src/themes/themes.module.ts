@@ -4,6 +4,10 @@ import {
   AnimeCache,
   AnimeCacheSchema,
 } from '../sync/anime-cache.schema';
+import {
+  ArtistCache,
+  ArtistCacheSchema,
+} from '../sync/artist-cache.schema';
 import { ThemeCache, ThemeCacheSchema } from './theme-cache.schema';
 import { ThemesController } from './themes.controller';
 import { ThemesService } from './themes.service';
@@ -29,6 +33,7 @@ export class ThemesModule {
             MongooseModule.forFeature([
               { name: ThemeCache.name, schema: ThemeCacheSchema },
               { name: AnimeCache.name, schema: AnimeCacheSchema },
+              { name: ArtistCache.name, schema: ArtistCacheSchema },
             ]),
           ]
         : [],

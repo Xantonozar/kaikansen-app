@@ -364,11 +364,12 @@ const createStyles = (theme: Theme) =>
       marginTop: spacing.md,
     },
     fieldBox: {
+      // Login/Register mocks: fields are pale lavender fills.
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
-      backgroundColor: theme.surface,
-      borderRadius: radii.base,
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.md,
       borderWidth: 1,
       borderColor: 'transparent',
       paddingHorizontal: spacing.md,
@@ -385,7 +386,7 @@ const createStyles = (theme: Theme) =>
     },
     error: {
       ...typeStyles.bodySmall,
-      color: theme.accent,
+      color: theme.danger,
       marginTop: spacing.lg,
     },
     primary: {

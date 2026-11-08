@@ -591,11 +591,12 @@ const createStyles = (theme: Theme) =>
     paddingVertical: 5,
   },
   chipPublic: {
-    backgroundColor: withOpacity(theme.accent, 0.16),
+    // Design: Public playlists wear the sage pill; Private stays lavender.
+    backgroundColor: theme.successContainer,
     borderColor: 'transparent',
   },
   chipDanger: {
-    backgroundColor: theme.accent,
+    backgroundColor: theme.danger,
     borderColor: 'transparent',
   },
   chipText: {
@@ -604,7 +605,7 @@ const createStyles = (theme: Theme) =>
     color: theme.muted,
   },
   chipTextPublic: {
-    color: theme.onAccentContainer,
+    color: theme.success,
   },
   error: {
     ...typeStyles.bodySmall,

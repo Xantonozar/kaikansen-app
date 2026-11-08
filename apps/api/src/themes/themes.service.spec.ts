@@ -796,3 +796,137 @@ describe('ThemesService.getRelatedAnime', () => {
     expect(res.related[0]).not.toHaveProperty('atCoverImage');
   });
 });
+
+describe('ThemesService.getAnimeDetail', () => {
+  function serviceWithBoth(themeModel: unknown, animeModel: unknown) {
+    return new ThemesService(
+      themeModel as Model<ThemeCacheDocument>,
+      animeModel as Model<AnimeCacheDocument>,
+    );
+  }
+
+  it('404s when neither the cache nor any theme exists', async () => {
+    const service = serviceWithBoth(
+      { find: jest.fn(() => queryOf([])) },
+      { findOne: jest.fn(() => queryOf(null)) },
+    );
+    const error = await service.getAnimeDetail('999').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NotFoundException);
+    expect((error as NotFoundException).getResponse()).toMatchObject({
+      statusCode: 404,
+      message: 'Anime not found',
+    });
+  });
+
+  it('serves the projected cache header plus the mapped themes', async () => {
+    const service = serviceWithBoth(
+      { find: jest.fn(() => queryOf([makeDoc(), makeDoc({ slug: 'test_anime-ed1-1', type: 'ED' })])) },
+      { findOne: jest.fn(() => queryOf(makeAnimeDoc())) },
+    );
+    const res = await service.getAnimeDetail('42');
+    expect(res.anime).toMatchObject({
+      anilistId: 42,
+      titleRomaji: 'Series Anime',
+      season: 'SPRING',
+    });
+    expect(res.themes).toHaveLength(2);
+    expect(res.themes[0]).toMatchObject({ slug: 'test_anime-op1-1' });
+  });
+
+  it('synthesizes the header from the first theme when uncached (web parity)', async () => {
+    const service = serviceWithBoth(
+      { find: jest.fn(() => queryOf([makeDoc()])) },
+      { findOne: jest.fn(() => queryOf(null)) },
+    );
+    const res = await service.getAnimeDetail('42');
+    expect(res.anime).toMatchObject({
+      anilistId: 42,
+      titleRomaji: 'Test Anime',
+      titleEnglish: 'Test Anime EN',
+      season: 'FALL',
+      seasonYear: 2026,
+      coverImageLarge: 'https://example.com/cover.jpg',
+      studios: ['Studio Test'],
+      series: ['Test Anime'],
+      genres: [],
+      averageScore: null,
+    });
+    expect(res.themes).toHaveLength(1);
+  });
+});
+
+describe('ThemesService.getArtistDetail', () => {
+  function serviceWithArtist(themeModel: unknown, artistModel: unknown) {
+    return new ThemesService(
+      themeModel as Model<ThemeCacheDocument>,
+      undefined,
+      artistModel as never,
+    );
+  }
+
+  it('404s when neither the cache nor any theme exists', async () => {
+    const service = serviceWithArtist(
+      { find: jest.fn(() => queryOf([])) },
+      { findOne: jest.fn(() => queryOf(null)) },
+    );
+    const error = await service
+      .getArtistDetail('nobody')
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NotFoundException);
+    expect((error as NotFoundException).getResponse()).toMatchObject({
+      statusCode: 404,
+      message: 'Artist not found',
+    });
+  });
+
+  it('serves the cache header plus the mapped themes', async () => {
+    const service = serviceWithArtist(
+      { find: jest.fn(() => queryOf([makeDoc()])) },
+      {
+        findOne: jest.fn(() =>
+          queryOf({
+            slug: 'test_artist',
+            name: 'Test Artist',
+            aliases: ['TA'],
+            imageUrl: 'https://example.com/artist.jpg',
+            totalThemes: 7,
+          }),
+        ),
+      },
+    );
+    const res = await service.getArtistDetail('test_artist');
+    expect(res.artist).toEqual({
+      slug: 'test_artist',
+      name: 'Test Artist',
+      aliases: ['TA'],
+      imageUrl: 'https://example.com/artist.jpg',
+      totalThemes: 7,
+    });
+    expect(res.themes).toHaveLength(1);
+  });
+
+  it('synthesizes the header from the first theme at the slug index (web parity)', async () => {
+    const service = serviceWithArtist(
+      {
+        find: jest.fn(() =>
+          queryOf([
+            makeDoc({
+              allArtists: ['Other Artist', 'Test Artist'],
+              artistSlugs: ['other_artist', 'test_artist'],
+              artistName: 'Other Artist',
+            }),
+          ]),
+        ),
+      },
+      { findOne: jest.fn(() => queryOf(null)) },
+    );
+    const res = await service.getArtistDetail('test_artist');
+    expect(res.artist).toEqual({
+      slug: 'test_artist',
+      name: 'Test Artist',
+      aliases: [],
+      imageUrl: null,
+      totalThemes: 1,
+    });
+  });
+});

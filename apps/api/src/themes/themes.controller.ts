@@ -1,6 +1,8 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import type {
+  AnimeDetailResponse,
+  ArtistDetailResponse,
   HomeResponse,
   RelatedAnimeResponse,
   SearchResponse,
@@ -62,5 +64,23 @@ export class ThemesController {
   })
   related(@Param('id') id: string): Promise<RelatedAnimeResponse> {
     return this.themes.getRelatedAnime(id);
+  }
+
+  @Get('anime/:id')
+  @ApiOkResponse({
+    description:
+      'One anime’s detail: metadata header (AnimeCache, synthesized from its first theme when uncached) plus all of its themes. 404 when the id has neither a cache document nor any theme.',
+  })
+  animeDetail(@Param('id') id: string): Promise<AnimeDetailResponse> {
+    return this.themes.getAnimeDetail(id);
+  }
+
+  @Get('artists/:slug')
+  @ApiOkResponse({
+    description:
+      'One artist’s detail: header (ArtistCache, synthesized from the first matching theme when uncached) plus all themes carrying the artist slug. 404 when the slug has neither.',
+  })
+  artistDetail(@Param('slug') slug: string): Promise<ArtistDetailResponse> {
+    return this.themes.getArtistDetail(slug);
   }
 }

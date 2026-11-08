@@ -10,11 +10,11 @@ import {
 import { darkTheme, lightTheme, type Theme } from './theme';
 
 /**
- * Stateful theme (Slice 2). Slice 0 shipped the two token sets as data
- * with dark hard-wired; this provider makes the mode a real, persisted
- * choice: Gate 4 — dark by default, light a full peer selectable in
- * Settings. The choice persists in plain AsyncStorage (it is a display
- * preference, not a secret).
+ * Stateful theme (Slice 2). The provider makes the mode a real, persisted
+ * choice selectable in Settings. Lavender Dusk reskin (2026-11-09): light
+ * is the default and reference mode — every approved design screen is
+ * light; dark ("Lavender Night") remains a full peer. The choice persists
+ * in plain AsyncStorage (it is a display preference, not a secret).
  */
 
 export type ThemeMode = 'dark' | 'light';
@@ -28,13 +28,13 @@ interface ThemeContextValue {
 }
 
 const ThemeContext = createContext<ThemeContextValue>({
-  tokens: darkTheme,
-  mode: 'dark',
+  tokens: lightTheme,
+  mode: 'light',
   setMode: () => {},
 });
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [mode, setModeState] = useState<ThemeMode>('dark');
+  const [mode, setModeState] = useState<ThemeMode>('light');
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY)

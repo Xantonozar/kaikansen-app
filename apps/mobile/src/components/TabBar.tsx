@@ -1,15 +1,8 @@
 import { useMemo } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 import { House, Library, Trophy, Users } from 'lucide-react-native';
 import type { ComponentType } from 'react';
-import {
-  fontFamilies,
-  radii,
-  shell,
-  spacing,
-  typeStyles,
-  type Theme,
-} from '../theme';
+import { radii, shell, spacing, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
 
 type IconComponent = ComponentType<{ size?: number; color?: string; strokeWidth?: number }>;
@@ -41,10 +34,10 @@ export interface TabBarProps {
 }
 
 /**
- * Bottom navigation (DESIGN.md §5): 64px bar, four tabs. Compact
- * treatment (approved mockup v1): the active tab's icon sits in a
- * solid accent pill with the label underneath it (secondary when
- * active, muted otherwise); inactive tabs are bare icon + label.
+ * Bottom navigation (DESIGN.md §5): 64px bar, four tabs. Lavender Dusk
+ * treatment (owner decision 2026-11-09, all 38 approved screens): the bar
+ * is ICON-ONLY — the active tab's icon sits in a solid mauveDeep pill,
+ * inactive tabs are bare icons. Labels survive as accessibility labels.
  */
 export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
   const theme = useTheme();
@@ -62,7 +55,6 @@ export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
         const focused = state.index === index;
         const { Icon } = tab;
         const iconColor = focused ? theme.onAccent : theme.muted;
-        const labelColor = focused ? theme.secondary : theme.muted;
 
         return (
           <Pressable
@@ -76,9 +68,8 @@ export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
             style={styles.tab}
           >
             <View style={[styles.pill, focused && styles.pillActive]}>
-              <Icon size={20} color={iconColor} strokeWidth={2} />
+              <Icon size={22} color={iconColor} strokeWidth={2} />
             </View>
-            <Text style={[styles.label, { color: labelColor }]}>{tab.label}</Text>
           </Pressable>
         );
       })}
@@ -105,8 +96,8 @@ const createStyles = (theme: Theme) =>
     minHeight: 52, // ≥44px touch target (DESIGN.md §10)
   },
   pill: {
-    minWidth: 48,
-    height: 28,
+    minWidth: 58,
+    height: 34,
     paddingHorizontal: spacing.md,
     borderRadius: radii.pill,
     alignItems: 'center',
@@ -114,9 +105,5 @@ const createStyles = (theme: Theme) =>
   },
   pillActive: {
     backgroundColor: theme.accent,
-  },
-  label: {
-    ...typeStyles.caption,
-    fontFamily: fontFamilies.bodyStrong,
   },
 });

@@ -1002,7 +1002,7 @@ export default function LibraryScreen() {
               >
                 <Icon
                   size={15}
-                  color={active ? theme.onAccent : theme.muted}
+                  color={active ? theme.onAccent : theme.onAccentContainer}
                   strokeWidth={2}
                 />
                 <Text
@@ -1126,28 +1126,27 @@ const createStyles = (theme: Theme) =>
     justifyContent: 'center',
   },
   segmentedBar: {
+    // Lavender Dusk mock: the Library segments are separate chips in a
+    // row — lavender inactive, mauveDeep filled active — not one bar.
     flexDirection: 'row',
-    gap: 3,
+    flexWrap: 'wrap',
+    gap: spacing.sm,
     marginHorizontal: spacing.screenEdge,
-    padding: 3,
-    borderRadius: radii.pill,
-    backgroundColor: theme.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.border,
   },
   barSegment: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.xs + 2,
-    minHeight: 38,
+    minHeight: 36,
+    paddingHorizontal: spacing.md,
     borderRadius: radii.pill,
+    backgroundColor: theme.accentContainer,
   },
   barSegmentText: {
     ...typeStyles.bodySmall,
     fontFamily: fontFamilies.bodyStrong,
-    color: theme.muted,
+    color: theme.onAccentContainer,
   },
   fixtureNote: {
     ...typeStyles.caption,

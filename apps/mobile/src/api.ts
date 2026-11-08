@@ -1,4 +1,6 @@
 import type {
+  AnimeDetailResponse,
+  ArtistDetailResponse,
   HomeResponse,
   RecordWatchRequest,
   SearchResponse,
@@ -332,6 +334,33 @@ export async function fetchSimilarThemes(
     `/themes/${encodeURIComponent(slug)}/similar`,
   );
   return res.themes;
+}
+
+/**
+ * Anime detail (GET /anime/:id): metadata header + all of the anime's
+ * themes. Resolves null on 404 — and in fixture mode, where the
+ * bundled snapshot cannot answer for an arbitrary anime honestly
+ * (the screen renders its not-found state, like a missing theme).
+ */
+export async function fetchAnimeDetail(
+  id: number,
+): Promise<AnimeDetailResponse | null> {
+  if (fixtureMode) return null;
+  const res = await apiFetch(`/anime/${id}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`API /anime/${id} answered ${res.status}`);
+  return (await res.json()) as AnimeDetailResponse;
+}
+
+/** Artist detail (GET /artists/:slug). Null on 404 / fixture mode. */
+export async function fetchArtistDetail(
+  slug: string,
+): Promise<ArtistDetailResponse | null> {
+  if (fixtureMode) return null;
+  const res = await apiFetch(`/artists/${encodeURIComponent(slug)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`API /artists/${slug} answered ${res.status}`);
+  return (await res.json()) as ArtistDetailResponse;
 }
 
 /**

@@ -43,7 +43,7 @@ export function ThemeComments({ slug }: { slug: string }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
-  const { status } = useAuth();
+  const { status, user } = useAuth();
   const signedIn = status === 'signedIn';
 
   const [comments, setComments] = useState<ThemeComment[] | null>(null);
@@ -120,16 +120,23 @@ export function ThemeComments({ slug }: { slug: string }) {
           {signedIn ? (
             <View style={styles.composer}>
               <View style={styles.composerField}>
-                <TextInput
-                  style={styles.composerInput}
-                  value={draft}
-                  onChangeText={setDraft}
-                  placeholder="Add a comment…"
-                  placeholderTextColor={theme.muted}
-                  multiline
-                  maxLength={MAX_LENGTH + 100}
-                  accessibilityLabel="Write a comment"
+                <Avatar
+                  url={user?.avatarUrl ?? null}
+                  name={user?.displayName || user?.username || '?'}
+                  size={36}
                 />
+                <View style={styles.composerInputWrap}>
+                  <TextInput
+                    style={styles.composerInput}
+                    value={draft}
+                    onChangeText={setDraft}
+                    placeholder="Add a comment…"
+                    placeholderTextColor={theme.muted}
+                    multiline
+                    maxLength={MAX_LENGTH + 100}
+                    accessibilityLabel="Write a comment"
+                  />
+                </View>
                 <Pressable
                   onPress={onPost}
                   disabled={!canPost}
@@ -276,19 +283,27 @@ const createStyles = (theme: Theme) =>
       marginBottom: spacing.sm,
     },
     composerField: {
+      // Detail v7 mock: white card holding [avatar] [lavender pill
+      // input] [round mauve send].
       flexDirection: 'row',
-      alignItems: 'flex-end',
+      alignItems: 'center',
       gap: spacing.sm,
       backgroundColor: theme.surface,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.border,
-      borderRadius: radii.md,
+      borderRadius: radii.cardLg,
       paddingLeft: spacing.md,
       paddingRight: spacing.sm,
       paddingVertical: spacing.sm,
     },
-    composerInput: {
+    composerInputWrap: {
       flex: 1,
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.xs,
+    },
+    composerInput: {
       ...typeStyles.body,
       color: theme.text,
       maxHeight: 96,
@@ -297,7 +312,7 @@ const createStyles = (theme: Theme) =>
     sendTile: {
       width: 36,
       height: 36,
-      borderRadius: radii.base,
+      borderRadius: radii.pill,
       backgroundColor: theme.accent,
       alignItems: 'center',
       justifyContent: 'center',
@@ -339,11 +354,15 @@ const createStyles = (theme: Theme) =>
       color: theme.onAccent,
     },
     row: {
+      // Detail v7 mock: each comment is its own white card.
       flexDirection: 'row',
       gap: spacing.md,
-      paddingVertical: spacing.sm + 2,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: theme.border,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.cardLg,
+      padding: spacing.md,
+      marginBottom: spacing.sm,
     },
     rowMain: {
       flex: 1,

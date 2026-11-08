@@ -7,11 +7,11 @@
     "icon": "./assets/icon.png",
     "scheme": "kaikansen",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#120A0E",
+    "backgroundColor": "#F7F2F7",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#120A0E"
+      "backgroundColor": "#F7F2F7"
     },
     "ios": {
       "supportsTablet": true

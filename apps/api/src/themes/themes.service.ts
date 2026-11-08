@@ -7,9 +7,13 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import type { Model } from 'mongoose';
 import type {
+  AnimeDetailResponse,
+  ArtistDetailResponse,
   HomeResponse,
+  RelatedAnime,
   RelatedAnimeResponse,
   SearchResponse,
+  Season,
   SimilarThemesResponse,
   ThemeDetail,
 } from '@kaikansen/contracts';
@@ -17,6 +21,10 @@ import {
   AnimeCache,
   type AnimeCacheDocument,
 } from '../sync/anime-cache.schema';
+import {
+  ArtistCache,
+  type ArtistCacheDocument,
+} from '../sync/artist-cache.schema';
 import { ThemeCache, type ThemeCacheDocument } from './theme-cache.schema';
 import { currentSeason, previousSeason } from './season';
 import { toRelatedAnime, type AnimeDoc } from './anime.mapper';
@@ -112,6 +120,9 @@ export class ThemesService {
     @Optional()
     @InjectModel(AnimeCache.name)
     private readonly animeModel?: Model<AnimeCacheDocument>,
+    @Optional()
+    @InjectModel(ArtistCache.name)
+    private readonly artistModel?: Model<ArtistCacheDocument>,
   ) {}
 
   private requireModel(): Model<ThemeCacheDocument> {
@@ -130,6 +141,15 @@ export class ThemesService {
       );
     }
     return this.animeModel;
+  }
+
+  private requireArtistModel(): Model<ArtistCacheDocument> {
+    if (!this.artistModel) {
+      throw new ServiceUnavailableException(
+        'Artist data unavailable — API booted without MONGODB_URI',
+      );
+    }
+    return this.artistModel;
   }
 
   /**
@@ -418,5 +438,120 @@ export class ThemesService {
       .exec();
 
     return { related: (docs as AnimeDoc[]).map(toRelatedAnime) };
+  }
+
+  /**
+   * GET /anime/:id — the web's anime detail page read
+   * (`app/anime/[id]/page.tsx`): AnimeCache by AniList id plus every
+   * ThemeCache row for the id, fetched in parallel. 404 only when
+   * NEITHER exists; when the cache has no document the header is
+   * synthesized from the first theme, field for field as the web
+   * page synthesizes it. The web parses the id with parseInt ('42x'
+   * reads as 42, non-numeric becomes NaN and matches nothing);
+   * mirrored.
+   */
+  async getAnimeDetail(idParam: string): Promise<AnimeDetailResponse> {
+    const themeModel = this.requireModel();
+    const animeModel = this.requireAnimeModel();
+    const animeId = Number.parseInt(idParam, 10);
+
+    const [animeDoc, themeDocs] = await Promise.all([
+      animeModel.findOne({ anilistId: animeId }).lean().exec(),
+      themeModel
+        .find({ anilistId: animeId })
+        .select('-embedding -__v')
+        .lean()
+        .exec(),
+    ]);
+
+    if (!animeDoc && themeDocs.length === 0) {
+      throw new NotFoundException('Anime not found');
+    }
+
+    const anime: RelatedAnime = animeDoc
+      ? toRelatedAnime(animeDoc as AnimeDoc)
+      : (() => {
+          const t = themeDocs[0] as unknown as ThemeDoc;
+          return {
+            anilistId: animeId,
+            malId: null,
+            kitsuId: null,
+            titleRomaji: t.animeTitle,
+            titleEnglish: t.animeTitleEnglish ?? null,
+            titleNative: null,
+            titleAlternative: [],
+            season: (t.animeSeason as Season | null) ?? null,
+            seasonYear: t.animeSeasonYear ?? null,
+            genres: [],
+            coverImageLarge: t.animeCoverImage ?? null,
+            coverImageMedium: t.animeCoverImageSmall ?? null,
+            bannerImage: null,
+            studios: t.animeStudios ?? [],
+            series: t.animeSeries ?? [],
+            totalEpisodes: null,
+            status: null,
+            averageScore: null,
+          };
+        })();
+
+    return {
+      anime,
+      themes: (themeDocs as unknown as ThemeDoc[]).map(toThemeSummary),
+    };
+  }
+
+  /**
+   * GET /artists/:slug — the web's artist detail page read
+   * (`app/artist/[slug]/page.tsx`): ArtistCache by slug plus every
+   * ThemeCache row carrying the slug in `artistSlugs`, in parallel.
+   * 404 only when NEITHER exists; a missing cache document is
+   * synthesized from the first theme (name at the slug's index in
+   * allArtists, falling back to artistName, then the slug itself),
+   * exactly as the web page does.
+   */
+  async getArtistDetail(slug: string): Promise<ArtistDetailResponse> {
+    const themeModel = this.requireModel();
+    const artistModel = this.requireArtistModel();
+
+    const [artistDoc, themeDocs] = await Promise.all([
+      artistModel.findOne({ slug }).lean().exec(),
+      themeModel
+        .find({ artistSlugs: slug })
+        .select('-embedding -__v')
+        .lean()
+        .exec(),
+    ]);
+
+    if (!artistDoc && themeDocs.length === 0) {
+      throw new NotFoundException('Artist not found');
+    }
+
+    const artist = artistDoc
+      ? {
+          slug: artistDoc.slug,
+          name: artistDoc.name,
+          aliases: artistDoc.aliases ?? [],
+          imageUrl: artistDoc.imageUrl ?? null,
+          totalThemes: artistDoc.totalThemes ?? themeDocs.length,
+        }
+      : (() => {
+          const t = themeDocs[0] as unknown as ThemeDoc;
+          const idx = (t.artistSlugs ?? []).indexOf(slug);
+          return {
+            slug,
+            name:
+              idx !== -1
+                ? (t.allArtists[idx] ?? t.artistName ?? slug)
+                : (t.artistName ?? slug),
+            aliases: [],
+            imageUrl: null,
+            totalThemes: themeDocs.length,
+          };
+        })();
+
+    return {
+      artist,
+      themes: (themeDocs as unknown as ThemeDoc[]).map(toThemeSummary),
+    };
   }
 }

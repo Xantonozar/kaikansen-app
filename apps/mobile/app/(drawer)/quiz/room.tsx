@@ -1391,7 +1391,8 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
     },
     readyDotOn: {
-      backgroundColor: theme.accent,
+      // Design: ready reads sage, not mauve.
+      backgroundColor: theme.success,
     },
     pendingDot: {
       width: 8,

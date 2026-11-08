@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { ChevronRight } from 'lucide-react-native';
-import { fontFamilies, spacing, typeStyles, type Theme } from '../theme';
+import { fontFamilies, radii, spacing, typeStyles, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
 import { Avatar } from './Avatar';
 
@@ -49,13 +49,17 @@ export function PersonRow({
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
     row: {
+      // Lavender Dusk: people lists are white card rows (Network mock).
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
       minHeight: 56,
-      paddingVertical: 6,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: theme.border,
+      padding: spacing.md,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.card,
+      marginBottom: spacing.sm,
     },
     pressed: {
       opacity: 0.7,

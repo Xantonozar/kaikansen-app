@@ -322,13 +322,13 @@ export default function SettingsScreen() {
 
         <Text style={styles.sectionLabel}>Theme</Text>
         <View style={styles.card}>
-          {themeOption('dark', 'Dark')}
-          <View style={styles.divider} />
           {themeOption('light', 'Light')}
+          <View style={styles.divider} />
+          {themeOption('dark', 'Dark')}
         </View>
         <Text style={styles.note}>
-          Dark is the default (Gate 4). Your choice is remembered on this
-          device.
+          Light (Lavender Dusk) is the default. Your choice is remembered on
+          this device.
         </Text>
 
         {status === 'signedIn' && (
@@ -337,7 +337,7 @@ export default function SettingsScreen() {
             style={styles.logout}
             accessibilityRole="button"
           >
-            <LogOut size={18} color={theme.accent} strokeWidth={2} />
+            <LogOut size={18} color={theme.danger} strokeWidth={2} />
             <Text style={styles.logoutLabel}>Log out</Text>
           </Pressable>
         )}
@@ -558,6 +558,6 @@ const createStyles = (theme: Theme) =>
     logoutLabel: {
       ...typeStyles.body,
       fontFamily: 'Inter_600SemiBold',
-      color: theme.accent,
+      color: theme.danger,
     },
   });

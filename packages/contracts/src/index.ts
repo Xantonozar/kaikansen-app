@@ -1362,6 +1362,40 @@ export interface RelatedAnimeResponse {
 }
 
 /**
+ * Response body of GET /anime/:id — one anime's detail page (the web's
+ * `app/anime/[id]/page.tsx` read): the AnimeCache projection (same
+ * shape as RelatedAnime; synthesized from the first theme when the
+ * cache has no document, exactly as the web page does) plus every
+ * theme of the anime as ThemeSummary rows, in the web's natural
+ * (unsorted) find order — clients group/sort for display.
+ */
+export interface AnimeDetailResponse {
+  anime: RelatedAnime;
+  themes: ThemeSummary[];
+}
+
+/** One artist's header (GET /artists/:slug) — the ArtistCache projection. */
+export interface ArtistDetail {
+  slug: string;
+  name: string;
+  aliases: string[];
+  imageUrl: string | null;
+  totalThemes: number;
+}
+
+/**
+ * Response body of GET /artists/:slug — one artist's detail page (the
+ * web's `app/artist/[slug]/page.tsx` read): the ArtistCache header
+ * (synthesized from the first matching theme when the cache has no
+ * document, as the web page does) plus every theme carrying the
+ * artist's slug, as ThemeSummary rows in natural find order.
+ */
+export interface ArtistDetailResponse {
+  artist: ArtistDetail;
+  themes: ThemeSummary[];
+}
+
+/**
  * Response body of GET /library/themes (Bearer required) — the
  * caller's "library themes": catalogue themes they have watched or
  * listened to locally UNION themes whose anime is in their AniList

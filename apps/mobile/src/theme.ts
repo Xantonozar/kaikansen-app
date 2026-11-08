@@ -1,13 +1,13 @@
 /**
- * Kaikansen design tokens — from specs/DESIGN.md (Gate 4 PASSED 2026-11-07).
+ * Kaikansen design tokens — Lavender Dusk reskin (owner decision 2026-11-09).
  *
- * Dark is the default and reference theme (Gate 4 decision). The light token
- * set ships in full as data; the Settings toggle (Slice 2, theme-context.tsx)
- * switches between the two sets at runtime.
+ * The colour sets below supersede the Gate 4 pink palette. Source of truth:
+ * specs/LAVENDER-DUSK-HANDOFF.md — values measured from the 38 approved
+ * Lavender Dusk design screens. Light is now the default and reference
+ * theme (every approved screen is light); the dark set ("Lavender Night")
+ * is derived from the same family so the Settings toggle keeps working.
  *
- * Sources: DESIGN.md §2 (colour), §3 (typography, values = proposal P-03),
- * §4 (radius = source; spacing = proposal P-04). Tokens marked P-01/P-02 are
- * the adopted Gate 4 proposals filling values the website does not evidence.
+ * Typography (§3), radius and spacing (§4) are unchanged from Gate 4.
  */
 
 export interface Theme {
@@ -24,39 +24,52 @@ export interface Theme {
   muted: string;
   border: string;
   wordmark: string;
+  success: string;
+  successContainer: string;
+  danger: string;
+  dangerContainer: string;
 }
 
-export const darkTheme: Theme = {
-  background: '#120A0E',
-  surface: '#1E0E15', // P-01
-  raised: '#29141D', // P-01
-  accent: '#D63D7A',
-  accentContainer: '#1E0E15', // P-01 — surface doubles as accent container (as in light)
-  onAccent: '#FFD1E3',
-  onAccentContainer: '#FFD1E3',
-  secondary: '#D77FB0', // P-01
-  tertiary: '#8B89E8', // P-01 (ED)
-  text: '#F7E8EE', // P-01
-  muted: '#B98A9C', // P-01
-  border: '#3A1E2A', // P-01
-  wordmark: '#BE185D', // P-13 — shared wordmark colour, kept in dark
+export const lightTheme: Theme = {
+  background: '#F7F2F7', // Lavender Dusk page background (measured)
+  surface: '#FFFEFF', // card white (measured)
+  raised: '#EDE3F2', // disc lavender — raised discs/avatars (measured)
+  accent: '#6E4158', // mauveDeep — primary buttons, active nav pill (measured)
+  accentContainer: '#F3ECF6', // lavenderChip — chips, icon discs (measured)
+  onAccent: '#FFFFFF',
+  onAccentContainer: '#6E4158',
+  secondary: '#8E5B7B', // mauve — icons, hearts, progress (measured)
+  tertiary: '#8E5B7B', // ED — same family as OP per the approved mocks
+  text: '#2D2329', // warm plum-brown ink (measured)
+  muted: '#7B6776', // measured
+  border: '#E7DCEA', // soft lavender hairline (derived from disc lavender)
+  wordmark: '#6E4158',
+  success: '#2D6A4F', // sage — correct answers, connected states (measured)
+  successContainer: '#EBF5EE', // sageTint (measured)
+  danger: '#B3261E', // destructive (Log Out, wrong pick) — family-adjusted
+  dangerContainer: '#F9E9E7',
 };
 
-export const lightTheme: Theme = {
-  background: '#FDE7ED',
-  surface: '#FBE0E7',
-  // The source defines no separate raised surface for light; it reuses surface.
-  raised: '#FBE0E7',
-  accent: '#B02A69',
-  accentContainer: '#FBE0E7',
-  onAccent: '#FFFFFF', // P-02
-  onAccentContainer: '#B02A69',
-  secondary: '#B65397',
-  tertiary: '#6C6BD4', // ED
-  text: '#2D1420',
-  muted: '#8A5A6E', // P-02
-  border: '#F3CBD9', // P-02
-  wordmark: '#BE185D',
+export const darkTheme: Theme = {
+  // "Lavender Night" — derived dark counterpart of Lavender Dusk (no
+  // approved dark screens exist; derived 2026-11-09 to keep the toggle peer).
+  background: '#171017',
+  surface: '#241722',
+  raised: '#2E1D2C',
+  accent: '#C79BB4',
+  accentContainer: '#33202F',
+  onAccent: '#241118',
+  onAccentContainer: '#E3BFD3',
+  secondary: '#B983A3',
+  tertiary: '#B983A3',
+  text: '#F3EAF2',
+  muted: '#B49BA9',
+  border: '#3A2836',
+  wordmark: '#C79BB4',
+  success: '#7FB894',
+  successContainer: '#1E2B23',
+  danger: '#E89A94',
+  dangerContainer: '#33201F',
 };
 
 /**

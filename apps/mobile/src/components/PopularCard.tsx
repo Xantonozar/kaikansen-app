@@ -114,7 +114,7 @@ export function PopularCard({
             <Heart
               size={20}
               color={saved ? theme.accent : theme.muted}
-              fill={saved ? theme.accent : theme.muted}
+              fill={saved ? theme.accent : 'transparent'}
               strokeWidth={2}
             />
           )}
@@ -132,7 +132,11 @@ const createStyles = (theme: Theme) =>
     gap: spacing.md,
     padding: spacing.md,
     borderRadius: radii.cardLg,
-    backgroundColor: theme.accentContainer,
+    // Lavender Dusk mock: Popular rows are white glass cards on the
+    // lavender page, defined by a soft hairline.
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
   },
   pressed: {
     opacity: 0.75,

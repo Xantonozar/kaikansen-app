@@ -168,7 +168,7 @@ export default function QuizScreen() {
         </View>
       )}
       {entry.correct ? (
-        <Check size={15} color={theme.accent} strokeWidth={2.5} />
+        <Check size={15} color={theme.success} strokeWidth={2.5} />
       ) : (
         <X size={15} color={theme.muted} strokeWidth={2.5} />
       )}

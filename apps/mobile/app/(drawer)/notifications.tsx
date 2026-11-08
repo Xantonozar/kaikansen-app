@@ -362,18 +362,22 @@ const createStyles = (theme: Theme) =>
       lineHeight: 18,
     },
     row: {
+      // Lavender Dusk: notification rows are white cards; unread rows
+      // carry the lavender tint from the mock.
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
       minHeight: 60,
       paddingVertical: spacing.sm,
-      paddingHorizontal: spacing.sm,
-      borderRadius: radii.base,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: theme.border,
+      paddingHorizontal: spacing.md,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.card,
+      marginBottom: spacing.sm,
     },
     rowUnread: {
-      backgroundColor: withOpacity(theme.accent, 0.07),
+      backgroundColor: theme.accentContainer,
     },
     rowMain: {
       flex: 1,

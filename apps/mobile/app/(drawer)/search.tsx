@@ -177,14 +177,16 @@ const createStyles = (theme: Theme) =>
     justifyContent: 'center',
   },
   backTile: {
+    // Mock: white circular back button.
     width: 38,
     height: 38,
-    borderRadius: radii.base,
-    backgroundColor: theme.raised,
+    borderRadius: radii.pill,
+    backgroundColor: theme.surface,
     alignItems: 'center',
     justifyContent: 'center',
   },
   field: {
+    // Mock: the search field is a white pill.
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
@@ -193,7 +195,7 @@ const createStyles = (theme: Theme) =>
     backgroundColor: theme.surface,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
-    borderRadius: 14,
+    borderRadius: radii.pill,
     paddingHorizontal: spacing.md,
   },
   input: {

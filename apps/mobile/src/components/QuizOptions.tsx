@@ -64,14 +64,15 @@ export function QuizOptions({
             <View
               style={[
                 styles.letter,
-                (isPicked || isCorrect) && styles.letterActive,
+                isPicked && !isCorrect && styles.letterActive,
+                isCorrect && styles.letterCorrect,
                 isWrongPick && styles.letterWrong,
               ]}
             >
               {isCorrect ? (
                 <Check size={14} color={theme.onAccent} strokeWidth={2.5} />
               ) : isWrongPick ? (
-                <X size={14} color={theme.secondary} strokeWidth={2.5} />
+                <X size={14} color={theme.danger} strokeWidth={2.5} />
               ) : (
                 <Text
                   style={[
@@ -115,12 +116,13 @@ const createStyles = (theme: Theme) =>
       backgroundColor: withOpacity(theme.accent, 0.12),
     },
     rowCorrect: {
-      borderColor: theme.accent,
-      backgroundColor: theme.accent,
+      // Lavender Dusk Answered state: sage tint + sage border, dark label.
+      borderColor: theme.success,
+      backgroundColor: theme.successContainer,
     },
     rowWrong: {
-      borderColor: theme.secondary,
-      backgroundColor: withOpacity(theme.secondary, 0.1),
+      borderColor: theme.danger,
+      backgroundColor: theme.dangerContainer,
     },
     rowDim: {
       opacity: 0.55,
@@ -139,8 +141,11 @@ const createStyles = (theme: Theme) =>
     letterActive: {
       backgroundColor: theme.accent,
     },
+    letterCorrect: {
+      backgroundColor: theme.success,
+    },
     letterWrong: {
-      backgroundColor: withOpacity(theme.secondary, 0.18),
+      backgroundColor: withOpacity(theme.danger, 0.18),
     },
     letterText: {
       ...typeStyles.caption,
@@ -155,6 +160,6 @@ const createStyles = (theme: Theme) =>
       flex: 1,
     },
     labelCorrect: {
-      color: theme.onAccent,
+      color: theme.text,
     },
   });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -8,15 +9,17 @@ import {
   View,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { Shuffle, Users } from 'lucide-react-native';
+import { Play, Shuffle, Users } from 'lucide-react-native';
 import type {
   FriendsActivityItem,
   HomeResponse,
   ThemeType,
+  WatchHistoryEntry,
 } from '@kaikansen/contracts';
 import { fetchHome, fixtureMode } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { useFavorites } from '../../../src/favoritesStore';
+import { fetchHistory } from '../../../src/libraryApi';
 import { fetchFriendsActivity } from '../../../src/socialApi';
 import { Avatar } from '../../../src/components/Avatar';
 import { PopularCard } from '../../../src/components/PopularCard';
@@ -65,6 +68,7 @@ export default function HomeScreen() {
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('ALL');
   const [feed, setFeed] = useState<FriendsActivityItem[] | null>(null);
   const [feedFailed, setFeedFailed] = useState(false);
+  const [history, setHistory] = useState<WatchHistoryEntry[] | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -97,10 +101,41 @@ export default function HomeScreen() {
       .catch(() => setFeedFailed(true));
   }, [signedIn]);
 
+  /* Continue Listening (the mock's rail between Surprise and Friends
+     Activity): the caller's recent history, signed-in only. Failures
+     and empty history hide the rail — it is a convenience surface,
+     never an error state. */
+  const loadHistory = useCallback(() => {
+    if (!signedIn || fixtureMode) return;
+    fetchHistory()
+      .then((res) =>
+        setHistory(res.entries.filter((e) => e.theme !== null).slice(0, 10)),
+      )
+      .catch(() => setHistory([]));
+  }, [signedIn]);
+
   useFocusEffect(
     useCallback(() => {
       loadFeed();
-    }, [loadFeed]),
+      loadHistory();
+    }, [loadFeed, loadHistory]),
+  );
+
+  const continuePlay = useCallback(
+    (entry: WatchHistoryEntry) => {
+      if (!entry.theme) return;
+      router.push({
+        pathname: '/player',
+        params: {
+          slug: entry.theme.slug,
+          mode: entry.mode,
+          ...(entry.atEntryId != null
+            ? { entry: String(entry.atEntryId) }
+            : {}),
+        },
+      });
+    },
+    [router],
   );
 
   const openTheme = useCallback(
@@ -181,11 +216,30 @@ export default function HomeScreen() {
           </Pressable>
         )}
 
-        {/* Season poster rail */}
-        <View style={[styles.sectionHeader, styles.sectionHeaderFirst]}>
-          <Text style={styles.heading}>
-            {home.season.season} {home.season.year}
-          </Text>
+        {/* Season poster rail — Lavender Dusk header treatment: mauve
+            eyebrow over the big season title, View All on the right
+            (opens the Season browse screen, §6.5). */}
+        <View
+          style={[
+            styles.sectionHeader,
+            styles.sectionHeaderFirst,
+            styles.seasonHeaderRow,
+          ]}
+        >
+          <View>
+            <Text style={styles.eyebrow}>Current Season</Text>
+            <Text style={styles.displayTitle}>
+              {home.season.season} {home.season.year}
+            </Text>
+          </View>
+          <Pressable
+            onPress={() => router.push('/season')}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel="View all season themes"
+          >
+            <Text style={styles.feedLink}>View All</Text>
+          </Pressable>
         </View>
         <ScrollView
           horizontal
@@ -227,6 +281,64 @@ export default function HomeScreen() {
           </View>
         </Pressable>
 
+        {/* Continue Listening — recent history as landscape cards
+            with a play disc; tapping resumes in the entry's mode. */}
+        {history !== null && history.length > 0 && (
+          <>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.heading}>Continue Listening</Text>
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.rail}
+            >
+              {history.map((entry) => (
+                <Pressable
+                  key={entry.id}
+                  onPress={() => continuePlay(entry)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Continue ${entry.theme!.songTitle}`}
+                  style={({ pressed }) => [
+                    styles.continueCard,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <View style={styles.continueArtWrap}>
+                    {entry.theme!.animeCoverImage ? (
+                      <Image
+                        source={{ uri: entry.theme!.animeCoverImage }}
+                        style={styles.continueArt}
+                      />
+                    ) : (
+                      <View
+                        style={[
+                          styles.continueArt,
+                          { backgroundColor: theme.raised },
+                        ]}
+                      />
+                    )}
+                    <View style={styles.continuePlay}>
+                      <Play
+                        size={13}
+                        color={theme.onAccent}
+                        fill={theme.onAccent}
+                        strokeWidth={2}
+                      />
+                    </View>
+                  </View>
+                  <Text style={styles.continueTitle} numberOfLines={1}>
+                    {entry.theme!.songTitle}
+                  </Text>
+                  <Text style={styles.continueArtist} numberOfLines={1}>
+                    {entry.theme!.artistName ?? entry.theme!.animeTitle}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </>
+        )}
+
         {/* Friends Activity */}
         <View style={[styles.sectionHeader, styles.feedHeader]}>
           <Text style={styles.heading}>Friends Activity</Text>
@@ -251,7 +363,7 @@ export default function HomeScreen() {
         ) : feedEmpty ? (
           <View style={styles.feedCardEmpty}>
             <View style={styles.feedIconCircle}>
-              <Users size={24} color={theme.muted} strokeWidth={2} />
+              <Users size={24} color={theme.secondary} strokeWidth={2} />
             </View>
             <Text style={styles.feedEmptyTitle}>
               No activity from friends yet.
@@ -308,7 +420,7 @@ export default function HomeScreen() {
             filters server-side — FR-HOME-01). Rows are the web's rounded
             Popular cards with play + heart. */}
         <View style={[styles.sectionHeader, styles.popularHeader]}>
-          <Text style={styles.heading}>Popular</Text>
+          <Text style={styles.heading}>Popular Themes</Text>
           <View style={styles.segmented}>
             {(['ALL', 'OP', 'ED'] as TypeFilter[]).map((value) => {
               const active = typeFilter === value;
@@ -322,10 +434,7 @@ export default function HomeScreen() {
                   accessibilityLabel={`Filter: ${value === 'ALL' ? 'All' : value}`}
                   style={[
                     styles.segment,
-                    active && {
-                      backgroundColor:
-                        value === 'ED' ? theme.tertiary : theme.accent,
-                    },
+                    active && { backgroundColor: theme.accent },
                   ]}
                 >
                   <Text
@@ -438,6 +547,58 @@ const createStyles = (theme: Theme) =>
     ...typeStyles.heading,
     color: theme.text,
   },
+  seasonHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+  },
+  eyebrow: {
+    ...typeStyles.caption,
+    fontFamily: fontFamilies.sectionLabel,
+    color: theme.secondary,
+    textTransform: 'uppercase',
+    letterSpacing: 1.2,
+    marginBottom: 2,
+  },
+  continueCard: {
+    width: 168,
+  },
+  continueArtWrap: {
+    position: 'relative',
+  },
+  continueArt: {
+    width: 168,
+    height: 96,
+    borderRadius: radii.md,
+    backgroundColor: theme.surface,
+  },
+  continuePlay: {
+    position: 'absolute',
+    right: spacing.sm,
+    bottom: spacing.sm,
+    width: 28,
+    height: 28,
+    borderRadius: radii.pill,
+    backgroundColor: theme.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  continueTitle: {
+    ...typeStyles.body,
+    fontSize: 13,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
+    marginTop: spacing.sm,
+  },
+  continueArtist: {
+    ...typeStyles.caption,
+    color: theme.muted,
+    marginTop: 1,
+  },
+  displayTitle: {
+    ...typeStyles.display,
+    color: theme.text,
+  },
   rail: {
     paddingHorizontal: spacing.screenEdge,
     gap: spacing.sm,
@@ -450,7 +611,7 @@ const createStyles = (theme: Theme) =>
     marginHorizontal: spacing.screenEdge,
     marginTop: spacing.lg,
     backgroundColor: theme.accentContainer,
-    borderRadius: radii.pill,
+    borderRadius: radii.cardLg,
     paddingHorizontal: spacing.xl,
     paddingVertical: spacing.md,
     minHeight: 44,
@@ -491,14 +652,18 @@ const createStyles = (theme: Theme) =>
   },
   feedCard: {
     marginHorizontal: spacing.screenEdge,
-    backgroundColor: theme.accentContainer,
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
     borderRadius: radii.cardLg,
     padding: spacing.lg,
     gap: spacing.lg,
   },
   feedCardEmpty: {
     marginHorizontal: spacing.screenEdge,
-    backgroundColor: theme.accentContainer,
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
     borderRadius: radii.cardLg,
     padding: spacing.xxl,
     alignItems: 'center',
@@ -509,7 +674,7 @@ const createStyles = (theme: Theme) =>
     width: 48,
     height: 48,
     borderRadius: radii.pill,
-    backgroundColor: theme.surface,
+    backgroundColor: theme.accentContainer,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: spacing.xs,
@@ -563,26 +728,24 @@ const createStyles = (theme: Theme) =>
     gap: spacing.md,
   },
   segmented: {
+    // Lavender Dusk mock: the filter is three separate pills, not one
+    // segmented bar — lavender chip inactive, mauveDeep filled active.
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
-    padding: 3,
-    borderRadius: radii.pill,
-    backgroundColor: theme.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.border,
+    gap: spacing.sm,
   },
   segment: {
     minWidth: 44,
     alignItems: 'center',
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.md,
     paddingVertical: 6,
     borderRadius: radii.pill,
+    backgroundColor: theme.accentContainer,
   },
   segmentText: {
     ...typeStyles.caption,
     fontFamily: 'Inter_600SemiBold',
-    color: theme.muted,
+    color: theme.onAccentContainer,
   },
   list: {
     paddingHorizontal: spacing.screenEdge,

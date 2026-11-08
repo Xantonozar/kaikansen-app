@@ -775,15 +775,49 @@ export default function ThemeDetailScreen() {
             </View>
 
             <View style={styles.body}>
-              {/* 2 — Info header */}
-              <Text style={styles.eyebrow} numberOfLines={1}>
-                {detail.animeTitle.toUpperCase()}
-              </Text>
-              <Text style={styles.song}>{detail.songTitle}</Text>
-              {artists.length > 0 && (
-                <Text style={styles.artists} numberOfLines={2}>
-                  {artists}
+              {/* 2 — Info header. The anime eyebrow opens the Anime
+                  detail screen (§6.8) and each artist name opens the
+                  Artist detail screen (§6.9) when its slug is known. */}
+              <Pressable
+                onPress={() =>
+                  detail.anilistId != null &&
+                  router.push(`/anime/${detail.anilistId}`)
+                }
+                disabled={detail.anilistId == null}
+                accessibilityRole="button"
+                accessibilityLabel={`Open ${detail.animeTitle}`}
+                hitSlop={4}
+              >
+                <Text style={styles.eyebrow} numberOfLines={1}>
+                  {detail.animeTitle.toUpperCase()}
                 </Text>
+              </Pressable>
+              <Text style={styles.song}>{detail.songTitle}</Text>
+              {detail.allArtists.length > 0 &&
+              detail.artistSlugs.length === detail.allArtists.length ? (
+                <View style={styles.artistsRow}>
+                  {detail.allArtists.map((name, i) => (
+                    <View key={name} style={styles.artistItem}>
+                      {i > 0 && <Text style={styles.artists}> / </Text>}
+                      <Pressable
+                        onPress={() =>
+                          router.push(`/artist/${detail.artistSlugs[i]}`)
+                        }
+                        accessibilityRole="button"
+                        accessibilityLabel={`Open ${name}`}
+                        hitSlop={4}
+                      >
+                        <Text style={styles.artists}>{name}</Text>
+                      </Pressable>
+                    </View>
+                  ))}
+                </View>
+              ) : (
+                artists.length > 0 && (
+                  <Text style={styles.artists} numberOfLines={2}>
+                    {artists}
+                  </Text>
+                )
               )}
               <Text style={styles.meta} numberOfLines={1}>
                 {metaParts.join(' · ')}
@@ -1655,6 +1689,15 @@ const createStyles = (theme: Theme) =>
     fontFamily: fontFamilies.bodyStrong,
     color: theme.text,
     marginTop: spacing.sm,
+  },
+  artistsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+  },
+  artistItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   meta: {
     ...typeStyles.bodySmall,

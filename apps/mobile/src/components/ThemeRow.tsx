@@ -81,14 +81,16 @@ export function ThemeRow({
         ) : null}
       </View>
       <View style={styles.side}>
-        <Text
-          style={[
-            styles.type,
-            { color: item.type === 'ED' ? theme.tertiary : theme.accent },
-          ]}
-        >
-          {item.type} {item.sequence}
-        </Text>
+        <View style={styles.typeChip}>
+          <Text
+            style={[
+              styles.type,
+              { color: item.type === 'ED' ? theme.tertiary : theme.accent },
+            ]}
+          >
+            {item.type} {item.sequence}
+          </Text>
+        </View>
         <View style={styles.tiles}>
           {onRemove && (
             <Pressable
@@ -140,7 +142,7 @@ export function ThemeRow({
               pressed && styles.pressed,
             ]}
           >
-            <Play size={15} color={theme.muted} strokeWidth={2} />
+            <Play size={15} color={theme.accent} fill={theme.accent} strokeWidth={2} />
           </Pressable>
         </View>
       </View>
@@ -151,21 +153,25 @@ export function ThemeRow({
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
   row: {
+    // Lavender Dusk rows: white cards, not hairline-separated lines.
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    paddingVertical: 6,
+    padding: spacing.md,
     minHeight: 56,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: theme.border,
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    borderRadius: radii.card,
+    marginBottom: spacing.sm,
   },
   pressed: {
     opacity: 0.7,
   },
   thumb: {
-    width: 42,
+    width: 52,
     height: 52,
-    borderRadius: radii.base,
+    borderRadius: radii.md,
     backgroundColor: theme.surface,
   },
   placeholder: {
@@ -177,7 +183,7 @@ const createStyles = (theme: Theme) =>
   },
   song: {
     ...typeStyles.body,
-    fontSize: 13,
+    fontSize: 14,
     fontFamily: fontFamilies.bodyStrong,
     color: theme.text,
   },
@@ -197,18 +203,22 @@ const createStyles = (theme: Theme) =>
     flexDirection: 'row',
     gap: spacing.xs,
   },
+  typeChip: {
+    backgroundColor: theme.accentContainer,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
   type: {
     ...typeStyles.caption,
     fontFamily: fontFamilies.bodyStrong,
     letterSpacing: 0.3,
   },
   action: {
-    width: 30,
-    height: 30,
-    borderRadius: 10,
-    backgroundColor: theme.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.border,
+    width: 32,
+    height: 32,
+    borderRadius: radii.pill,
+    backgroundColor: theme.accentContainer,
     alignItems: 'center',
     justifyContent: 'center',
   },
