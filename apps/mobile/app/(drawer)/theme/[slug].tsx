@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState, type ComponentType } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentType,
+} from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -12,6 +18,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { VideoView } from 'expo-video';
 import {
   Bookmark,
   Check,
@@ -20,7 +27,9 @@ import {
   Headphones,
   LayoutGrid,
   ListMusic,
+  Maximize,
   Music,
+  Pause,
   Play,
   Plus,
   RotateCcw,
@@ -61,9 +70,11 @@ import {
 } from '../../../src/libraryApi';
 import {
   entryHasAudio,
+  formatTime,
   isPlausibleUrl,
   resolvePlaybackUrl,
 } from '../../../src/playback';
+import { usePlayback } from '../../../src/usePlayback';
 import {
   downloadId,
   downloadsSupported,
@@ -93,20 +104,26 @@ type IconComponent = ComponentType<{
  * for section, in the app's own design system (DESIGN.md §6.7,
  * compact/icon-led):
  *
- *   1. Media hero — the web embeds its player; the app keeps its
- *      artwork hero (grill/cover, glass back + save, accent play
- *      FAB) opening the player route (Slice M1 architecture).
+ *   1. Media hero — like the web, the player is EMBEDDED here:
+ *      before play it is the artwork hero (grill/cover, glass
+ *      back + save, accent play FAB); pressing Watch/Listen turns
+ *      the hero itself into the player (video surface for watch,
+ *      artwork + hidden surface for listen) with the control
+ *      strip inside the hero — the page never navigates away.
+ *      Playback runs on src/usePlayback.ts, shared with the
+ *      player route the Library/playlists still open.
  *   2. Info header — anime title as a small accent eyebrow, the
  *      song title large, the artists line, one muted meta line
  *      (type/sequence · season · moods).
- *   3. Action bar — Watch/Listen segmented toggle (Listen disabled
- *      when the selected entry has no audio, like the web's), then
- *      Download (primary, opens the download sheet) + add-to-
- *      playlist and share squares.
+ *   3. Action bar — Watch/Listen segmented toggle (starts inline
+ *      playback in that mode; Listen disabled when the selected
+ *      entry has no audio, like the web's), then Download
+ *      (primary, opens the download sheet) + add-to-playlist and
+ *      share squares.
  *   4. Version Select — pill switcher, only when entries > 1.
  *      Like the web's VersionSwitcher it SELECTS the entry the
- *      Watch/Listen/download actions target (the web switches its
- *      inline player's source); it no longer auto-opens the player.
+ *      Watch/Listen/download actions target — and while playing
+ *      it switches the inline player's source, as the web's does.
  *      The default selection mirrors the web: the 'Standard'
  *      version when one exists, else the first entry.
  *   5. Stats bar — Score · Rates · Views · Plays, counts compacted
@@ -172,6 +189,12 @@ export default function ThemeDetailScreen() {
   const [creatingInSheet, setCreatingInSheet] = useState(false);
   const [dlSheetOpen, setDlSheetOpen] = useState(false);
 
+  /* Inline playback: null until the user presses Watch/Listen —
+     the hero then becomes the player (see usePlayback). */
+  const [playMode, setPlayMode] = useState<PlaybackMode | null>(null);
+  const [barWidth, setBarWidth] = useState(0);
+  const videoRef = useRef<VideoView>(null);
+
   /* Similar themes (Slice S8): 'loading' until the read settles;
      a failed fetch resolves to an empty list (the web's empty
      state), never an error surface. */
@@ -187,6 +210,7 @@ export default function ThemeDetailScreen() {
     setState('loading');
     setDetail(null);
     setSelectedEntryIndex(0);
+    setPlayMode(null);
     fetchThemeBySlug(slug)
       .then((data) => {
         if (!live) return;
@@ -265,6 +289,39 @@ export default function ThemeDetailScreen() {
     };
   }, [slug, signedIn]);
 
+  const selectedEntry = detail
+    ? (detail.entries[selectedEntryIndex] ?? null)
+    : null;
+  const listenAvailable =
+    detail !== null &&
+    selectedEntry !== null &&
+    entryHasAudio(detail, selectedEntry);
+
+  /* Inline playback engine (src/usePlayback) — inactive until the
+     user presses Watch/Listen; then the hero below is the player.
+     Switching the selected entry while playing switches the source,
+     like the web's VersionSwitcher driving its inline player. */
+  const playback = usePlayback({
+    slug: detail?.slug ?? slug,
+    detail,
+    entry: selectedEntry,
+    mode: playMode ?? 'watch',
+    active: playMode !== null && detail !== null,
+  });
+
+  /** Start (or switch to) inline playback in a mode, for an entry
+      (defaults to the selected one). */
+  const startPlayback = (
+    mode: PlaybackMode,
+    entryIndex = selectedEntryIndex,
+  ) => {
+    if (!detail) return;
+    const entry = detail.entries[entryIndex];
+    if (!entry) return;
+    setSelectedEntryIndex(entryIndex);
+    setPlayMode(mode);
+  };
+
   /** Rounded-square back button; `glass` floats it over the artwork. */
   const backTile = (glass: boolean) => (
     <Pressable
@@ -316,25 +373,6 @@ export default function ThemeDetailScreen() {
   }
 
   const hasMultipleVersions = (detail?.entries.length ?? 0) > 1;
-  const selectedEntry = detail
-    ? (detail.entries[selectedEntryIndex] ?? null)
-    : null;
-  const listenAvailable =
-    detail !== null &&
-    selectedEntry !== null &&
-    entryHasAudio(detail, selectedEntry);
-
-  /** Open the player for an entry (defaults to the selected one). */
-  const openPlayer = (mode: PlaybackMode, entryIndex = selectedEntryIndex) => {
-    if (!detail) return;
-    const entry = detail.entries[entryIndex];
-    if (!entry) return;
-    setSelectedEntryIndex(entryIndex);
-    router.push({
-      pathname: '/player',
-      params: { slug: detail.slug, mode, entry: String(entry.atEntryId) },
-    });
-  };
 
   /* ---------------- Slice M2: save / rating / playlists ---------------- */
 
@@ -556,6 +594,79 @@ export default function ThemeDetailScreen() {
     </View>
   );
 
+  const onStripSeek = (locationX: number) => {
+    if (barWidth <= 0) return;
+    playback.seekToRatio(locationX / barWidth);
+  };
+
+  /* The inline player's control strip — lives INSIDE the hero,
+     along its bottom edge, in both modes (the design rule: the
+     hero card IS the player; controls sit in the card, not in a
+     separate surface). Play/pause (replay once ended), tap-to-
+     seek with time labels, fullscreen in watch mode. */
+  const playerStrip = (
+    <View style={styles.playerStrip}>
+      <Pressable
+        onPress={playback.toggleMain}
+        accessibilityRole="button"
+        accessibilityLabel={
+          playback.ended ? 'Replay' : playback.isPlaying ? 'Pause' : 'Play'
+        }
+        style={({ pressed }) => [
+          styles.stripButton,
+          pressed && styles.pressed,
+        ]}
+      >
+        {playback.ended ? (
+          <RotateCcw size={18} color={theme.onAccent} strokeWidth={2} />
+        ) : playback.isPlaying ? (
+          <Pause size={18} color={theme.onAccent} strokeWidth={2} />
+        ) : (
+          <Play size={18} color={theme.onAccent} strokeWidth={2} />
+        )}
+      </Pressable>
+      <Pressable
+        onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+        onPress={(e) => onStripSeek(e.nativeEvent.locationX)}
+        accessibilityRole="adjustable"
+        accessibilityLabel="Seek"
+        style={styles.stripSeekHit}
+      >
+        <View style={styles.seekTrack}>
+          <View
+            style={[
+              styles.seekFill,
+              { width: `${playback.fraction * 100}%` },
+            ]}
+          />
+          <View
+            style={[
+              styles.seekKnob,
+              { left: `${playback.fraction * 100}%` },
+            ]}
+          />
+        </View>
+      </Pressable>
+      <Text style={styles.stripTime}>
+        {formatTime(playback.progress.current)} /{' '}
+        {formatTime(playback.progress.duration)}
+      </Text>
+      {playMode === 'watch' && (
+        <Pressable
+          onPress={() => {
+            void videoRef.current?.enterFullscreen();
+          }}
+          hitSlop={6}
+          accessibilityRole="button"
+          accessibilityLabel="Fullscreen"
+          style={styles.stripIconButton}
+        >
+          <Maximize size={18} color={theme.text} strokeWidth={2} />
+        </Pressable>
+      )}
+    </View>
+  );
+
   return (
     <>
     <ScrollView style={styles.screen} showsVerticalScrollIndicator={false}>
@@ -578,12 +689,45 @@ export default function ThemeDetailScreen() {
           </View>
         ) : (
           <>
-            {/* 1 — Media hero */}
+            {/* 1 — Media hero (the player, once playing) */}
             <View style={styles.artWrap}>
-              {cover ? (
-                <Image source={{ uri: cover }} style={styles.cover} />
+              {playMode === 'watch' ? (
+                <View style={styles.heroPlayer}>
+                  <VideoView
+                    ref={videoRef}
+                    player={playback.player}
+                    style={styles.heroVideo}
+                    contentFit="contain"
+                    nativeControls={false}
+                  />
+                  {playback.buffering && (
+                    <View style={styles.heroCenter}>
+                      <ActivityIndicator color={theme.accent} size="large" />
+                    </View>
+                  )}
+                  {playerStrip}
+                </View>
               ) : (
-                <View style={[styles.cover, styles.coverEmpty]} />
+                <>
+                  {cover ? (
+                    <Image source={{ uri: cover }} style={styles.cover} />
+                  ) : (
+                    <View style={[styles.cover, styles.coverEmpty]} />
+                  )}
+                  {playMode === 'listen' && (
+                    <>
+                      {/* Audio plays through the player; the surface
+                          stays mounted but invisible, so listen mode
+                          keeps the artwork as its face. */}
+                      <VideoView
+                        player={playback.player}
+                        style={styles.hiddenSurface}
+                        nativeControls={false}
+                      />
+                      {playerStrip}
+                    </>
+                  )}
+                </>
               )}
               <View
                 style={[styles.overlay, { top: insets.top + spacing.sm }]}
@@ -615,17 +759,19 @@ export default function ThemeDetailScreen() {
                   </Pressable>
                 </View>
               </View>
-              <Pressable
-                onPress={() => openPlayer('watch')}
-                accessibilityRole="button"
-                accessibilityLabel="Play"
-                style={({ pressed }) => [
-                  styles.fab,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Play size={24} color={theme.onAccent} strokeWidth={2} />
-              </Pressable>
+              {playMode === null && (
+                <Pressable
+                  onPress={() => startPlayback('watch')}
+                  accessibilityRole="button"
+                  accessibilityLabel="Play"
+                  style={({ pressed }) => [
+                    styles.fab,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Play size={24} color={theme.onAccent} strokeWidth={2} />
+                </Pressable>
+              )}
             </View>
 
             <View style={styles.body}>
@@ -643,41 +789,96 @@ export default function ThemeDetailScreen() {
                 {metaParts.join(' · ')}
               </Text>
 
+              {/* Inline playback problems surface here, under the
+                  hero — the strip stays clean. */}
+              {playMode !== null && playback.unavailable ? (
+                <Text style={styles.playerNote}>
+                  {fixtureMode
+                    ? 'Playback is not available in demo mode for this theme.'
+                    : 'No playable source is available for this version.'}
+                </Text>
+              ) : playMode !== null && playback.playerError ? (
+                <View style={styles.playerErrorRow}>
+                  <Text style={[styles.playerNote, styles.playerNoteFlex]}>
+                    {playback.playerError}
+                  </Text>
+                  <Pressable
+                    onPress={playback.retry}
+                    accessibilityRole="button"
+                    accessibilityLabel="Try again"
+                    style={({ pressed }) => [
+                      styles.retryChip,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <RotateCcw size={13} color={theme.onAccent} strokeWidth={2} />
+                    <Text style={styles.retryChipText}>Try again</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
               {/* 3 — Action bar */}
               <View style={styles.modeToggle}>
                 <Pressable
-                  onPress={() => openPlayer('watch')}
+                  onPress={() => startPlayback('watch')}
                   accessibilityRole="button"
                   accessibilityLabel="Watch"
+                  accessibilityState={{ selected: playMode !== 'listen' }}
                   style={({ pressed }) => [
                     styles.modeSegment,
-                    styles.modeSegmentActive,
+                    playMode !== 'listen' && styles.modeSegmentActive,
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Play size={17} color={theme.onAccent} strokeWidth={2} />
-                  <Text style={styles.modeSegmentTextActive}>Watch</Text>
+                  <Play
+                    size={17}
+                    color={
+                      playMode !== 'listen' ? theme.onAccent : theme.text
+                    }
+                    strokeWidth={2}
+                  />
+                  <Text
+                    style={
+                      playMode !== 'listen'
+                        ? styles.modeSegmentTextActive
+                        : styles.modeSegmentText
+                    }
+                  >
+                    Watch
+                  </Text>
                 </Pressable>
                 <Pressable
-                  onPress={() => openPlayer('listen')}
+                  onPress={() => startPlayback('listen')}
                   disabled={!listenAvailable}
                   accessibilityRole="button"
                   accessibilityLabel="Listen"
-                  accessibilityState={{ disabled: !listenAvailable }}
+                  accessibilityState={{
+                    disabled: !listenAvailable,
+                    selected: playMode === 'listen',
+                  }}
                   style={({ pressed }) => [
                     styles.modeSegment,
+                    playMode === 'listen' && styles.modeSegmentActive,
                     !listenAvailable && styles.modeSegmentDisabled,
                     pressed && styles.pressed,
                   ]}
                 >
                   <Headphones
                     size={17}
-                    color={listenAvailable ? theme.text : theme.muted}
+                    color={
+                      !listenAvailable
+                        ? theme.muted
+                        : playMode === 'listen'
+                          ? theme.onAccent
+                          : theme.text
+                    }
                     strokeWidth={2}
                   />
                   <Text
                     style={[
-                      styles.modeSegmentText,
+                      playMode === 'listen'
+                        ? styles.modeSegmentTextActive
+                        : styles.modeSegmentText,
                       !listenAvailable && { color: theme.muted },
                     ]}
                   >
@@ -1325,6 +1526,109 @@ const createStyles = (theme: Theme) =>
     justifyContent: 'center',
     zIndex: 6,
     elevation: 6,
+  },
+  heroPlayer: {
+    position: 'relative',
+    backgroundColor: '#000',
+  },
+  heroVideo: {
+    width: '100%',
+    aspectRatio: 16 / 9,
+    backgroundColor: '#000',
+  },
+  hiddenSurface: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+  },
+  heroCenter: {
+    ...StyleSheet.absoluteFill,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playerStrip: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    backgroundColor: withOpacity(theme.background, 0.72),
+    zIndex: 4,
+  },
+  stripButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: theme.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stripIconButton: {
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stripSeekHit: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+  },
+  seekTrack: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: theme.raised,
+    justifyContent: 'center',
+  },
+  seekFill: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: theme.accent,
+  },
+  seekKnob: {
+    position: 'absolute',
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginLeft: -6,
+    backgroundColor: theme.accent,
+  },
+  stripTime: {
+    ...typeStyles.mono,
+    color: theme.text,
+  },
+  playerNote: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+    marginTop: spacing.md,
+    lineHeight: 18,
+  },
+  playerNoteFlex: {
+    flex: 1,
+    marginTop: 0,
+  },
+  playerErrorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  retryChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: theme.accent,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 2,
+  },
+  retryChipText: {
+    ...typeStyles.caption,
+    color: theme.onAccent,
   },
   body: {
     paddingHorizontal: spacing.screenEdge,
