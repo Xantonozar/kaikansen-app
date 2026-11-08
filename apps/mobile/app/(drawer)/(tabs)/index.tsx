@@ -7,38 +7,64 @@ import {
   Text,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
-import { Shuffle } from 'lucide-react-native';
-import type { HomeResponse, ThemeType } from '@kaikansen/contracts';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { Shuffle, Users } from 'lucide-react-native';
+import type {
+  FriendsActivityItem,
+  HomeResponse,
+  ThemeType,
+} from '@kaikansen/contracts';
 import { fetchHome, fixtureMode } from '../../../src/api';
+import { useAuth } from '../../../src/auth';
 import { useFavorites } from '../../../src/favoritesStore';
+import { fetchFriendsActivity } from '../../../src/socialApi';
+import { Avatar } from '../../../src/components/Avatar';
+import { PopularCard } from '../../../src/components/PopularCard';
 import { PosterCard } from '../../../src/components/PosterCard';
-import { ThemeRow } from '../../../src/components/ThemeRow';
-import { radii, spacing, typeStyles, type Theme } from '../../../src/theme';
+import { relativeTime } from '../../../src/time';
+import {
+  fontFamilies,
+  radii,
+  spacing,
+  typeStyles,
+  type Theme,
+} from '../../../src/theme';
 import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
 type TypeFilter = 'ALL' | ThemeType;
 
+/** How many feed rows Home previews; the full feed lives on Social. */
+const HOME_FEED_PREVIEW = 5;
+
 /**
- * Home (DESIGN.md §6.4) — the web home composition at phone size:
- * season poster rail → Surprise pill bar → Friends Activity → Popular
- * Themes with the OP/ED filter → the web's end marker. Compact
- * treatment (approved mockup v1): content sits in a centred,
- * width-capped column, and the existing type filter is drawn as a
- * segmented All/OP/ED control in the Popular header row. Data comes
- * from the new API, or from the bundled real-data fixture when no API
- * URL is configured (see src/api.ts).
+ * Home — the web home composition at phone size (HomeClient.tsx):
+ * season poster rail → Surprise card → Friends Activity → Popular
+ * Themes with the OP/ED filter → the web's end marker. The visual
+ * treatments are ported from the website's Home (2026-11-08): season
+ * cards carry the title in-art over a scrim (ThemeFeaturedCard),
+ * Surprise is the web's quiet accent-container card with a circular
+ * shuffle button (SurpriseBanner), Friends Activity uses the web's
+ * empty/loading cards (FriendsActivity.tsx), and Popular rows are the
+ * web's rounded accent-container cards with play + heart
+ * (ThemeListRow). Content sits in a centred, width-capped column, and
+ * the type filter is a segmented All/OP/ED control in the Popular
+ * header row. Data comes from the new API, or from the bundled
+ * real-data fixture when no API URL is configured (see src/api.ts).
  */
 export default function HomeScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
   const favorites = useFavorites();
+  const { status, user } = useAuth();
+  const signedIn = status === 'signedIn' && user !== null;
   const [home, setHome] = useState<HomeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('ALL');
+  const [feed, setFeed] = useState<FriendsActivityItem[] | null>(null);
+  const [feedFailed, setFeedFailed] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -58,8 +84,32 @@ export default function HomeScreen() {
     };
   }, [reloadKey]);
 
+  /* Friends Activity (the web's section): the follow-based feed from
+     Slice M5, refetched on focus like the Social tab. Signed-out
+     never fetches — the section renders its sign-in empty card. */
+  const loadFeed = useCallback(() => {
+    if (!signedIn) return;
+    fetchFriendsActivity(30)
+      .then((res) => {
+        setFeed(res.activities);
+        setFeedFailed(false);
+      })
+      .catch(() => setFeedFailed(true));
+  }, [signedIn]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadFeed();
+    }, [loadFeed]),
+  );
+
   const openTheme = useCallback(
     (slug: string) => router.push(`/theme/${slug}`),
+    [router],
+  );
+
+  const openProfile = useCallback(
+    (username: string) => router.push(`/user/${username}`),
     [router],
   );
 
@@ -99,6 +149,14 @@ export default function HomeScreen() {
     typeFilter === 'ALL'
       ? home.popular
       : home.popular.filter((t) => t.type === typeFilter);
+
+  /* Friends Activity states, mirroring the web's FriendsActivity:
+     loading card → feed card → empty card. Copy is honest per state:
+     signed-out gets the sign-in framing, signed-in with no activity
+     gets the web's follow framing. */
+  const feedLoading = signedIn && feed === null && !feedFailed;
+  const feedItems = feed ?? [];
+  const feedEmpty = !feedLoading && feedItems.length === 0;
 
   return (
     <ScrollView
@@ -146,7 +204,9 @@ export default function HomeScreen() {
           )}
         </ScrollView>
 
-        {/* Surprise pill bar */}
+        {/* Surprise — the web's SurpriseBanner as a quiet card:
+            title + subtitle on the left, circular accent shuffle
+            button on the right (same random-pick behaviour). */}
         <Pressable
           onPress={surprise}
           style={({ pressed }) => [
@@ -156,23 +216,97 @@ export default function HomeScreen() {
           accessibilityRole="button"
           accessibilityLabel="Surprise me"
         >
-          <Shuffle size={16} color={theme.onAccent} strokeWidth={2} />
-          <Text style={styles.surpriseText}>Surprise</Text>
+          <View style={styles.surpriseTextBlock}>
+            <Text style={styles.surpriseTitle}>Surprise Me</Text>
+            <Text style={styles.surpriseSubtitle}>
+              Discover a random track
+            </Text>
+          </View>
+          <View style={styles.surpriseButton}>
+            <Shuffle size={20} color={theme.onAccent} strokeWidth={2} />
+          </View>
         </Pressable>
 
-        {/* Friends Activity — honest empty state: social data is not part of
-            the read-path prototype (no signed-in social graph yet). */}
-        <View style={styles.sectionHeader}>
+        {/* Friends Activity */}
+        <View style={[styles.sectionHeader, styles.feedHeader]}>
           <Text style={styles.heading}>Friends Activity</Text>
+          <Pressable
+            onPress={() => router.push('/social')}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel={feedEmpty ? 'Find friends' : 'View full feed'}
+          >
+            <Text style={styles.feedLink}>
+              {feedEmpty ? 'Find Friends' : 'View Full Feed'}
+            </Text>
+          </Pressable>
         </View>
-        <Text style={styles.emptyText}>
-          Nothing here yet — friends activity arrives with sign-in and the
-          social slice.
-        </Text>
+        {feedLoading ? (
+          <View style={styles.feedCardEmpty}>
+            <ActivityIndicator color={theme.accent} />
+            <Text style={styles.feedEmptySub}>
+              Catching up with friends…
+            </Text>
+          </View>
+        ) : feedEmpty ? (
+          <View style={styles.feedCardEmpty}>
+            <View style={styles.feedIconCircle}>
+              <Users size={24} color={theme.muted} strokeWidth={2} />
+            </View>
+            <Text style={styles.feedEmptyTitle}>
+              No activity from friends yet.
+            </Text>
+            <Text style={styles.feedEmptySub}>
+              {signedIn
+                ? 'Follow some people to see what they’re listening to!'
+                : 'Sign in to see what your friends are listening to!'}
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.feedCard}>
+            {feedItems.slice(0, HOME_FEED_PREVIEW).map((activity) => (
+              <View key={activity.id} style={styles.feedRow}>
+                <Pressable
+                  onPress={() => openProfile(activity.user.username)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${activity.user.displayName}'s profile`}
+                >
+                  <Avatar
+                    url={activity.user.avatar}
+                    name={activity.user.displayName}
+                    size={44}
+                  />
+                </Pressable>
+                <View style={styles.feedMain}>
+                  <Text style={styles.feedLine} numberOfLines={1}>
+                    <Text
+                      style={styles.feedName}
+                      onPress={() => openProfile(activity.user.username)}
+                    >
+                      {activity.user.displayName}
+                    </Text>
+                    {activity.type === 'listening'
+                      ? ' is listening to'
+                      : ' liked'}
+                  </Text>
+                  <Pressable onPress={() => openTheme(activity.item.slug)}>
+                    <Text style={styles.feedTheme} numberOfLines={1}>
+                      {activity.item.title}
+                    </Text>
+                  </Pressable>
+                </View>
+                <Text style={styles.feedTime}>
+                  {relativeTime(activity.timestamp)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
 
         {/* Popular Themes with the All/OP/ED segmented filter (the existing
             client-side type filter in segmented-control dress; the web
-            filters server-side — FR-HOME-01). */}
+            filters server-side — FR-HOME-01). Rows are the web's rounded
+            Popular cards with play + heart. */}
         <View style={[styles.sectionHeader, styles.popularHeader]}>
           <Text style={styles.heading}>Popular</Text>
           <View style={styles.segmented}>
@@ -209,7 +343,7 @@ export default function HomeScreen() {
         </View>
         <View style={styles.list}>
           {popular.map((item) => (
-            <ThemeRow
+            <PopularCard
               key={item.slug}
               item={item}
               onPress={() => openTheme(item.slug)}
@@ -311,22 +445,110 @@ const createStyles = (theme: Theme) =>
   surprise: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
+    justifyContent: 'space-between',
+    gap: spacing.md,
     marginHorizontal: spacing.screenEdge,
     marginTop: spacing.lg,
-    backgroundColor: theme.accent,
+    backgroundColor: theme.accentContainer,
     borderRadius: radii.pill,
-    paddingVertical: spacing.sm + 2,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.md,
     minHeight: 44,
   },
   pressed: {
     opacity: 0.85,
   },
-  surpriseText: {
+  surpriseTextBlock: {
+    flex: 1,
+    gap: 2,
+  },
+  surpriseTitle: {
+    ...typeStyles.heading,
+    color: theme.text,
+  },
+  surpriseSubtitle: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+  },
+  surpriseButton: {
+    width: 48,
+    height: 48,
+    borderRadius: radii.pill,
+    backgroundColor: theme.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  feedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
+  feedLink: {
     ...typeStyles.body,
-    fontFamily: 'Inter_600SemiBold',
-    color: theme.onAccent,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.accent,
+  },
+  feedCard: {
+    marginHorizontal: spacing.screenEdge,
+    backgroundColor: theme.accentContainer,
+    borderRadius: radii.cardLg,
+    padding: spacing.lg,
+    gap: spacing.lg,
+  },
+  feedCardEmpty: {
+    marginHorizontal: spacing.screenEdge,
+    backgroundColor: theme.accentContainer,
+    borderRadius: radii.cardLg,
+    padding: spacing.xxl,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  feedIconCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: radii.pill,
+    backgroundColor: theme.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.xs,
+  },
+  feedEmptyTitle: {
+    ...typeStyles.body,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
+    textAlign: 'center',
+  },
+  feedEmptySub: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+    textAlign: 'center',
+  },
+  feedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  feedMain: {
+    flex: 1,
+  },
+  feedLine: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+  },
+  feedName: {
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
+  },
+  feedTheme: {
+    ...typeStyles.body,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.accent,
+  },
+  feedTime: {
+    ...typeStyles.caption,
+    color: theme.muted,
   },
   emptyText: {
     ...typeStyles.body,
@@ -364,6 +586,7 @@ const createStyles = (theme: Theme) =>
   },
   list: {
     paddingHorizontal: spacing.screenEdge,
+    gap: spacing.sm,
   },
   endMarker: {
     ...typeStyles.bodySmall,
