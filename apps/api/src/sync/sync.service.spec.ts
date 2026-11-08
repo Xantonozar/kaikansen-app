@@ -433,6 +433,29 @@ describe('SyncService themes job', () => {
 
 /* ── Popular job ──────────────────────────────────────────────────── */
 
+/* ── Popular job ──────────────────────────────────────────────────── */
+
+/** A fake catalogue holding exactly one doc per curated pair. */
+function catalogueFromPairs(count = 50) {
+  const pairs = parsePopularPairs().slice(0, count);
+  const themeModel = new FakeThemeModel();
+  themeModel.docs = pairs.map(
+    (p, i) =>
+      ({
+        _id: `doc-${i}`,
+        songTitle: p.song,
+        animeTitle: p.anime,
+        animeTitleEnglish: null,
+        animeTitleAlternative: [],
+        type: p.type,
+        sequence: 1,
+        isPopular: false,
+        popularRank: null,
+      }) as unknown as FakeThemeDoc,
+  );
+  return { pairs: parsePopularPairs(), themeModel };
+}
+
 describe('SyncService popular job', () => {
   it('MATCH-FIRST floor: too few matches aborts and leaves every flag untouched', async () => {
     const themeModel = new FakeThemeModel();
@@ -441,6 +464,7 @@ describe('SyncService popular job', () => {
         _id: 'keep-1',
         songTitle: 'Unravel',
         animeTitle: 'Tokyo Ghoul',
+        type: 'OP',
         isPopular: true,
         popularRank: 2,
       } as FakeThemeDoc,
@@ -448,6 +472,7 @@ describe('SyncService popular job', () => {
         _id: 'keep-2',
         songTitle: 'Tank!',
         animeTitle: 'Cowboy Bebop',
+        type: 'OP',
         isPopular: true,
         popularRank: 4,
       } as FakeThemeDoc,
@@ -461,6 +486,7 @@ describe('SyncService popular job', () => {
     expect(status.state).toBe('failed');
     expect(status.kind).toBe('popular');
     expect(status.lastError).toContain('match floor');
+    expect(status.lastError).toContain('45');
     // The reset/apply writes NEVER happened.
     expect(themeModel.updateManyCalls).toHaveLength(0);
     expect(themeModel.findByIdAndUpdateCalls).toHaveLength(0);
@@ -468,21 +494,37 @@ describe('SyncService popular job', () => {
     expect(themeModel.docs.map((d) => d.popularRank)).toEqual([2, 4]);
   });
 
+  it('floor boundary: exactly 45 of 50 matched completes the job', async () => {
+    const { themeModel } = catalogueFromPairs(45);
+    const { service } = makeService({ themeModel });
+
+    service.startPopularSync();
+    await service.currentJob;
+
+    const status = service.getStatus();
+    expect(status.state).toBe('completed');
+    expect(themeModel.findByIdAndUpdateCalls).toHaveLength(45);
+    expect(
+      themeModel.docs.filter((d) => d.isPopular === true),
+    ).toHaveLength(45);
+  });
+
+  it('floor boundary: 44 of 50 matched aborts with flags untouched', async () => {
+    const { themeModel } = catalogueFromPairs(44);
+    const { service } = makeService({ themeModel });
+
+    service.startPopularSync();
+    await service.currentJob;
+
+    const status = service.getStatus();
+    expect(status.state).toBe('failed');
+    expect(status.lastError).toContain('match floor');
+    expect(themeModel.updateManyCalls).toHaveLength(0);
+    expect(themeModel.findByIdAndUpdateCalls).toHaveLength(0);
+  });
+
   it('past the floor: resets all flags, then applies matched flags with list ranks', async () => {
-    const pairs = parsePopularPairs();
-    const themeModel = new FakeThemeModel();
-    themeModel.docs = pairs.map(
-      (p, i) =>
-        ({
-          _id: `doc-${i}`,
-          songTitle: p.song,
-          animeTitle: p.anime,
-          animeTitleEnglish: null,
-          animeTitleAlternative: [],
-          isPopular: false,
-          popularRank: null,
-        }) as unknown as FakeThemeDoc,
-    );
+    const { pairs, themeModel } = catalogueFromPairs();
     // A stale flag on a doc that matches nothing must be reset too.
     themeModel.docs.push({
       _id: 'stale',
@@ -498,19 +540,93 @@ describe('SyncService popular job', () => {
 
     const status = service.getStatus();
     expect(status.state).toBe('completed');
-    expect(status.themesProcessed).toBe(pairs.length);
+    expect(status.themesProcessed).toBe(50);
     expect(themeModel.updateManyCalls).toHaveLength(1);
-    expect(themeModel.findByIdAndUpdateCalls.length).toBeGreaterThanOrEqual(
-      100,
-    );
+    expect(themeModel.findByIdAndUpdateCalls).toHaveLength(50);
 
-    const unravelPair = pairs.find((p) => p.song === 'Unravel');
-    const unravelDoc = themeModel.docs.find((d) => d.songTitle === 'Unravel');
+    const flagged = themeModel.docs.filter((d) => d.isPopular === true);
+    expect(flagged).toHaveLength(50);
+    // Every flagged doc carries exactly its pair's rank.
+    for (const doc of flagged) {
+      const pair = pairs.find(
+        (p) => p.song === doc.songTitle && p.anime === doc.animeTitle,
+      );
+      expect(pair).toBeDefined();
+      expect(doc.popularRank).toBe(pair?.rank);
+    }
+
+    const unravelPair = pairs.find((p) => p.song === 'unravel');
+    const unravelDoc = themeModel.docs.find((d) => d.songTitle === 'unravel');
     expect(unravelDoc?.isPopular).toBe(true);
     expect(unravelDoc?.popularRank).toBe(unravelPair?.rank);
 
     const stale = themeModel.docs.find((d) => d._id === 'stale');
     expect(stale?.isPopular).toBe(false);
     expect(stale?.popularRank).toBeNull();
+  });
+
+  it('type-strict + deterministic pick: decoys of the wrong type / anime / version never win', async () => {
+    const { themeModel } = catalogueFromPairs();
+    themeModel.docs.push(
+      // Same song + anime as the Magia ED pair, but an OP doc.
+      {
+        _id: 'decoy-type',
+        songTitle: 'Magia',
+        animeTitle: 'Mahou Shoujo Madoka★Magica',
+        animeTitleEnglish: null,
+        animeTitleAlternative: [],
+        type: 'OP',
+        sequence: 1,
+        isPopular: false,
+        popularRank: null,
+      } as unknown as FakeThemeDoc,
+      // Same song as the Wind pair, right type, wrong anime entry.
+      {
+        _id: 'decoy-anime',
+        songTitle: 'Wind',
+        animeTitle: 'Naruto: Shippuuden',
+        animeTitleEnglish: null,
+        animeTitleAlternative: [],
+        type: 'ED',
+        sequence: 1,
+        isPopular: false,
+        popularRank: null,
+      } as unknown as FakeThemeDoc,
+      // A "version" variant of Fly Me to the Moon (substring pass only).
+      {
+        _id: 'decoy-version',
+        songTitle: 'Fly Me to the Moon (Test Version)',
+        animeTitle: 'Neon Genesis Evangelion',
+        animeTitleEnglish: null,
+        animeTitleAlternative: [],
+        type: 'ED',
+        sequence: 1,
+        isPopular: false,
+        popularRank: null,
+      } as unknown as FakeThemeDoc,
+    );
+
+    const { service } = makeService({ themeModel });
+    service.startPopularSync();
+    await service.currentJob;
+
+    expect(service.getStatus().state).toBe('completed');
+    for (const id of ['decoy-type', 'decoy-anime', 'decoy-version']) {
+      const decoy = themeModel.docs.find((d) => d._id === id);
+      expect(decoy?.isPopular).toBe(false);
+      expect(decoy?.popularRank).toBeNull();
+    }
+    const magia = themeModel.docs.find(
+      (d) => d.songTitle === 'Magia' && d.type === 'ED',
+    );
+    expect(magia?.popularRank).toBe(36);
+    const wind = themeModel.docs.find(
+      (d) => d.songTitle === 'Wind' && d.animeTitle === 'Naruto',
+    );
+    expect(wind?.popularRank).toBe(27);
+    const flyMe = themeModel.docs.find(
+      (d) => d.songTitle === 'Fly Me to the Moon',
+    );
+    expect(flyMe?.popularRank).toBe(30);
   });
 });

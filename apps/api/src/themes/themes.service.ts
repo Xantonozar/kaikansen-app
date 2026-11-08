@@ -24,6 +24,12 @@ import { toThemeDetail, toThemeSummary, type ThemeDoc } from './theme.mapper';
 
 const RAIL_LIMIT = 20;
 /**
+ * The /home popular rail serves the full curated list: 50 entries
+ * since the 2026-11-08 rebuild (30 OP + 20 ED), so its cap is
+ * separate from the season rail's 20.
+ */
+const POPULAR_LIMIT = 50;
+/**
  * How far back the /home season rail may walk when the current season
  * has no themes yet (owner's order, 2026-11-08): two full years of
  * seasons. Beyond that the rail honestly stays empty.
@@ -158,7 +164,7 @@ export class ThemesService {
       model
         .find({ isPopular: true })
         .sort({ popularRank: 1 })
-        .limit(RAIL_LIMIT)
+        .limit(POPULAR_LIMIT)
         .lean()
         .exec(),
     ]);

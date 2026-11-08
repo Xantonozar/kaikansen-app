@@ -450,11 +450,22 @@ export class SyncService {
   }
 
   /**
-   * One pair's matching, ported from the web's seed-popular route:
-   * candidates by case-insensitive regex over the three title fields,
-   * then (in order) full song-title substring, first-two-words song
-   * regex, the manual overrides map, and a $text search fallback.
-   * Returns the matched document's id carrier, or null.
+   * One pair's matching. Candidate retrieval is ported from the web's
+   * seed-popular route (case-insensitive regex over the three title
+   * fields; song passes are full-substring, first-two-words regex, the
+   * manual overrides map, then a $text fallback) — with two deliberate
+   * changes for the curated 50-entry list (2026-11-08):
+   *
+   * - TYPE-STRICT: an entry is typed OP/ED and only ever flags a theme
+   *   of its own type. The web's list was untyped and the route never
+   *   looked at the type field, so an OP entry could flag an ED doc
+   *   sharing its song title (and vice versa).
+   * - DETERMINISTIC PICK: instead of the web's first-candidate-wins,
+   *   ALL passing candidates are collected and the winner is chosen by
+   *   (1) exact stored song title, (2) exact anime title, (3) lowest
+   *   sequence. Franchises re-use songs across entries (One Piece's
+   *   "We Are!" is OP1 and OP7; Evangelion has 14 "Fly Me to the Moon"
+   *   ED variants), and the curated list always means the iconic one.
    */
   private async matchPopularPair(
     pair: PopularPair,
@@ -475,32 +486,89 @@ export class SyncService {
         ],
       })
       .lean()
-      .exec()) as { _id: unknown; songTitle: string }[];
+      .exec()) as PopularCandidate[];
 
-    for (const c of candidates) {
-      if (c.songTitle.toLowerCase().includes(pair.song.toLowerCase())) {
-        return c;
-      }
-      if (regexSongLoose.test(c.songTitle)) {
-        return c;
-      }
-    }
-
-    const overrideSong =
-      POPULAR_SONG_OVERRIDES[pair.song] ??
-      POPULAR_SONG_OVERRIDES[pair.song.substring(0, 15)];
-    if (overrideSong) {
-      const found = candidates.find((c) =>
-        c.songTitle.toLowerCase().includes(overrideSong.toLowerCase()),
-      );
-      if (found) return found;
-    }
+    const passing = candidates.filter(
+      (c) =>
+        c.type === pair.type &&
+        this.popularSongMatches(c.songTitle, pair, regexSongLoose),
+    );
+    if (passing.length > 0) return this.pickPopularMatch(passing, pair);
 
     const textMatches = (await themeModel
       .find({ $text: { $search: `"${pair.song}" "${cleanAnime}"` } })
-      .limit(1)
+      .limit(5)
       .lean()
-      .exec()) as { _id: unknown; songTitle: string }[];
-    return textMatches.length > 0 ? textMatches[0] : null;
+      .exec()) as PopularCandidate[];
+    const typedText = textMatches.filter((c) => c.type === pair.type);
+    return typedText.length > 0
+      ? this.pickPopularMatch(typedText, pair)
+      : null;
   }
+
+  /** The web route's three song passes, as one predicate. */
+  private popularSongMatches(
+    songTitle: string,
+    pair: PopularPair,
+    regexSongLoose: RegExp,
+  ): boolean {
+    if (songTitle.toLowerCase().includes(pair.song.toLowerCase())) {
+      return true;
+    }
+    if (regexSongLoose.test(songTitle)) return true;
+    const overrideSong =
+      POPULAR_SONG_OVERRIDES[pair.song] ??
+      POPULAR_SONG_OVERRIDES[pair.song.substring(0, 15)];
+    return overrideSong
+      ? songTitle.toLowerCase().includes(overrideSong.toLowerCase())
+      : false;
+  }
+
+  /**
+   * Deterministic winner among passing candidates: exact stored song
+   * title first, then exact anime title (either title field, with the
+   * catalogue's bracket/trailing-dot decorations normalised away),
+   * then the lowest sequence — the original, iconic entry.
+   */
+  private pickPopularMatch(
+    docs: PopularCandidate[],
+    pair: PopularPair,
+  ): PopularCandidate {
+    const norm = (s: string) =>
+      s
+        .toLowerCase()
+        .trim()
+        .replace(/^\[/, '')
+        .replace(/\]$/, '')
+        .replace(/\.$/, '')
+        .trim();
+    const targetSong = pair.song.toLowerCase();
+    const targetAnime = norm(pair.anime);
+    const score = (c: PopularCandidate): [number, number, number] => [
+      c.songTitle.toLowerCase() === targetSong ? 0 : 1,
+      norm(c.animeTitle ?? '') === targetAnime ||
+      norm(c.animeTitleEnglish ?? '') === targetAnime
+        ? 0
+        : 1,
+      c.sequence ?? Number.MAX_SAFE_INTEGER,
+    ];
+    return [...docs].sort((a, b) => {
+      const sa = score(a);
+      const sb = score(b);
+      for (let i = 0; i < 3; i++) {
+        if (sa[i] !== sb[i]) return sa[i] - sb[i];
+      }
+      return 0;
+    })[0];
+  }
+}
+
+/** The fields of a theme doc the popular matcher reads. */
+interface PopularCandidate {
+  _id: unknown;
+  songTitle: string;
+  type?: string;
+  sequence?: number | null;
+  animeTitle?: string;
+  animeTitleEnglish?: string | null;
 }

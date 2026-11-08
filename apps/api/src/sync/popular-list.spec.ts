@@ -1,44 +1,83 @@
-import { cleanPopularAnime, parsePopularPairs } from './popular-list';
+import {
+  cleanPopularAnime,
+  parsePopularPairs,
+  POPULAR_ENTRIES,
+} from './popular-list';
 
-describe('parsePopularPairs (web seed-popular list port)', () => {
+describe('curated popular list (2026-11-08 rebuild)', () => {
   const pairs = parsePopularPairs();
 
-  it('parses the full editorial list (~230 pairs) with sequential ranks', () => {
-    expect(pairs.length).toBeGreaterThanOrEqual(200);
-    expect(pairs.length).toBeLessThanOrEqual(260);
+  it('holds exactly 50 entries with ranks 1–50 in order', () => {
+    expect(POPULAR_ENTRIES).toHaveLength(50);
+    expect(pairs).toHaveLength(50);
     pairs.forEach((p, i) => expect(p.rank).toBe(i + 1));
   });
 
-  it('starts with the Hall of Fame in order', () => {
-    expect(pairs[0]).toEqual({
-      song: "A Cruel Angel's Thesis",
-      anime: 'Neon Genesis Evangelion',
-      rank: 1,
-    });
-    expect(pairs[1]).toEqual({ song: 'Unravel', anime: 'Tokyo Ghoul', rank: 2 });
-    expect(pairs[3]).toEqual({ song: 'Tank!', anime: 'Cowboy Bebop', rank: 4 });
+  it('is composed of exactly 30 OPs and 20 EDs', () => {
+    expect(pairs.filter((p) => p.type === 'OP')).toHaveLength(30);
+    expect(pairs.filter((p) => p.type === 'ED')).toHaveLength(20);
   });
 
-  it('skips emoji section headers and blank lines', () => {
+  it('opens with the researched all-time top tier', () => {
+    expect(pairs[0]).toEqual({
+      song: 'Zankoku na Tenshi no Thesis',
+      anime: 'Neon Genesis Evangelion',
+      rank: 1,
+      type: 'OP',
+    });
+    expect(pairs[1]).toEqual({
+      song: 'unravel',
+      anime: 'Tokyo Ghoul',
+      rank: 2,
+      type: 'OP',
+    });
+    expect(pairs[3]).toEqual({
+      song: 'Tank!',
+      anime: 'Cowboy Bebop',
+      rank: 4,
+      type: 'OP',
+    });
+    // The top ED is Jujutsu Kaisen's Lost in Paradise at rank 8.
+    expect(pairs[7]).toEqual({
+      song: 'LOST IN PARADISE feat. AKLO',
+      anime: 'Jujutsu Kaisen',
+      rank: 8,
+      type: 'ED',
+    });
+    expect(pairs[49]).toEqual({
+      song: 'Hunting for Your Dream.',
+      anime: 'Hunter x Hunter',
+      rank: 50,
+      type: 'ED',
+    });
+  });
+
+  it('has no duplicate (song, anime) entries and no empty fields', () => {
+    const keys = pairs.map((p) => `${p.song}::${p.anime}`);
+    expect(new Set(keys).size).toBe(50);
     for (const p of pairs) {
-      expect(p.song).not.toMatch(/🏆|🔥|⚔️|🎷|🏛️|🌸|📜|🌌/);
       expect(p.song.length).toBeGreaterThan(0);
       expect(p.anime.length).toBeGreaterThan(0);
     }
   });
 
-  it('parses the pipe-packed deep-cuts line into Song (Anime) pairs', () => {
-    const crossing = pairs.find((p) => p.song === 'Crossing Field');
-    expect(crossing?.anime).toBe('SAO');
-    const gold = pairs.find((p) => p.song === 'Gold');
-    expect(gold?.anime).toBe('Boruto');
+  it('carries the catalogue spellings for the two known title quirks', () => {
+    // Stored in themecaches as "Zankyou Zanka" (not "Sanka") and as
+    // "Kigeki" (not "Comedy") — the pairs must use the stored titles
+    // or they can never match.
+    const aimer = pairs.find((p) => p.rank === 23);
+    expect(aimer?.song).toBe('Zankyou Zanka');
+    expect(aimer?.anime).toBe('Kimetsu no Yaiba: Yuukaku-hen');
+    const hoshino = pairs.find((p) => p.rank === 38);
+    expect(hoshino?.song).toBe('Kigeki');
+    expect(hoshino?.anime).toBe('Spy x Family');
   });
 
-  it('strips printed numbers and surrounding quotes on plain lines', () => {
-    const recollect = pairs.find((p) => p.song === 'Recollect');
-    expect(recollect?.anime).toBe('Re:Zero Season 4');
-    const roundabout = pairs.find((p) => p.song === 'Roundabout');
-    expect(roundabout?.anime).toBe('JoJo’s Bizarre Adventure');
+  it('returns fresh copies (callers cannot mutate the canon)', () => {
+    const a = parsePopularPairs();
+    a[0].song = 'MUTATED';
+    expect(parsePopularPairs()[0].song).toBe('Zankoku na Tenshi no Thesis');
+    expect(POPULAR_ENTRIES[0].song).toBe('Zankoku na Tenshi no Thesis');
   });
 });
 

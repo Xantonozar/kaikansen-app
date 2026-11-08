@@ -142,6 +142,37 @@ describe('ThemesService.getHome', () => {
     expect(railQueries).toHaveLength(1);
   });
 
+  it('caps the season rail query at 20 but the popular rail query at 50', async () => {
+    const limits: number[] = [];
+    const chainFor = (docs: unknown[]) => {
+      const chain: Record<string, unknown> = {};
+      chain.sort = () => chain;
+      chain.limit = (n: number) => {
+        limits.push(n);
+        return chain;
+      };
+      chain.lean = () => chain;
+      chain.exec = async () => docs;
+      return chain;
+    };
+    const find = jest.fn((filter: Record<string, unknown>) => {
+      if ('animeSeason' in filter) {
+        return chainFor([makeDoc({ slug: 'rail-theme', isPopular: false })]);
+      }
+      if ('isPopular' in filter) {
+        return chainFor([makeDoc({ slug: 'popular-theme', popularRank: 7 })]);
+      }
+      throw new Error(`unexpected filter ${JSON.stringify(filter)}`);
+    });
+    const service = serviceWith({ find });
+
+    const home = await service.getHome(new Date(2026, 10, 7));
+
+    expect(limits).toEqual([20, 50]);
+    expect(home.seasonRail).toHaveLength(1);
+    expect(home.popular).toHaveLength(1);
+  });
+
   /**
    * A find mock serving a catalogue described by a season map:
    * keys are "SEASON YEAR", values the docs that season holds.

@@ -23,9 +23,12 @@ export const PAGE_RETRY_DELAY_MS = 5000;
 /**
  * Minimum number of editorial pairs that must match before the popular
  * job is allowed to touch any flags (match-first safety floor — this API's
- * own guard; the web route reset the flags unconditionally).
+ * own guard; the web route reset the flags unconditionally). The curated
+ * list holds exactly 50 entries (2026-11-08 rebuild), so the floor is
+ * 45 of 50: a run that can't find nearly all of them is matching
+ * against the wrong catalogue and must leave the rail untouched.
  */
-export const POPULAR_MATCH_FLOOR = 100;
+export const POPULAR_MATCH_FLOOR = 45;
 
 /**
  * Safety valve with no counterpart in the web scripts: they ran in a

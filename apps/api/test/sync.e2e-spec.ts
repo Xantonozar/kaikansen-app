@@ -144,7 +144,7 @@ const SECRET = 'e2e-sync-secret';
  * external clients, over real HTTP: the secret gate (401s), a full
  * themes job driven to completion through the status endpoint, and the
  * popular job's match-first abort (the fake catalogue is far below the
- * 100-match floor, so the job must fail WITHOUT touching flags).
+ * 45-match floor, so the job must fail WITHOUT touching flags).
  */
 describe('Sync endpoints with secret + mocked world (e2e)', () => {
   let app: INestApplication;
