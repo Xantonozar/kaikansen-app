@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { Headphones, Search, Star, UserPlus, X } from 'lucide-react-native';
+import { AudioLines, Play, Search, Star, UserPlus, X } from 'lucide-react-native';
 import type {
   FriendsActivityItem,
   NetworkUser,
@@ -18,6 +18,7 @@ import type {
 import { fixtureMode } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
+import { pickDefaultAvatar } from '../../../src/defaultAvatars';
 import { PersonRow } from '../../../src/components/PersonRow';
 import {
   fetchFriendsActivity,
@@ -47,8 +48,15 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
  *   with usernames, each routing to that user's profile. It
  *   renders only when the caller actually follows someone; a
  *   failed fetch just hides it — the feed below is unaffected.
- * - The friends-activity feed: recent watches ('listening') and
- *   ratings ('liked') by people the caller follows. The feed is
+ * - The friends-activity feed (design pass — the Social mock's
+ *   individual white cards): watches ('listening'), ratings
+ *   ('liked') and playlist adds ('playlist_add') by people the
+ *   caller follows, rendered in the Home rich-feed card's language
+ *   (name row with the time, action line with the artist byline,
+ *   listening chip / ★ score pill from the enriched payload) with
+ *   the mock's cover thumb + play disc trailing. The mock's
+ *   "{anime} • {time}" second line cannot be drawn: the feed
+ *   payload carries the artist, not the anime title. The feed is
  *   follow-based, so signed-out gets a log-in prompt as the body
  *   state and fixture/demo mode gets a labelled demo note — the
  *   demo world has no people and none are fabricated.
@@ -174,10 +182,11 @@ export default function SocialScreen() {
     router.push(`/user/${username}`);
 
   const feedRow = (item: FriendsActivityItem) => {
-    const ActionIcon = item.type === 'liked' ? Star : Headphones;
-    const verb = item.type === 'liked' ? 'rated' : 'listened to';
+    const listening = item.type === 'listening';
+    const playlistAdd = item.type === 'playlist_add';
+    const openTheme = () => router.push(`/theme/${item.item.slug}`);
     return (
-      <View key={item.id} style={styles.feedRow}>
+      <View key={item.id} style={styles.feedCard}>
         <Pressable
           onPress={() => openProfile(item.user.username)}
           accessibilityRole="button"
@@ -187,11 +196,12 @@ export default function SocialScreen() {
           <Avatar
             url={item.user.avatar}
             name={item.user.displayName || item.user.username}
-            size={40}
+            seed={item.user.username}
+            size={44}
           />
         </Pressable>
         <Pressable
-          onPress={() => router.push(`/theme/${item.item.slug}`)}
+          onPress={openTheme}
           accessibilityRole="button"
           accessibilityLabel={`Open ${item.item.title}`}
           style={({ pressed }) => [
@@ -199,19 +209,81 @@ export default function SocialScreen() {
             pressed && styles.pressed,
           ]}
         >
-          <Text style={styles.feedName} numberOfLines={1}>
-            {item.user.displayName || item.user.username}
+          <View style={styles.feedNameRow}>
+            <Text style={styles.feedNameLine} numberOfLines={1}>
+              <Text style={styles.feedName}>
+                {item.user.displayName || item.user.username}
+              </Text>
+              <Text style={styles.feedHandle}>
+                {' '}
+                @{item.user.username}
+              </Text>
+            </Text>
             <Text style={styles.feedTime}>
-              {'  ·  '}
               {relativeTime(item.timestamp)}
             </Text>
-          </Text>
-          <View style={styles.feedAction}>
-            <ActionIcon size={13} color={theme.muted} strokeWidth={2} />
-            <Text style={styles.feedTitle} numberOfLines={1}>
-              {verb} {item.item.title}
-            </Text>
           </View>
+          <Text style={styles.feedAction} numberOfLines={2}>
+            {listening ? 'listened to ' : playlistAdd ? 'added ' : 'rated '}
+            <Text style={styles.feedThemeInline}>{item.item.title}</Text>
+            {playlistAdd
+              ? ` to ${item.item.playlistName ?? 'a playlist'}`
+              : item.item.artist
+                ? ` · ${item.item.artist}`
+                : ''}
+          </Text>
+          {listening && (
+            <View style={styles.feedChip}>
+              <AudioLines
+                size={11}
+                color={theme.onAccentContainer}
+                strokeWidth={2}
+              />
+              <Text style={styles.feedChipText}>listening</Text>
+            </View>
+          )}
+          {!listening && !playlistAdd && item.item.score !== null && (
+            <View style={styles.feedChip}>
+              <Star
+                size={11}
+                color={theme.onAccentContainer}
+                fill={theme.onAccentContainer}
+                strokeWidth={2}
+              />
+              <Text style={styles.feedChipText}>{item.item.score}/10</Text>
+            </View>
+          )}
+        </Pressable>
+        <Pressable
+          onPress={openTheme}
+          accessibilityRole="button"
+          accessibilityLabel={`Open ${item.item.title}`}
+          style={({ pressed }) => pressed && styles.pressed}
+        >
+          {item.item.cover ? (
+            <Image
+              source={{ uri: item.item.cover }}
+              style={styles.feedThumb}
+            />
+          ) : (
+            <View style={[styles.feedThumb, styles.feedThumbPlaceholder]} />
+          )}
+        </Pressable>
+        <Pressable
+          onPress={openTheme}
+          accessibilityRole="button"
+          accessibilityLabel={`Play ${item.item.title}`}
+          style={({ pressed }) => [
+            styles.feedPlayDisc,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Play
+            size={17}
+            color={theme.accent}
+            fill={theme.accent}
+            strokeWidth={2}
+          />
         </Pressable>
       </View>
     );
@@ -310,6 +382,10 @@ export default function SocialScreen() {
                       person.avatarUrl !== null &&
                       person.avatarUrl.length > 0 &&
                       !person.avatarUrl.toLowerCase().includes('.svg');
+                    // No avatar at all, or an SVG (DiceBear) URL the
+                    // app cannot draw → the deterministic bundled
+                    // chibi (same rule as the shared Avatar, owner
+                    // decision 2026-11-09).
                     return (
                       <Pressable
                         key={person.id}
@@ -324,6 +400,11 @@ export default function SocialScreen() {
                         {usable ? (
                           <Image
                             source={{ uri: person.avatarUrl! }}
+                            style={styles.railAvatar}
+                          />
+                        ) : !usable ? (
+                          <Image
+                            source={pickDefaultAvatar(person.id)}
                             style={styles.railAvatar}
                           />
                         ) : (
@@ -398,7 +479,7 @@ export default function SocialScreen() {
               <Text style={styles.note}>
                 {user && user.totalFollowing === 0
                   ? 'You’re not following anyone yet — search for people above and follow them from their profile.'
-                  : 'Nothing new from people you follow yet. Their watches and ratings will show up here.'}
+                  : 'Nothing new from people you follow yet. Their watches, ratings and playlist adds will show up here.'}
               </Text>
             ) : (
               feed.map(feedRow)
@@ -490,38 +571,88 @@ const createStyles = (theme: Theme) =>
       maxWidth: 68,
       textAlign: 'center',
     },
-    feedRow: {
+    feedCard: {
+      // The Social mock's activity cards (measured from
+      // kaikansen-social-realimg.png): individual white cards,
+      // radius ≈24, avatar ≈44, cover thumb ≈44, play disc ≈44.
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
-      minHeight: 56,
-      paddingVertical: 6,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: theme.border,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.card,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.sm,
+      marginBottom: spacing.md,
     },
     feedMain: {
       flex: 1,
-      gap: 2,
+    },
+    feedNameRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: spacing.sm,
+    },
+    feedNameLine: {
+      ...typeStyles.body,
+      flex: 1,
+      color: theme.muted,
     },
     feedName: {
-      ...typeStyles.body,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.text,
     },
+    feedHandle: {
+      fontFamily: fontFamilies.body,
+      color: theme.muted,
+    },
     feedTime: {
       ...typeStyles.caption,
-      fontFamily: fontFamilies.caption,
       color: theme.muted,
+      flexShrink: 0,
     },
     feedAction: {
+      ...typeStyles.body,
+      color: theme.muted,
+      marginTop: 1,
+    },
+    feedThemeInline: {
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.accent,
+    },
+    feedChip: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.xs + 2,
+      gap: spacing.xs,
+      alignSelf: 'flex-start',
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 2,
+      marginTop: spacing.xs,
     },
-    feedTitle: {
+    feedChipText: {
       ...typeStyles.caption,
-      color: theme.muted,
-      flex: 1,
+      color: theme.onAccentContainer,
+    },
+    feedThumb: {
+      width: 44,
+      height: 44,
+      borderRadius: radii.base,
+      backgroundColor: theme.surface,
+    },
+    feedThumbPlaceholder: {
+      backgroundColor: theme.raised,
+    },
+    feedPlayDisc: {
+      width: 44,
+      height: 44,
+      borderRadius: radii.pill,
+      backgroundColor: theme.accentContainer,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     promptCard: {
       alignItems: 'flex-start',

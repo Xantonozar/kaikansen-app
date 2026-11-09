@@ -548,6 +548,7 @@ export default function LibraryScreen() {
         )}
         {fav.themes.map((item, index) => (
           <ThemeRow
+            typeChip={false}
             key={item.slug}
             item={item}
             onPress={() => openTheme(item.slug)}
@@ -615,6 +616,7 @@ export default function LibraryScreen() {
         {history.map((entry) =>
           entry.theme ? (
             <ThemeRow
+              typeChip={false}
               key={entry.id}
               item={entry.theme}
               detail={`${entry.mode === 'watch' ? 'Watched' : 'Listened'} · ${relativeTime(entry.viewedAt)}`}
@@ -1130,6 +1132,7 @@ export default function LibraryScreen() {
             </View>
             {group.themes.map((item) => (
               <ThemeRow
+                typeChip={false}
                 key={item.slug}
                 item={item}
                 onPress={() => openTheme(item.slug)}

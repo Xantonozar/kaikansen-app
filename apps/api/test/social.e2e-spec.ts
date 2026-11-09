@@ -17,6 +17,10 @@ import { Notification } from './../src/social/notification.schema';
 import { UserRank } from './../src/quiz/user-rank.schema';
 import { SocialController } from './../src/social/social.controller';
 import { SocialService } from './../src/social/social.service';
+import { Playlist } from './../src/playlists/playlist.schema';
+import { PlaylistActivity } from './../src/playlists/playlist-activity.schema';
+import { PlaylistsController } from './../src/playlists/playlists.controller';
+import { PlaylistsService } from './../src/playlists/playlists.service';
 
 /**
  * Suite 1 — the real AppModule with NO MONGODB_URI: the app boots,
@@ -364,6 +368,8 @@ function makeFakeModels() {
     docs: themes,
     find: (filter: Record<string, unknown>) =>
       chain(themes.filter((t) => matches(t, filter))),
+    findOne: (filter: Record<string, unknown>) =>
+      queryOf(themes.find((t) => matches(t, filter)) ?? null),
   };
 
   // Bob has played quiz games; Alice and Carol have no rank doc.
@@ -376,6 +382,74 @@ function makeFakeModels() {
       chain(ranks.filter((r) => matches(r, filter))),
   };
 
+  // Playlists + their add-activity records — wired so the feed's
+  // 'playlist_add' kind is exercised through the REAL write path
+  // (PlaylistsService) against the same fake store SocialService
+  // reads.
+  const playlists: Record<string, unknown>[] = [];
+  const playlistActivities: Record<string, unknown>[] = [];
+  const applyPush = (
+    doc: Record<string, unknown>,
+    update: Record<string, unknown>,
+  ) => {
+    const pushes = update.$push as Record<string, unknown> | undefined;
+    if (pushes) {
+      for (const [field, v] of Object.entries(pushes)) {
+        (doc[field] as unknown[]).push(v);
+      }
+    }
+  };
+  const playlistModel = {
+    docs: playlists,
+    create: async (data: Record<string, unknown>) => {
+      const now = new Date((clock += 1000));
+      const doc = {
+        _id: `507f1f77bcf86cd79944${String(4000 + ++seq)}`,
+        createdAt: now,
+        updatedAt: now,
+        ...data,
+        themes: [...((data.themes as unknown[]) ?? [])],
+      };
+      playlists.push(doc);
+      return doc;
+    },
+    find: (filter: Record<string, unknown>) =>
+      chain(playlists.filter((p) => matches(p, filter))),
+    findOne: (filter: Record<string, unknown>) =>
+      queryOf(playlists.find((p) => matches(p, filter)) ?? null),
+    findById: (id: unknown) =>
+      queryOf(playlists.find((p) => valueEquals(p._id, id)) ?? null),
+    findOneAndUpdate: (
+      filter: Record<string, unknown>,
+      update: Record<string, unknown>,
+    ) => {
+      const doc = playlists.find((p) => matches(p, filter));
+      if (doc) {
+        applyPush(doc, update);
+        doc.updatedAt = new Date((clock += 1000));
+      }
+      return queryOf(doc ?? null);
+    },
+  };
+  const playlistActivityModel = {
+    docs: playlistActivities,
+    find: (filter: Record<string, unknown>) =>
+      chain(playlistActivities.filter((a) => matches(a, filter))),
+    create: async (data: Record<string, unknown>) => {
+      // Real wall-clock time: an add made "now" is newer than the
+      // suite's seeded at(...) rows (2026-11-07 + seconds).
+      const now = new Date();
+      const doc = {
+        _id: `507f1f77bcf86cd79944${String(5000 + ++seq)}`,
+        createdAt: now,
+        updatedAt: now,
+        ...data,
+      };
+      playlistActivities.push(doc);
+      return doc;
+    },
+  };
+
   return {
     userModel,
     followModel,
@@ -384,6 +458,8 @@ function makeFakeModels() {
     historyModel,
     themeModel,
     userRankModel,
+    playlistModel,
+    playlistActivityModel,
   };
 }
 
@@ -419,9 +495,10 @@ describe('Social flow with mocked models (e2e)', () => {
     process.env.JWT_REFRESH_SECRET = E2E_REFRESH_SECRET;
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [ConfigModule.forRoot({ isGlobal: true })],
-      controllers: [SocialController],
+      controllers: [SocialController, PlaylistsController],
       providers: [
         SocialService,
+        PlaylistsService,
         AuthService,
         AccessTokenGuard,
         AnilistClient,
@@ -443,6 +520,14 @@ describe('Social flow with mocked models (e2e)', () => {
         {
           provide: getModelToken(UserRank.name),
           useValue: models.userRankModel,
+        },
+        {
+          provide: getModelToken(Playlist.name),
+          useValue: models.playlistModel,
+        },
+        {
+          provide: getModelToken(PlaylistActivity.name),
+          useValue: models.playlistActivityModel,
         },
       ],
     }).compile();
@@ -667,9 +752,85 @@ describe('Social flow with mocked models (e2e)', () => {
     expect(feed.body.activities[0].item).toEqual({
       title: 'Song A',
       slug: 'anime_a-op1-1',
+      artist: 'Artist A',
+      cover: 'https://example.com/a.jpg',
+      score: null,
+      playlistName: null,
     });
+    // Bob's rating row carries his stored score (9).
+    expect(feed.body.activities[1].item.score).toBe(9);
     const anonFeed = await http.get('/social/friends-activity').expect(200);
     expect(anonFeed.body).toEqual({ activities: [], isGlobal: false });
+  });
+
+  it('serves playlist-add events to followers only, via the real add path', async () => {
+    const http = request(app.getHttpServer());
+    const asCarol = () => ({
+      Authorization: `Bearer ${tokenFor(CAROL)}`,
+    });
+
+    // Bob and Carol each build a playlist and add Song A through
+    // the real write path (which records the activity event).
+    const bobList = await http
+      .post('/playlists')
+      .set(asBob())
+      .send({ name: 'Bob Mix' })
+      .expect(200);
+    await http
+      .post(`/playlists/${bobList.body.id}/items`)
+      .set(asBob())
+      .send({ slug: 'anime_a-op1-1' })
+      .expect(200);
+    // A duplicate add is a no-op — it must NOT record a second event.
+    await http
+      .post(`/playlists/${bobList.body.id}/items`)
+      .set(asBob())
+      .send({ slug: 'anime_a-op1-1' })
+      .expect(200);
+    const carolList = await http
+      .post('/playlists')
+      .set(asCarol())
+      .send({ name: 'Carol Mix' })
+      .expect(200);
+    await http
+      .post(`/playlists/${carolList.body.id}/items`)
+      .set(asCarol())
+      .send({ slug: 'anime_a-op1-1' })
+      .expect(200);
+
+    // Alice follows Bob (already established above; idempotent)
+    // but NOT Carol: her feed gains exactly one playlist_add —
+    // Bob's, enriched, and newest (the add happened "now", after
+    // the suite's seeded 2026-11-07 rows).
+    await http.post('/users/bob/follow').set(asAlice()).expect(200);
+    const feed = await http
+      .get('/social/friends-activity?limit=10')
+      .set(asAlice())
+      .expect(200);
+    const adds = (
+      feed.body.activities as {
+        type: string;
+        user: { username: string };
+        item: Record<string, unknown>;
+      }[]
+    ).filter((a) => a.type === 'playlist_add');
+    expect(adds).toHaveLength(1);
+    expect(adds[0].user.username).toBe('bob');
+    expect(adds[0].item).toEqual({
+      title: 'Song A',
+      slug: 'anime_a-op1-1',
+      artist: 'Artist A',
+      cover: 'https://example.com/a.jpg',
+      score: null,
+      playlistName: 'Bob Mix',
+    });
+    expect(feed.body.activities[0].type).toBe('playlist_add');
+    // Nothing from Carol anywhere in the feed.
+    expect(
+      feed.body.activities.every(
+        (a: { user: { username: string } }) => a.user.username !== 'carol',
+      ),
+    ).toBe(true);
   });
 
   it('searches users with the web rules', async () => {

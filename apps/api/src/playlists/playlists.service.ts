@@ -23,6 +23,10 @@ import {
 } from '../themes/theme-cache.schema';
 import { toThemeSummary, type ThemeDoc } from '../themes/theme.mapper';
 import { Playlist, type PlaylistDocument } from './playlist.schema';
+import {
+  PlaylistActivity,
+  type PlaylistActivityDocument,
+} from './playlist-activity.schema';
 
 /** The web schema's caps (lib/models/index.ts Playlist). */
 const NAME_MAX_LENGTH = 100;
@@ -102,6 +106,15 @@ export class PlaylistsService {
     @Optional()
     @InjectModel(User.name)
     private readonly userModel?: Model<UserDocument>,
+    /**
+     * Playlist-add activity records (the friends-activity feed's
+     * 'playlist_add' events). Written best-effort at add time —
+     * kept out of requireModels on purpose: the record is a feed
+     * side effect, and playlist behaviour must not depend on it.
+     */
+    @Optional()
+    @InjectModel(PlaylistActivity.name)
+    private readonly playlistActivityModel?: Model<PlaylistActivityDocument>,
   ) {}
 
   private requireModels(): PlaylistModels {
@@ -429,6 +442,15 @@ export class PlaylistsService {
    * only), with the slug resolution noted in the class doc. A theme
    * already stored is a success no-op returning the current detail
    * (the web: 200 + 'Theme already in playlist', nothing written).
+   *
+   * A REAL add additionally records a PlaylistActivity row — the
+   * friends-activity feed's 'playlist_add' event. The web records
+   * nothing (its themes array carries no per-item timestamp), so
+   * this is an API-side addition with no backfill: events exist
+   * only from adds made here. The no-op path records nothing (no
+   * add happened); a remove + re-add records a fresh event. The
+   * record is best-effort, the follow-notification precedent: the
+   * add stands even if the write fails.
    */
   async addItem(
     userId: string,
@@ -455,7 +477,32 @@ export class PlaylistsService {
         { new: true },
       )
       .exec();
+    await this.recordPlaylistAdd(userId, playlist, theme);
     return this.freshDetail(models, id);
+  }
+
+  /** The add-time activity record (see addItem). */
+  private async recordPlaylistAdd(
+    userId: string,
+    playlist: PlaylistDoc,
+    theme: ThemeCacheDocument,
+  ): Promise<void> {
+    if (!this.playlistActivityModel) {
+      return;
+    }
+    try {
+      await this.playlistActivityModel.create({
+        userId,
+        playlistId: playlist._id as Types.ObjectId,
+        playlistName: playlist.name,
+        themeId: theme._id,
+        themeSlug: theme.slug,
+      });
+    } catch (err) {
+      // The add itself already succeeded — the feed record must
+      // not take it down (the follow-notification precedent).
+      console.error('Failed to record playlist-add activity:', err);
+    }
   }
 
   /**

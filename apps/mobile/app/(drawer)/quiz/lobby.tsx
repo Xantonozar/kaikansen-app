@@ -422,6 +422,7 @@ export default function QuizLobbyScreen() {
                     <Avatar
                       url={room.hostAvatar}
                       name={room.hostUsername}
+                      seed={room.hostUsername}
                       size={44}
                     />
                     <View style={styles.roomMain}>
@@ -582,6 +583,10 @@ const createStyles = (theme: Theme) =>
     },
     primaryButtonText: {
       ...typeStyles.sectionLabel,
+      // Quiz-flow button labels measure ≈13pt in the mocks
+      // (kaikansen-quiz-realimg.png, kaikansen-lobby-realimg.png)
+      // — the hub fix (owner's design pass) applied here too.
+      fontSize: 13,
       color: theme.onAccent,
     },
     joinButton: {
@@ -596,6 +601,7 @@ const createStyles = (theme: Theme) =>
     },
     joinButtonText: {
       ...typeStyles.sectionLabel,
+      fontSize: 13,
       color: theme.accent,
     },
     buttonDisabled: {

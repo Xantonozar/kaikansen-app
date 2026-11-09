@@ -155,6 +155,7 @@ export default function EditProfileScreen() {
                       editAvatar.trim().length > 0 ? editAvatar.trim() : null
                     }
                     name={editName || user.username}
+                    seed={user.id}
                     size={92}
                   />
                   <Pressable

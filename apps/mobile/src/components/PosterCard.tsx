@@ -7,12 +7,18 @@ import { usePosterCardWidth } from '../layout';
 
 /**
  * Season poster card — ported from the website's ThemeFeaturedCard
- * (kaisen-src/app/components/theme/ThemeFeaturedCard.tsx): 2/3 portrait
+ * (kaisen-src/app/components/theme/ThemeFeaturedCard.tsx): portrait
  * art at radius cardLg, a bottom gradient scrim, and inside the art a
  * type-only chip ("OP" / "ED", on a dark pill — the rail's section
  * heading already names the season) above the song title in white. No
  * below-art text: the web carries the title in-art, so the old top
  * "SEASON YEAR" sticker and the below-art song/anime block are gone.
+ *
+ * Proportions follow the Lavender Dusk Home mock, not the web card:
+ * measured from kaikansen-home-v3-realimg.png the mock's cards are
+ * ≈315×427px of the 780px-wide render — ≈40% window width (see
+ * usePosterCardWidth) at a ≈0.74 width/height aspect, where the web
+ * port's 2/3 read too tall (owner's design pass).
  *
  * The scrim + chip + white title are artwork-legibility treatment, not
  * theme surfaces: the web applies the identical black scrim and white
@@ -85,7 +91,8 @@ const createStyles = (theme: Theme) =>
   },
   art: {
     width: '100%',
-    aspectRatio: 2 / 3,
+    // Mock-measured ≈315×427px @2x → ≈0.74 (see the header note).
+    aspectRatio: 0.74,
     borderRadius: radii.cardLg,
     overflow: 'hidden',
     backgroundColor: theme.surface,

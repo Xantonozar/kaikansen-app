@@ -157,6 +157,7 @@ export default function OwnProfileScreen() {
               <Avatar
                 url={user.avatarUrl}
                 name={user.displayName || user.username}
+                seed={user.id}
                 size={64}
               />
               <View style={styles.identityTexts}>

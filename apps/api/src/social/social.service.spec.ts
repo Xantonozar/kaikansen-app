@@ -359,6 +359,20 @@ function makeModels() {
     },
   };
 
+  const playlistActivities: Record<string, unknown>[] = [];
+  const playlistActivityModel = {
+    docs: playlistActivities,
+    find: (filter: Record<string, unknown>) =>
+      chain(
+        playlistActivities.filter((a) => matches(a, filter)),
+      ),
+    seed: (data: Record<string, unknown>) => {
+      const doc = { _id: `pact-${++seq}`, ...data };
+      playlistActivities.push(doc);
+      return doc;
+    },
+  };
+
   return {
     userModel,
     followModel,
@@ -367,6 +381,7 @@ function makeModels() {
     historyModel,
     themeModel,
     userRankModel,
+    playlistActivityModel,
   };
 }
 
@@ -397,6 +412,7 @@ function makeService(models?: Models) {
     m.historyModel as never,
     m.themeModel as never,
     m.userRankModel as never,
+    m.playlistActivityModel as never,
   );
   return { service, models: m };
 }
@@ -916,15 +932,29 @@ describe('SocialService — friends-activity feed', () => {
     expect(feed.activities[1].user.avatar).toBe(
       'https://api.dicebear.com/7.x/avataaars/svg?seed=carol',
     );
-    // A theme that left the catalogue keeps the stored slug + fallback title.
+    // A theme that left the catalogue keeps the stored slug +
+    // fallback title; the enrichment degrades to nulls — except
+    // the score, which lives on the rating row itself (Bob's 3).
     expect(feed.activities[2].item).toEqual({
       title: 'Unknown Title',
       slug: 'gone-op1-1',
+      artist: null,
+      cover: null,
+      score: 3,
+      playlistName: null,
     });
+    // A catalogue theme enriches fully: artist + cover resolved,
+    // and a watch carries no score (Carol's 'liked' row below
+    // carries her stored 8).
     expect(feed.activities[0].item).toEqual({
       title: 'Song A',
       slug: 'anime_a-op1-1',
+      artist: 'Artist A',
+      cover: 'https://example.com/a.jpg',
+      score: null,
+      playlistName: null,
     });
+    expect(feed.activities[1].item.score).toBe(8);
   });
 
   it('honours the limit: per-kind fetch, merge, slice', async () => {
@@ -967,6 +997,114 @@ describe('SocialService — friends-activity feed', () => {
     await expect(
       service.getFriendsActivity(bearer('tok-alice'), '10'),
     ).resolves.toEqual({ activities: [], isGlobal: false });
+  });
+
+  it('merges playlist-add events in timestamp order, with the playlist name', async () => {
+    const models = makeModels();
+    models.followModel.seed({ followerId: ALICE, followeeId: BOB });
+    // Bob watched at 300, added Song B to 'Bob Mix' at 250, rated
+    // Song A at 100, and added a since-removed theme to 'Oldies'
+    // at 50. Carol's add at 400 is the newest event overall —
+    // but Alice does not follow Carol, so it never appears.
+    models.historyModel.seed({
+      userId: BOB,
+      themeId: THEME_A,
+      themeSlug: 'anime_a-op1-1',
+      atEntryId: 1,
+      mode: 'watch',
+      viewedAt: at(300),
+    });
+    models.playlistActivityModel.seed({
+      userId: BOB,
+      playlistId: '507f1f77bcf86cd799439021',
+      playlistName: 'Bob Mix',
+      themeId: THEME_B,
+      themeSlug: 'anime_b-ed1-2',
+      createdAt: at(250),
+    });
+    models.ratingModel.seed({
+      userId: BOB,
+      themeId: THEME_A,
+      themeSlug: 'anime_a-op1-1',
+      score: 7,
+      mode: 'watch',
+      createdAt: at(100),
+    });
+    models.playlistActivityModel.seed({
+      userId: BOB,
+      playlistId: '507f1f77bcf86cd799439022',
+      playlistName: 'Oldies',
+      themeId: THEME_GONE,
+      themeSlug: 'gone-op1-1',
+      createdAt: at(50),
+    });
+    models.playlistActivityModel.seed({
+      userId: CAROL,
+      playlistId: '507f1f77bcf86cd799439023',
+      playlistName: 'Carol Mix',
+      themeId: THEME_A,
+      themeSlug: 'anime_a-op1-1',
+      createdAt: at(400),
+    });
+
+    const { service } = makeService(models);
+    const feed = await service.getFriendsActivity(bearer('tok-alice'), '10');
+    expect(feed.activities.map((a) => a.type)).toEqual([
+      'listening',
+      'playlist_add',
+      'liked',
+      'playlist_add',
+    ]);
+    // The playlist-add row: theme enriched like every other kind,
+    // the playlist's name snapshotted on the record, no score.
+    expect(feed.activities[1].user.username).toBe('bob');
+    expect(feed.activities[1].item).toEqual({
+      title: 'Song B',
+      slug: 'anime_b-ed1-2',
+      artist: 'Artist A',
+      cover: 'https://example.com/a.jpg',
+      score: null,
+      playlistName: 'Bob Mix',
+    });
+    expect(feed.activities[1].timestamp).toBe(at(250).toISOString());
+    // A theme that left the catalogue: stored slug + fallback
+    // title, null enrichment — the snapshotted name still serves.
+    expect(feed.activities[3].item).toEqual({
+      title: 'Unknown Title',
+      slug: 'gone-op1-1',
+      artist: null,
+      cover: null,
+      score: null,
+      playlistName: 'Oldies',
+    });
+  });
+
+  it('falls back to the small cover when the large cover is missing', async () => {
+    const models = makeModels();
+    models.themeModel.docs.push(
+      makeTheme({
+        _id: '507f1f77bcf86cd799439014',
+        slug: 'anime_d-op1-4',
+        songTitle: 'Song D',
+        animeCoverImage: null,
+        animeCoverImageSmall: 'https://example.com/d-small.jpg',
+      }),
+    );
+    models.followModel.seed({ followerId: ALICE, followeeId: BOB });
+    models.historyModel.seed({
+      userId: BOB,
+      themeId: '507f1f77bcf86cd799439014',
+      themeSlug: 'anime_d-op1-4',
+      atEntryId: 1,
+      mode: 'listen',
+      viewedAt: at(100),
+    });
+    const { service } = makeService(models);
+    const feed = await service.getFriendsActivity(bearer('tok-alice'), '10');
+    expect(feed.activities).toHaveLength(1);
+    expect(feed.activities[0].item.cover).toBe(
+      'https://example.com/d-small.jpg',
+    );
   });
 });
 

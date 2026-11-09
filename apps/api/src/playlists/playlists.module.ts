@@ -9,6 +9,10 @@ import {
   ThemeCacheSchema,
 } from '../themes/theme-cache.schema';
 import { Playlist, PlaylistSchema } from './playlist.schema';
+import {
+  PlaylistActivity,
+  PlaylistActivitySchema,
+} from './playlist-activity.schema';
 import { PlaylistsController } from './playlists.controller';
 import { PlaylistsService } from './playlists.service';
 
@@ -42,6 +46,7 @@ export class PlaylistsModule {
         ? [
             MongooseModule.forFeature([
               { name: Playlist.name, schema: PlaylistSchema },
+              { name: PlaylistActivity.name, schema: PlaylistActivitySchema },
               { name: ThemeCache.name, schema: ThemeCacheSchema },
               { name: User.name, schema: UserSchema },
             ]),

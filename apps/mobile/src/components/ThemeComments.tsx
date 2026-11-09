@@ -124,6 +124,7 @@ export function ThemeComments({ slug }: { slug: string }) {
                 <Avatar
                   url={user?.avatarUrl ?? null}
                   name={user?.displayName || user?.username || '?'}
+                  seed={user?.id}
                   size={36}
                 />
                 <View style={styles.composerInputWrap}>
@@ -215,6 +216,7 @@ export function ThemeComments({ slug }: { slug: string }) {
                       <Avatar
                         url={author.avatarUrl}
                         name={name}
+                        seed={author.id}
                         size={36}
                       />
                     </Pressable>

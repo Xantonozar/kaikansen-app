@@ -19,6 +19,10 @@ import {
   Notification,
   NotificationSchema,
 } from './notification.schema';
+import {
+  PlaylistActivity,
+  PlaylistActivitySchema,
+} from '../playlists/playlist-activity.schema';
 import { SocialController } from './social.controller';
 import { SocialService } from './social.service';
 
@@ -56,6 +60,12 @@ export class SocialModule {
               { name: ThemeCache.name, schema: ThemeCacheSchema },
               // Read-only here: the network rows' tier enrichment.
               { name: UserRank.name, schema: UserRankSchema },
+              // Read-only here: the feed's 'playlist_add' events
+              // (PlaylistsModule owns the writes).
+              {
+                name: PlaylistActivity.name,
+                schema: PlaylistActivitySchema,
+              },
             ]),
           ]
         : [],

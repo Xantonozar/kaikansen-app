@@ -225,6 +225,7 @@ export default function NetworkScreen() {
                       <Avatar
                         url={person.avatarUrl}
                         name={person.displayName || person.username}
+                        seed={person.id}
                         size={40}
                       />
                       <View style={styles.rowTexts}>

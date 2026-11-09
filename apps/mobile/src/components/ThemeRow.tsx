@@ -47,6 +47,18 @@ import { ThemeRowMenu } from './ThemeRowMenu';
  *   opens the shared ThemeRowMenu (Play / View theme / Save / Add
  *   to playlist / Download, all wired). It renders unless
  *   `menu={false}`.
+ *
+ * Two opt-in deviations (owner's design pass, measured from the
+ * mocks): `typeChip={false}` drops the OP/ED chip — the Theme
+ * Detail mock's meta line is the artist alone, and the Library
+ * mock (kaikansen-library-realimg.png) draws NO OP chip on any of
+ * its rows, so every Library usage opts out too — and `compact`
+ * (Theme Detail Similar rows, measured from
+ * kaikansen-detail-realimg.png — that mock's rows are a more
+ * compact cut of the row than the Library mock's) shrinks the
+ * thumb to ≈46, the play disc to ≈44, the row's vertical padding
+ * to 10, and orders the cluster the mock's way — play disc, then
+ * heart, then ⋮. Every other consumer keeps the defaults above.
  */
 export function ThemeRow({
   item,
@@ -60,6 +72,8 @@ export function ThemeRow({
   metaText,
   durationText,
   menu = true,
+  typeChip = true,
+  compact = false,
 }: {
   item: ThemeSummary;
   onPress?: () => void;
@@ -76,21 +90,85 @@ export function ThemeRow({
   metaText?: string;
   durationText?: string;
   menu?: boolean;
+  /** Draw the OP/ED chip after the meta line (default true). */
+  typeChip?: boolean;
+  /** The Theme Detail Similar rows' compact cut (see header). */
+  compact?: boolean;
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const cover = item.animeCoverImageSmall ?? item.animeCoverImage;
   const artist = item.artistName ?? item.allArtists.join(', ');
 
+  const playButton = (
+    <Pressable
+      onPress={onPlay ?? onPress}
+      hitSlop={7}
+      accessibilityRole="button"
+      accessibilityLabel={`Play ${item.songTitle}`}
+      style={({ pressed }) => [
+        styles.playDisc,
+        compact && styles.playDiscCompact,
+        pressed && styles.pressed,
+      ]}
+    >
+      <Play
+        size={compact ? 17 : 15}
+        color={theme.accent}
+        fill={theme.accent}
+        strokeWidth={2}
+      />
+    </Pressable>
+  );
+  const heartButton = onToggleSave ? (
+    <Pressable
+      onPress={onToggleSave}
+      hitSlop={7}
+      accessibilityRole="button"
+      accessibilityLabel={
+        saved ? `Unsave ${item.songTitle}` : `Save ${item.songTitle}`
+      }
+      accessibilityState={{ selected: !!saved }}
+      style={({ pressed }) => [
+        styles.bareAction,
+        pressed && styles.pressed,
+      ]}
+    >
+      {savePending ? (
+        <ActivityIndicator size="small" color={theme.muted} />
+      ) : (
+        <Heart
+          size={compact ? 20 : 17}
+          color={saved ? theme.accent : theme.muted}
+          fill={saved ? theme.accent : 'transparent'}
+          strokeWidth={2}
+        />
+      )}
+    </Pressable>
+  ) : null;
+
   return (
     <Pressable
       onPress={onPress}
-      style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+      style={({ pressed }) => [
+        styles.row,
+        compact && styles.rowCompact,
+        pressed && styles.pressed,
+      ]}
     >
       {cover ? (
-        <Image source={{ uri: cover }} style={styles.thumb} />
+        <Image
+          source={{ uri: cover }}
+          style={[styles.thumb, compact && styles.thumbCompact]}
+        />
       ) : (
-        <View style={[styles.thumb, styles.placeholder]} />
+        <View
+          style={[
+            styles.thumb,
+            compact && styles.thumbCompact,
+            styles.placeholder,
+          ]}
+        />
       )}
       <View style={styles.main}>
         {/* Design law #9: long titles wrap (2 lines), never
@@ -102,16 +180,18 @@ export function ThemeRow({
           <Text style={styles.meta} numberOfLines={1}>
             {metaText ?? artist}
           </Text>
-          <View style={styles.typeChip}>
-            <Text
-              style={[
-                styles.type,
-                { color: item.type === 'ED' ? theme.tertiary : theme.accent },
-              ]}
-            >
-              {item.type} {item.sequence}
-            </Text>
-          </View>
+          {typeChip && (
+            <View style={styles.typeChip}>
+              <Text
+                style={[
+                  styles.type,
+                  { color: item.type === 'ED' ? theme.tertiary : theme.accent },
+                ]}
+              >
+                {item.type} {item.sequence}
+              </Text>
+            </View>
+          )}
         </View>
         {detail ? (
           <Text style={styles.detail} numberOfLines={1}>
@@ -137,44 +217,17 @@ export function ThemeRow({
             <X size={15} color={theme.muted} strokeWidth={2} />
           </Pressable>
         )}
-        {onToggleSave && (
-          <Pressable
-            onPress={onToggleSave}
-            hitSlop={7}
-            accessibilityRole="button"
-            accessibilityLabel={
-              saved ? `Unsave ${item.songTitle}` : `Save ${item.songTitle}`
-            }
-            accessibilityState={{ selected: !!saved }}
-            style={({ pressed }) => [
-              styles.bareAction,
-              pressed && styles.pressed,
-            ]}
-          >
-            {savePending ? (
-              <ActivityIndicator size="small" color={theme.muted} />
-            ) : (
-              <Heart
-                size={17}
-                color={saved ? theme.accent : theme.muted}
-                fill={saved ? theme.accent : 'transparent'}
-                strokeWidth={2}
-              />
-            )}
-          </Pressable>
+        {compact ? (
+          <>
+            {playButton}
+            {heartButton}
+          </>
+        ) : (
+          <>
+            {heartButton}
+            {playButton}
+          </>
         )}
-        <Pressable
-          onPress={onPlay ?? onPress}
-          hitSlop={7}
-          accessibilityRole="button"
-          accessibilityLabel={`Play ${item.songTitle}`}
-          style={({ pressed }) => [
-            styles.playDisc,
-            pressed && styles.pressed,
-          ]}
-        >
-          <Play size={15} color={theme.accent} fill={theme.accent} strokeWidth={2} />
-        </Pressable>
         {menu && (
           <ThemeRowMenu item={item} onPlay={onPlay} onOpen={onPress} />
         )}
@@ -206,6 +259,21 @@ const createStyles = (theme: Theme) =>
     height: 52,
     borderRadius: radii.md,
     backgroundColor: theme.surface,
+  },
+  rowCompact: {
+    // Detail mock rows measure ≈131px tall @2x ≈ 65.5pt with a
+    // ≈46pt thumb: vertical padding 10 around the compact thumb.
+    paddingVertical: 10,
+  },
+  thumbCompact: {
+    width: 46,
+    height: 46,
+    borderRadius: radii.base,
+  },
+  playDiscCompact: {
+    // Detail + Library mocks both draw the disc at ≈86-88px @2x.
+    width: 44,
+    height: 44,
   },
   placeholder: {
     backgroundColor: theme.raised,

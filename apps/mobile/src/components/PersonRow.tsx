@@ -32,7 +32,7 @@ export function PersonRow({
       accessibilityLabel={`Open ${displayName}'s profile`}
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
     >
-      <Avatar url={avatarUrl} name={displayName || username} size={40} />
+      <Avatar url={avatarUrl} name={displayName || username} seed={username} size={40} />
       <View style={styles.main}>
         <Text style={styles.name} numberOfLines={1}>
           {displayName || username}

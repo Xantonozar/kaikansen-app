@@ -437,6 +437,11 @@ const createStyles = (theme: Theme) =>
     chipTextActive: {
       color: theme.onAccent,
     },
+    // Quiz button text (owner's design pass): the hub mock's
+    // labels measure ≈17px cap height @2x ≈ 12–13pt on ≈38–40pt
+    // buttons (kaikansen-quiz-realimg.png) — the app's 15pt
+    // sectionLabel on 48pt buttons read large. Hub-scoped: these
+    // styles live in this file only (the lobby has its own).
     primaryButton: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -444,11 +449,12 @@ const createStyles = (theme: Theme) =>
       gap: spacing.sm,
       backgroundColor: theme.accent,
       borderRadius: radii.base,
-      minHeight: 48,
+      minHeight: 40,
       paddingHorizontal: spacing.lg,
     },
     primaryButtonText: {
       ...typeStyles.sectionLabel,
+      fontSize: 13,
       color: theme.onAccent,
     },
     buttonDisabled: {
@@ -463,12 +469,13 @@ const createStyles = (theme: Theme) =>
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-      minHeight: 48,
+      minHeight: 40,
       borderRadius: radii.pill,
       backgroundColor: theme.accent,
     },
     mpPrimaryText: {
       ...typeStyles.sectionLabel,
+      fontSize: 13,
       color: theme.onAccent,
     },
     mpButton: {
@@ -476,12 +483,13 @@ const createStyles = (theme: Theme) =>
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-      minHeight: 48,
+      minHeight: 40,
       borderRadius: radii.pill,
       backgroundColor: theme.accentContainer,
     },
     mpButtonText: {
       ...typeStyles.sectionLabel,
+      fontSize: 13,
       color: theme.onAccentContainer,
     },
     sectionHead: {

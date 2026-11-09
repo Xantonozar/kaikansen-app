@@ -9,10 +9,12 @@ import {
   View,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { Play, Shuffle, Users } from 'lucide-react-native';
+import { AudioLines, Headphones, ListMusic, Play, Shuffle, Star, Users } from 'lucide-react-native';
 import type {
   FriendsActivityItem,
   HomeResponse,
+  NetworkUser,
+  ThemeSummary,
   ThemeType,
   WatchHistoryEntry,
 } from '@kaikansen/contracts';
@@ -25,7 +27,7 @@ import {
   queueItemsFromSummaries,
   usePlaybackSession,
 } from '../../../src/playback-context';
-import { fetchFriendsActivity } from '../../../src/socialApi';
+import { fetchFriendsActivity, fetchUserNetwork } from '../../../src/socialApi';
 import { Avatar } from '../../../src/components/Avatar';
 import { PopularCard } from '../../../src/components/PopularCard';
 import { PosterCard } from '../../../src/components/PosterCard';
@@ -35,6 +37,7 @@ import {
   radii,
   spacing,
   typeStyles,
+  withOpacity,
   type Theme,
 } from '../../../src/theme';
 import { useTheme } from '../../../src/theme-context';
@@ -50,15 +53,34 @@ function seasonTitleCase(season: string): string {
 /** How many feed rows Home previews; the full feed lives on Social. */
 const HOME_FEED_PREVIEW = 5;
 
+/** The strip's "recently active" window for the green dot (24h). */
+const RECENT_ACTIVE_MS = 24 * 60 * 60 * 1000;
+
+/** One friend in the Rich Social Feed strip (network or feed actor). */
+interface StripFriend {
+  username: string;
+  displayName: string;
+  avatar: string | null;
+}
+
+/** Alpha steps of the Surprise banner's artwork fade (left → clear). */
+const SURPRISE_FADE_ALPHAS = [1, 0.85, 0.68, 0.5, 0.33, 0.18, 0.07];
+
+/** First name for the strip label: the display name's first word. */
+function firstNameOf(displayName: string, username: string): string {
+  return displayName.trim().split(/\s+/)[0] || username;
+}
+
 /**
  * Home — the web home composition at phone size (HomeClient.tsx):
  * season poster rail → Surprise card → Friends Activity → Popular
  * Themes with the OP/ED filter → the web's end marker. The visual
  * treatments are ported from the website's Home (2026-11-08): season
  * cards carry the title in-art over a scrim (ThemeFeaturedCard),
- * Surprise is the web's quiet accent-container card with a circular
- * shuffle button (SurpriseBanner), Friends Activity uses the web's
- * empty/loading cards (FriendsActivity.tsx), and Popular rows are the
+ * Surprise composites the rolled theme's anime cover on the right
+ * under a translucent shuffle disc (Lavender Dusk Home mock), Friends
+ * Activity is the owner's Variant 3 "Rich Social Feed" card (active-
+ * friends strip + detailed rows in one card), and Popular rows are the
  * web's rounded accent-container cards with play + heart
  * (ThemeListRow). Content sits in a centred, width-capped column, and
  * the type filter is a segmented All/OP/ED control in the Popular
@@ -78,7 +100,13 @@ export default function HomeScreen() {
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('ALL');
   const [feed, setFeed] = useState<FriendsActivityItem[] | null>(null);
   const [feedFailed, setFeedFailed] = useState(false);
+  const [friends, setFriends] = useState<NetworkUser[] | null>(null);
   const [history, setHistory] = useState<WatchHistoryEntry[] | null>(null);
+  /* The Surprise banner's current roll: chosen from the same pool
+     the tap uses (Popular, else the season rail) so the banner can
+     composite that theme's real cover art, per the Lavender Dusk
+     mock. Rolled when Home data lands and re-rolled on every tap. */
+  const [surprisePick, setSurprisePick] = useState<ThemeSummary | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -111,6 +139,24 @@ export default function HomeScreen() {
       .catch(() => setFeedFailed(true));
   }, [signedIn]);
 
+  /* The Rich Social Feed strip's friends: the caller's own following
+     list, loaded exactly like the Social tab's YOUR FRIENDS rail. A
+     failure hides the network source (null) — the strip then falls
+     back to the feed's own actors (see stripFriends below). */
+  const myUsername = user?.username;
+  const loadFriends = useCallback(() => {
+    if (!signedIn || fixtureMode || !myUsername) return;
+    fetchUserNetwork(myUsername)
+      .then((res) =>
+        setFriends(
+          res.following.filter(
+            (p): p is NetworkUser => p !== null,
+          ),
+        ),
+      )
+      .catch(() => setFriends(null));
+  }, [signedIn, myUsername]);
+
   /* Continue Listening (the mock's rail between Surprise and Friends
      Activity): the caller's recent history, signed-in only. Failures
      and empty history hide the rail — it is a convenience surface,
@@ -127,8 +173,9 @@ export default function HomeScreen() {
   useFocusEffect(
     useCallback(() => {
       loadFeed();
+      loadFriends();
       loadHistory();
-    }, [loadFeed, loadHistory]),
+    }, [loadFeed, loadFriends, loadHistory]),
   );
 
   const { startQueue } = usePlaybackSession();
@@ -171,13 +218,103 @@ export default function HomeScreen() {
     [router],
   );
 
-  const surprise = useCallback(() => {
-    if (!home) return;
+  /* One roll of the Surprise pool — Popular when it has entries,
+     else the season rail (the tap's pool since the web port). */
+  const rollSurprise = useCallback((): ThemeSummary | null => {
+    if (!home) return null;
     const pool = home.popular.length > 0 ? home.popular : home.seasonRail;
-    if (pool.length === 0) return;
-    const pick = pool[Math.floor(Math.random() * pool.length)];
+    if (pool.length === 0) return null;
+    return pool[Math.floor(Math.random() * pool.length)];
+  }, [home]);
+
+  /* Roll the banner's displayed theme when Home data lands, so its
+     cover can be composited into the banner (the mock's treatment). */
+  useEffect(() => {
+    if (home) setSurprisePick(rollSurprise());
+  }, [home, rollSurprise]);
+
+  const surprise = useCallback(() => {
+    const pick = rollSurprise();
+    if (!pick) return;
+    setSurprisePick(pick);
     openTheme(pick.slug);
-  }, [home, openTheme]);
+  }, [rollSurprise, openTheme]);
+
+  /* Rich Social Feed derivations. The newest real activity per
+     friend, from the loaded feed's own timestamps — the app's only
+     activity signal (there is NO presence system; the strip's green
+     dot means "active in the last 24h", never "online now"). */
+  const lastActivityAt = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const a of feed ?? []) {
+      const t = new Date(a.timestamp).getTime();
+      if (Number.isNaN(t)) continue;
+      const prev = map.get(a.user.username);
+      if (prev === undefined || t > prev) map.set(a.user.username, t);
+    }
+    return map;
+  }, [feed]);
+
+  const isRecentlyActive = (username: string): boolean => {
+    const t = lastActivityAt.get(username);
+    return t !== undefined && Date.now() - t < RECENT_ACTIVE_MS;
+  };
+
+  /* Strip friends: the caller's following list when it loaded,
+     otherwise the feed's distinct actors. Recently active friends
+     sort first (stable sort — source order survives otherwise). */
+  const stripFriends = useMemo<StripFriend[]>(() => {
+    const base: StripFriend[] = [];
+    const seen = new Set<string>();
+    if (friends && friends.length > 0) {
+      for (const f of friends) {
+        if (seen.has(f.username)) continue;
+        seen.add(f.username);
+        base.push({
+          username: f.username,
+          displayName: f.displayName,
+          avatar: f.avatarUrl,
+        });
+      }
+    } else {
+      for (const a of feed ?? []) {
+        if (seen.has(a.user.username)) continue;
+        seen.add(a.user.username);
+        base.push({
+          username: a.user.username,
+          displayName: a.user.displayName,
+          avatar: a.user.avatar,
+        });
+      }
+    }
+    return base.sort(
+      (x, y) =>
+        (lastActivityAt.get(y.username) ?? -1) -
+        (lastActivityAt.get(x.username) ?? -1),
+    );
+  }, [friends, feed, lastActivityAt]);
+
+  /* Cover art fallback for feed rows, resolved by slug from the
+     theme lists Home already loaded (season rail, Popular, Continue
+     Listening). The enriched feed payload carries each row's own
+     cover (item.cover) — this map only fills rows whose payload
+     cover is null; a row with neither renders the neutral
+     placeholder tile instead of invented art. */
+  const coverBySlug = useMemo(() => {
+    const map = new Map<string, string>();
+    const add = (t: ThemeSummary) => {
+      const cover = t.animeCoverImage ?? t.animeCoverImageSmall;
+      if (cover && !map.has(t.slug)) map.set(t.slug, cover);
+    };
+    if (home) {
+      home.seasonRail.forEach(add);
+      home.popular.forEach(add);
+    }
+    for (const e of history ?? []) {
+      if (e.theme) add(e.theme);
+    }
+    return map;
+  }, [home, history]);
 
   if (error) {
     return (
@@ -208,13 +345,19 @@ export default function HomeScreen() {
       ? home.popular
       : home.popular.filter((t) => t.type === typeFilter);
 
-  /* Friends Activity states, mirroring the web's FriendsActivity:
-     loading card → feed card → empty card. Copy is honest per state:
-     signed-out gets the sign-in framing, signed-in with no activity
-     gets the web's follow framing. */
+  /* Friends Activity states (Rich Social Feed): loading card →
+     strip + rows card → the web's empty card. Copy is honest per
+     state: signed-out gets the sign-in framing, signed-in with
+     friends but no activity gets the strip card with a no-activity
+     line, signed-in with no friends gets the follow framing. */
   const feedLoading = signedIn && feed === null && !feedFailed;
   const feedItems = feed ?? [];
-  const feedEmpty = !feedLoading && feedItems.length === 0;
+
+  /* The Surprise banner's artwork: the rolled theme's anime cover —
+     the same field the Home rails draw (PosterCard's order). */
+  const surpriseCover = surprisePick
+    ? (surprisePick.animeCoverImage ?? surprisePick.animeCoverImageSmall)
+    : null;
 
   return (
     <ScrollView
@@ -267,7 +410,7 @@ export default function HomeScreen() {
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.rail}
+          contentContainerStyle={[styles.rail, styles.seasonRail]}
         >
           {home.seasonRail.map((item) => (
             <PosterCard
@@ -282,9 +425,14 @@ export default function HomeScreen() {
           )}
         </ScrollView>
 
-        {/* Surprise — the web's SurpriseBanner as a quiet card:
-            title + subtitle on the left, circular accent shuffle
-            button on the right (same random-pick behaviour). */}
+        {/* Surprise — the Lavender Dusk mock's banner: the rolled
+            theme's anime cover composited on the right, fading into
+            the lavender at its left edge (stacked translucent strips
+            stand in for a gradient — no gradient library in the app,
+            the PosterCard scrim pattern), title + subtitle on the
+            left, and the shuffle disc translucent over the artwork.
+            Without a cover the banner is the plain card with the
+            solid disc, as before. */}
         <Pressable
           onPress={surprise}
           style={({ pressed }) => [
@@ -294,13 +442,47 @@ export default function HomeScreen() {
           accessibilityRole="button"
           accessibilityLabel="Surprise me"
         >
+          {surpriseCover && (
+            <View style={styles.surpriseArtWrap} pointerEvents="none">
+              <Image
+                source={{ uri: surpriseCover }}
+                style={styles.surpriseArt}
+                resizeMode="cover"
+              />
+              <View style={styles.surpriseFade}>
+                {SURPRISE_FADE_ALPHAS.map((alpha) => (
+                  <View
+                    key={alpha}
+                    style={[
+                      styles.surpriseFadeStrip,
+                      {
+                        backgroundColor: withOpacity(
+                          theme.accentContainer,
+                          alpha,
+                        ),
+                      },
+                    ]}
+                  />
+                ))}
+              </View>
+            </View>
+          )}
           <View style={styles.surpriseTextBlock}>
             <Text style={styles.surpriseTitle}>Surprise Me</Text>
             <Text style={styles.surpriseSubtitle}>
               Discover a random track
             </Text>
           </View>
-          <View style={styles.surpriseButton}>
+          <View
+            style={[
+              styles.surpriseButton,
+              surpriseCover && {
+                backgroundColor: withOpacity(theme.accent, 0.85),
+                borderWidth: 1,
+                borderColor: 'rgba(255,255,255,0.45)',
+              },
+            ]}
+          >
             <Shuffle size={20} color={theme.onAccent} strokeWidth={2} />
           </View>
         </Pressable>
@@ -373,18 +555,21 @@ export default function HomeScreen() {
           </>
         )}
 
-        {/* Friends Activity */}
+        {/* Friends Activity — Variant 3 "Rich Social Feed" (owner's
+            pick): one card holding the active-friends strip over the
+            detailed activity rows. The strip's green dot means the
+            friend has real feed activity inside 24h — derived from
+            the feed's timestamps; there is no presence system, so it
+            never claims "online". */}
         <View style={[styles.sectionHeader, styles.feedHeader]}>
           <Text style={styles.heading}>Friends Activity</Text>
           <Pressable
             onPress={() => router.push('/social')}
             hitSlop={6}
             accessibilityRole="button"
-            accessibilityLabel={feedEmpty ? 'Find friends' : 'View full feed'}
+            accessibilityLabel="Find friends"
           >
-            <Text style={styles.feedLink}>
-              {feedEmpty ? 'Find Friends' : 'View Full Feed'}
-            </Text>
+            <Text style={styles.feedLink}>Find Friends</Text>
           </Pressable>
         </View>
         {feedLoading ? (
@@ -394,7 +579,220 @@ export default function HomeScreen() {
               Catching up with friends…
             </Text>
           </View>
-        ) : feedEmpty ? (
+        ) : signedIn && stripFriends.length > 0 ? (
+          <View style={styles.feedCard}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.stripRow}
+            >
+              {stripFriends.map((friend) => (
+                <Pressable
+                  key={friend.username}
+                  onPress={() => openProfile(friend.username)}
+                  style={styles.stripItem}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${friend.displayName}'s profile`}
+                >
+                  <View style={styles.stripAvatarRing}>
+                    <Avatar
+                      url={friend.avatar}
+                      name={friend.displayName}
+                      seed={friend.username}
+                      size={48}
+                    />
+                    {isRecentlyActive(friend.username) && (
+                      <View style={styles.activeDot} />
+                    )}
+                  </View>
+                  <Text style={styles.stripName} numberOfLines={1}>
+                    {firstNameOf(friend.displayName, friend.username)}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <View style={styles.feedDivider} />
+            {feedItems.length > 0 ? (
+              <View>
+                {feedItems
+                  .slice(0, HOME_FEED_PREVIEW)
+                  .map((activity, index, rows) => {
+                    const cover =
+                      activity.item.cover ??
+                      coverBySlug.get(activity.item.slug);
+                    const listening = activity.type === 'listening';
+                    const playlistAdd = activity.type === 'playlist_add';
+                    return (
+                      <View key={activity.id}>
+                        <View style={styles.feedRow}>
+                          <View style={styles.feedAvatarWrap}>
+                            <Pressable
+                              onPress={() =>
+                                openProfile(activity.user.username)
+                              }
+                              accessibilityRole="button"
+                              accessibilityLabel={`${activity.user.displayName}'s profile`}
+                            >
+                              <Avatar
+                                url={activity.user.avatar}
+                                name={activity.user.displayName}
+                                seed={activity.user.username}
+                                size={44}
+                              />
+                            </Pressable>
+                            <View
+                              style={[
+                                styles.feedBadge,
+                                {
+                                  backgroundColor: listening
+                                    ? theme.accent
+                                    : playlistAdd
+                                      ? theme.success
+                                      : theme.secondary,
+                                },
+                              ]}
+                            >
+                              {listening ? (
+                                <Headphones
+                                  size={11}
+                                  color={theme.onAccent}
+                                  strokeWidth={2}
+                                />
+                              ) : playlistAdd ? (
+                                <ListMusic
+                                  size={11}
+                                  color={theme.onAccent}
+                                  strokeWidth={2}
+                                />
+                              ) : (
+                                <Star
+                                  size={11}
+                                  color={theme.onAccent}
+                                  fill={theme.onAccent}
+                                  strokeWidth={2}
+                                />
+                              )}
+                            </View>
+                          </View>
+                          <View style={styles.feedMain}>
+                            <View style={styles.feedNameRow}>
+                              <Text
+                                style={styles.feedNameLine}
+                                numberOfLines={1}
+                              >
+                                <Text
+                                  style={styles.feedName}
+                                  onPress={() =>
+                                    openProfile(activity.user.username)
+                                  }
+                                >
+                                  {activity.user.displayName}
+                                </Text>
+                                <Text style={styles.feedHandle}>
+                                  {' '}
+                                  @{activity.user.username}
+                                </Text>
+                              </Text>
+                              <Text style={styles.feedTime}>
+                                {relativeTime(activity.timestamp)}
+                              </Text>
+                            </View>
+                            <Text
+                              style={styles.feedAction}
+                              numberOfLines={2}
+                            >
+                              {listening
+                                ? 'listened to '
+                                : playlistAdd
+                                  ? 'added '
+                                  : 'rated '}
+                              <Text
+                                style={styles.feedThemeInline}
+                                onPress={() =>
+                                  openTheme(activity.item.slug)
+                                }
+                              >
+                                {activity.item.title}
+                              </Text>
+                              {playlistAdd
+                                ? ` to ${activity.item.playlistName ?? 'a playlist'}`
+                                : activity.item.artist
+                                  ? ` · ${activity.item.artist}`
+                                  : ''}
+                            </Text>
+                            {listening && (
+                              <View style={styles.feedChip}>
+                                <AudioLines
+                                  size={11}
+                                  color={theme.onAccentContainer}
+                                  strokeWidth={2}
+                                />
+                                <Text style={styles.feedChipText}>
+                                  listening
+                                </Text>
+                              </View>
+                            )}
+                            {!listening &&
+                              !playlistAdd &&
+                              activity.item.score !== null && (
+                                <View style={styles.feedChip}>
+                                  <Star
+                                    size={11}
+                                    color={theme.onAccentContainer}
+                                    fill={theme.onAccentContainer}
+                                    strokeWidth={2}
+                                  />
+                                  <Text style={styles.feedChipText}>
+                                    {activity.item.score}/10
+                                  </Text>
+                                </View>
+                              )}
+                          </View>
+                          <Pressable
+                            onPress={() => openTheme(activity.item.slug)}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Open ${activity.item.title}`}
+                            style={styles.feedThumbWrap}
+                          >
+                            {cover ? (
+                              <>
+                                <Image
+                                  source={{ uri: cover }}
+                                  style={styles.feedThumb}
+                                />
+                                <View style={styles.feedThumbPlay}>
+                                  <Play
+                                    size={10}
+                                    color="#FFFFFF"
+                                    fill="#FFFFFF"
+                                    strokeWidth={2}
+                                  />
+                                </View>
+                              </>
+                            ) : (
+                              <View
+                                style={[
+                                  styles.feedThumb,
+                                  styles.feedThumbPlaceholder,
+                                ]}
+                              />
+                            )}
+                          </Pressable>
+                        </View>
+                        {index < rows.length - 1 && (
+                          <View style={styles.feedRowDivider} />
+                        )}
+                      </View>
+                    );
+                  })}
+              </View>
+            ) : (
+              <Text style={styles.feedNoActivity}>
+                No activity from friends yet.
+              </Text>
+            )}
+          </View>
+        ) : (
           <View style={styles.feedCardEmpty}>
             <View style={styles.feedIconCircle}>
               <Users size={24} color={theme.secondary} strokeWidth={2} />
@@ -407,45 +805,6 @@ export default function HomeScreen() {
                 ? 'Follow some people to see what they’re listening to!'
                 : 'Sign in to see what your friends are listening to!'}
             </Text>
-          </View>
-        ) : (
-          <View style={styles.feedCard}>
-            {feedItems.slice(0, HOME_FEED_PREVIEW).map((activity) => (
-              <View key={activity.id} style={styles.feedRow}>
-                <Pressable
-                  onPress={() => openProfile(activity.user.username)}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${activity.user.displayName}'s profile`}
-                >
-                  <Avatar
-                    url={activity.user.avatar}
-                    name={activity.user.displayName}
-                    size={44}
-                  />
-                </Pressable>
-                <View style={styles.feedMain}>
-                  <Text style={styles.feedLine} numberOfLines={1}>
-                    <Text
-                      style={styles.feedName}
-                      onPress={() => openProfile(activity.user.username)}
-                    >
-                      {activity.user.displayName}
-                    </Text>
-                    {activity.type === 'listening'
-                      ? ' is listening to'
-                      : ' liked'}
-                  </Text>
-                  <Pressable onPress={() => openTheme(activity.item.slug)}>
-                    <Text style={styles.feedTheme} numberOfLines={1}>
-                      {activity.item.title}
-                    </Text>
-                  </Pressable>
-                </View>
-                <Text style={styles.feedTime}>
-                  {relativeTime(activity.timestamp)}
-                </Text>
-              </View>
-            ))}
           </View>
         )}
 
@@ -648,6 +1007,12 @@ const createStyles = (theme: Theme) =>
     paddingHorizontal: spacing.screenEdge,
     gap: spacing.sm,
   },
+  seasonRail: {
+    // The Home mock's season cards sit ≈29px apart @2x ≈ 14pt
+    // (measured from kaikansen-home-v3-realimg.png) — wider than
+    // the shared rail gap the Continue Listening rail keeps.
+    gap: 14,
+  },
   surprise: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -660,6 +1025,29 @@ const createStyles = (theme: Theme) =>
     paddingHorizontal: spacing.xl,
     paddingVertical: spacing.md,
     minHeight: 44,
+    overflow: 'hidden',
+  },
+  surpriseArtWrap: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: '62%',
+  },
+  surpriseArt: {
+    width: '100%',
+    height: '100%',
+  },
+  surpriseFade: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: '55%',
+    flexDirection: 'row',
+  },
+  surpriseFadeStrip: {
+    flex: 1,
   },
   pressed: {
     opacity: 0.85,
@@ -702,7 +1090,53 @@ const createStyles = (theme: Theme) =>
     borderColor: theme.border,
     borderRadius: radii.cardLg,
     padding: spacing.lg,
+    gap: spacing.md,
+  },
+  stripRow: {
     gap: spacing.lg,
+  },
+  stripItem: {
+    alignItems: 'center',
+    gap: spacing.xs,
+    width: 64,
+  },
+  stripAvatarRing: {
+    borderWidth: 2,
+    borderColor: theme.secondary,
+    borderRadius: radii.pill,
+    padding: 2,
+  },
+  activeDot: {
+    position: 'absolute',
+    right: 1,
+    bottom: 1,
+    width: 12,
+    height: 12,
+    borderRadius: radii.pill,
+    backgroundColor: theme.success,
+    borderWidth: 2,
+    borderColor: theme.surface,
+  },
+  stripName: {
+    ...typeStyles.caption,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
+    textAlign: 'center',
+  },
+  feedDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: theme.border,
+  },
+  feedRowDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: theme.border,
+    marginVertical: spacing.md,
+  },
+  feedNoActivity: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+    textAlign: 'center',
+    paddingVertical: spacing.xs,
   },
   feedCardEmpty: {
     marginHorizontal: spacing.screenEdge,
@@ -740,25 +1174,96 @@ const createStyles = (theme: Theme) =>
     alignItems: 'center',
     gap: spacing.md,
   },
+  feedAvatarWrap: {
+    position: 'relative',
+  },
+  feedBadge: {
+    position: 'absolute',
+    right: -2,
+    bottom: -2,
+    width: 18,
+    height: 18,
+    borderRadius: radii.pill,
+    borderWidth: 2,
+    borderColor: theme.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   feedMain: {
     flex: 1,
   },
-  feedLine: {
-    ...typeStyles.bodySmall,
+  feedNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  feedNameLine: {
+    ...typeStyles.body,
+    flex: 1,
     color: theme.muted,
   },
   feedName: {
     fontFamily: fontFamilies.bodyStrong,
     color: theme.text,
   },
-  feedTheme: {
+  feedHandle: {
+    fontFamily: fontFamilies.body,
+    color: theme.muted,
+  },
+  feedAction: {
     ...typeStyles.body,
+    color: theme.muted,
+    marginTop: 1,
+  },
+  feedThemeInline: {
     fontFamily: fontFamilies.bodyStrong,
-    color: theme.accent,
+    color: theme.text,
+  },
+  feedChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    alignSelf: 'flex-start',
+    backgroundColor: theme.accentContainer,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    marginTop: spacing.xs,
+  },
+  feedChipText: {
+    ...typeStyles.caption,
+    color: theme.onAccentContainer,
+  },
+  feedThumbWrap: {
+    position: 'relative',
+    width: 52,
+    height: 52,
+  },
+  feedThumb: {
+    width: 52,
+    height: 52,
+    borderRadius: radii.base,
+    backgroundColor: theme.surface,
+  },
+  feedThumbPlaceholder: {
+    backgroundColor: theme.raised,
+  },
+  feedThumbPlay: {
+    position: 'absolute',
+    right: 4,
+    bottom: 4,
+    width: 18,
+    height: 18,
+    borderRadius: radii.pill,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   feedTime: {
     ...typeStyles.caption,
     color: theme.muted,
+    flexShrink: 0,
   },
   emptyText: {
     ...typeStyles.body,

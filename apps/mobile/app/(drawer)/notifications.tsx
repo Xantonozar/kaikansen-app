@@ -266,6 +266,7 @@ export default function NotificationsScreen() {
                   <Avatar
                     url={item.actor?.avatarUrl ?? null}
                     name={actorName}
+                    seed={item.actor?.id}
                     size={36}
                   />
                   <View style={styles.rowMain}>

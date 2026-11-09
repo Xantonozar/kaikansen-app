@@ -38,7 +38,7 @@ export function RankRow({
       ]}
     >
       <Text style={styles.position}>{position}</Text>
-      <Avatar url={entry.avatarUrl} name={name} size={40} />
+      <Avatar url={entry.avatarUrl} name={name} seed={entry.username} size={40} />
       <View style={styles.main}>
         <View style={styles.nameRow}>
           <Text style={styles.name} numberOfLines={1}>

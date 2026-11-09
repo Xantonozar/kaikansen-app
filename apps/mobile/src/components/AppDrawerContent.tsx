@@ -161,6 +161,7 @@ export function AppDrawerContent({
           <Avatar
             url={user.avatarUrl}
             name={user.displayName || user.username}
+            seed={user.id}
             size={40}
           />
           <Text style={styles.profileName} numberOfLines={1}>

@@ -1136,9 +1136,34 @@ export interface UserActivityResponse {
 
 /**
  * One row of GET /social/friends-activity — recent watches
- * ('listening') and ratings ('liked') by users the caller follows.
- * `user.avatar` is always a string: the web falls back to a
- * DiceBear avatar URL seeded by username when none is stored.
+ * ('listening') and ratings ('liked') by users the caller follows,
+ * plus playlist adds ('playlist_add', see below). `user.avatar` is
+ * always a string: the web falls back to a DiceBear avatar URL
+ * seeded by username when none is stored.
+ *
+ * App enrichment (additive, owner-approved — the same precedent as
+ * the network rows' `tier`): the web's own feed items carry ONLY
+ * title + slug, but the app's Home design (§Friends Activity rich
+ * feed) draws the artist, a cover thumbnail, the rating score and,
+ * for playlist adds, the playlist's name. Every item therefore
+ * also carries:
+ * - `artist`: the theme's stored artist name (ThemeSummary's
+ *   artistName), null when the theme left the catalogue.
+ * - `cover`: the anime cover the Home rails serve
+ *   (animeCoverImage ?? animeCoverImageSmall), null likewise.
+ * - `score`: the friend's stored 1–10 rating — set ONLY on 'liked'
+ *   rows, null on the other kinds.
+ * - `playlistName`: the playlist the theme was added to — set
+ *   ONLY on 'playlist_add' rows, null on the other kinds. It is
+ *   the name as it stood when the add happened (the record
+ *   snapshots it; a later rename does not rewrite history).
+ *
+ * 'playlist_add' is an API-side event kind with no web equivalent:
+ * the web records nothing when a theme joins a playlist (its
+ * Playlist model stores a bare, timestamp-less theme id array),
+ * so these events exist only for adds made through THIS API after
+ * the activity recording shipped — there is no backfill, and adds
+ * made on the website never appear.
  */
 export interface FriendsActivityItem {
   id: string;
@@ -1147,12 +1172,16 @@ export interface FriendsActivityItem {
     displayName: string;
     avatar: string;
   };
-  type: 'listening' | 'liked';
+  type: 'listening' | 'liked' | 'playlist_add';
   item: {
     title: string;
     slug: string;
+    artist: string | null;
+    cover: string | null;
+    score: number | null;
+    playlistName: string | null;
   };
-  /** ISO timestamp (viewedAt for watches, createdAt for ratings). */
+  /** ISO timestamp (viewedAt for watches, createdAt for the rest). */
   timestamp: string;
 }
 

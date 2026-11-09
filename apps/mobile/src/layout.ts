@@ -9,8 +9,13 @@ import { useWindowDimensions } from 'react-native';
 export const CONTENT_MAX_WIDTH = 720;
 export const FORM_MAX_WIDTH = 480;
 
-/** Poster-card width for rails/grids: ~35% of the window, clamped. */
+/**
+ * Poster-card width for the Home season rail: the Lavender Dusk
+ * Home mock's cards measure ≈315px of the 780px-wide mock — ≈40% of
+ * the window (layout-fidelity design pass, measured from
+ * kaikansen-home-v3-realimg.png) — clamped to stay sane off-phone.
+ */
 export function usePosterCardWidth(): number {
   const { width } = useWindowDimensions();
-  return Math.round(Math.min(168, Math.max(120, width * 0.35)));
+  return Math.round(Math.min(176, Math.max(132, width * 0.4)));
 }

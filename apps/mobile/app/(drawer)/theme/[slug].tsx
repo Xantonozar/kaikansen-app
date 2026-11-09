@@ -113,9 +113,11 @@ type IconComponent = ComponentType<{
  *   1. Media hero — like the web, the player is EMBEDDED here:
  *      before play it is the artwork hero (grill/cover, glass
  *      back + save, accent play FAB); pressing Watch/Listen turns
- *      the hero itself into the player (video surface for watch,
- *      artwork + hidden surface for listen) with the control
- *      strip inside the hero — the page never navigates away.
+ *      the hero itself into the player (video surface for watch;
+ *      for listen, the design's lavender card — centred artwork,
+ *      corner play/pause disc, waveform row, time row) with the
+ *      control strip inside the hero — the page never navigates
+ *      away.
  *      Playback runs on the shared session (src/playback-context
  *      .tsx): Watch/Listen claims it, and it keeps playing under
  *      the mini player after leaving — the player route the
@@ -146,12 +148,13 @@ type IconComponent = ComponentType<{
  *      Slice M2's rating behaviour). The old separate stats bar's
  *      Views cell is not in the v7 card — totalWatches stays in
  *      the payload, just not drawn here (Slice 6, measured).
- *   7. Related themes — the web's categorised lists (Same Anime
+ *   7. Comments — the shared ThemeComments section (Slice M5).
+ *   8. Related themes — the web's categorised lists (Same Anime
  *      Themes / Franchise & Seasons / More by this Artist /
  *      Recommended for You) as ThemeRow lists, with the web's
- *      empty state when there is nothing related. (v7 order:
- *      Similar before Comments — Slice 6 swapped the sections.)
- *   8. Comments — the shared ThemeComments section (Slice M5).
+ *      empty state when there is nothing related. (Owner's ruling
+ *      2026-11-09: Comments above Similar — Slice 6's v7 order
+ *      reversed.)
  *
  * Loading (the fix): every read this screen needs is keyed by the
  * slug alone, so ALL of them fire in parallel the moment the slug
@@ -169,6 +172,35 @@ type IconComponent = ComponentType<{
  * sheet, the download sheet is per selected entry, and downloads
  * work signed-out while demo mode and web answer honestly.
  */
+/** Bar count of the Listen hero's waveform (the mock's row). */
+const WAVE_BAR_COUNT = 22;
+
+/**
+ * Waveform bar heights for the Listen hero — DECORATIVE. The API
+ * carries no per-theme waveform data, so the bars are a
+ * deterministic pseudo-random pattern seeded by the theme slug
+ * (same theme, same shape, every visit); only the played/unplayed
+ * COLOUR split is real, driven by the playback fraction. Heights
+ * span the mock's measured ≈6–27pt.
+ */
+function waveBarHeights(seed: string): number[] {
+  let state = 0;
+  for (let i = 0; i < seed.length; i++) {
+    state = (state * 31 + seed.charCodeAt(i)) >>> 0;
+  }
+  const heights: number[] = [];
+  for (let i = 0; i < WAVE_BAR_COUNT; i++) {
+    // mulberry32 — tiny deterministic PRNG.
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    const r = ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    heights.push(Math.round(6 + r * 21));
+  }
+  return heights;
+}
+
 export default function ThemeDetailScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -443,6 +475,13 @@ export default function ThemeDetailScreen() {
       : (detail.artistName ?? '')
     : '';
   const hasMultipleVersions = (detail?.entries.length ?? 0) > 1;
+
+  /* Listen hero waveform (decorative bars, real played split —
+     see waveBarHeights). Stable per theme via the slug seed. */
+  const waveHeights = useMemo(
+    () => waveBarHeights(detail?.slug ?? slug),
+    [detail?.slug, slug],
+  );
 
   /* ---------------- Slice M2: save / rating / playlists ---------------- */
 
@@ -741,25 +780,122 @@ export default function ThemeDetailScreen() {
                   )}
                   {playerStrip}
                 </View>
+              ) : playMode === 'listen' ? (
+                /* Listen hero — the design's card (kaikansen-detail
+                   -listen-mini-realimg.png): a lavender card holding
+                   the centred square artwork with the play/pause
+                   disc hanging off its bottom-right corner, the
+                   waveform row under it (decorative bars; the
+                   played split is the real playback fraction), and
+                   the time row — current time, tap-to-seek track,
+                   duration. The audio surface stays mounted but
+                   invisible, as before. */
+                <View style={styles.listenCard}>
+                  <VideoView
+                    player={playback.player}
+                    style={styles.hiddenSurface}
+                    nativeControls={false}
+                  />
+                  <View style={styles.listenArtWrap}>
+                    {cover ? (
+                      <Image
+                        source={{ uri: cover }}
+                        style={styles.listenArt}
+                      />
+                    ) : (
+                      <View style={[styles.listenArt, styles.coverEmpty]} />
+                    )}
+                    <Pressable
+                      onPress={playback.toggleMain}
+                      accessibilityRole="button"
+                      accessibilityLabel={
+                        playback.ended
+                          ? 'Replay'
+                          : playback.isPlaying
+                            ? 'Pause'
+                            : 'Play'
+                      }
+                      style={({ pressed }) => [
+                        styles.listenFab,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      {playback.buffering ? (
+                        <ActivityIndicator color={theme.onAccent} />
+                      ) : playback.ended ? (
+                        <RotateCcw
+                          size={22}
+                          color={theme.onAccent}
+                          strokeWidth={2}
+                        />
+                      ) : playback.isPlaying ? (
+                        <Pause
+                          size={22}
+                          color={theme.onAccent}
+                          fill={theme.onAccent}
+                          strokeWidth={2}
+                        />
+                      ) : (
+                        <Play
+                          size={22}
+                          color={theme.onAccent}
+                          fill={theme.onAccent}
+                          strokeWidth={2}
+                        />
+                      )}
+                    </Pressable>
+                  </View>
+                  <View style={styles.waveRow}>
+                    {waveHeights.map((height, i) => (
+                      <View
+                        key={i}
+                        style={[
+                          styles.waveBar,
+                          {
+                            height,
+                            backgroundColor:
+                              i <
+                              Math.round(playback.fraction * WAVE_BAR_COUNT)
+                                ? theme.accent
+                                : withOpacity(theme.accent, 0.22),
+                          },
+                        ]}
+                      />
+                    ))}
+                  </View>
+                  <View style={styles.listenTimeRow}>
+                    <Text style={styles.listenTime}>
+                      {formatTime(playback.progress.current)}
+                    </Text>
+                    <Pressable
+                      onLayout={(e) =>
+                        setBarWidth(e.nativeEvent.layout.width)
+                      }
+                      onPress={(e) => onStripSeek(e.nativeEvent.locationX)}
+                      accessibilityRole="adjustable"
+                      accessibilityLabel="Seek"
+                      style={styles.listenSeekHit}
+                    >
+                      <View style={styles.listenTrack}>
+                        <View
+                          style={[
+                            styles.listenFill,
+                            { width: `${playback.fraction * 100}%` },
+                          ]}
+                        />
+                      </View>
+                    </Pressable>
+                    <Text style={styles.listenTime}>
+                      {formatTime(playback.progress.duration)}
+                    </Text>
+                  </View>
+                </View>
               ) : (
                 <>
                   {cover ? (
                     <Image source={{ uri: cover }} style={styles.cover} />
                   ) : (
                     <View style={[styles.cover, styles.coverEmpty]} />
-                  )}
-                  {playMode === 'listen' && (
-                    <>
-                      {/* Audio plays through the player; the surface
-                          stays mounted but invisible, so listen mode
-                          keeps the artwork as its face. */}
-                      <VideoView
-                        player={playback.player}
-                        style={styles.hiddenSurface}
-                        nativeControls={false}
-                      />
-                      {playerStrip}
-                    </>
                   )}
                 </>
               )}
@@ -1212,13 +1348,17 @@ export default function ThemeDetailScreen() {
           </>
         )}
 
-        {/* 7 — Related themes, then 8 — Comments (the v7 order:
-            Similar before Comments; Slice 6 swapped them. The
-            comments component still mounts eagerly in the same
-            pass — its fetch fires in parallel with the detail
-            read, and it carries its own loading state.) */}
+        {/* 7 — Comments, then 8 — Related themes (owner's ruling,
+            2026-11-09: Comments above Similar — reversing the v7 /
+            Slice 6 order. The comments component still mounts
+            eagerly in the same pass — its fetch fires in parallel
+            with the detail read, and it carries its own loading
+            state.) */}
         <View style={styles.lowerBody}>
-          {/* 7 — Related themes, the web's categorised lists */}
+          {/* 7 — Comments */}
+          <ThemeComments slug={slug} />
+
+          {/* 8 — Related themes, the web's categorised lists */}
           {!fixtureMode && (
             <View style={styles.relatedSection}>
               {!ready || similarState === 'loading' ? (
@@ -1246,6 +1386,11 @@ export default function ThemeDetailScreen() {
                       <ThemeRow
                         key={item.slug}
                         item={item}
+                        compact
+                        typeChip={false}
+                        saved={favorites.isFavorite(item.slug)}
+                        savePending={favorites.isPending(item.slug)}
+                        onToggleSave={() => void favorites.toggle(item.slug)}
                         onPress={() => router.push(`/theme/${item.slug}`)}
                       />
                     ))}
@@ -1254,9 +1399,6 @@ export default function ThemeDetailScreen() {
               )}
             </View>
           )}
-
-          {/* 8 — Comments */}
-          <ThemeComments slug={slug} />
         </View>
       </View>
     </ScrollView>
@@ -1565,6 +1707,82 @@ const createStyles = (theme: Theme) =>
     width: 1,
     height: 1,
     opacity: 0,
+  },
+  listenCard: {
+    // The Listen mock's card (measured from
+    // kaikansen-detail-listen-mini-realimg.png): ≈10pt side
+    // insets, cardLg radius, ≈20pt padding, accentContainer fill.
+    marginHorizontal: 10,
+    marginTop: spacing.md,
+    backgroundColor: theme.accentContainer,
+    borderRadius: radii.cardLg,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.xl,
+  },
+  listenArtWrap: {
+    alignSelf: 'center',
+    width: 96,
+    height: 96,
+  },
+  listenArt: {
+    width: 96,
+    height: 96,
+    borderRadius: radii.base,
+    backgroundColor: theme.surface,
+  },
+  listenFab: {
+    // Measured: the ≈52pt disc's centre sits ≈9pt right and
+    // ≈17.5pt below the artwork's bottom-right corner — it hangs
+    // off the corner over the waveform zone.
+    position: 'absolute',
+    right: -35,
+    bottom: -43,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: theme.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 6,
+    elevation: 6,
+  },
+  waveRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4.5,
+    height: 28,
+    // Mock: artwork bottom → waveform band ≈33pt.
+    marginTop: 33,
+  },
+  waveBar: {
+    width: 5,
+    borderRadius: 2.5,
+  },
+  listenTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    marginTop: spacing.sm,
+  },
+  listenTime: {
+    ...typeStyles.bodySmall,
+    color: theme.text,
+  },
+  listenSeekHit: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+  },
+  listenTrack: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: withOpacity(theme.accent, 0.22),
+  },
+  listenFill: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: theme.accent,
   },
   heroCenter: {
     ...StyleSheet.absoluteFill,

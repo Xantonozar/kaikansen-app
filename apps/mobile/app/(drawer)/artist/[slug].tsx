@@ -141,7 +141,7 @@ export default function ArtistDetailScreen() {
                   style={styles.artistImage}
                 />
               ) : (
-                <Avatar url={null} name={data.artist.name} size={72} />
+                <Avatar url={null} name={data.artist.name} size={72} disableDefaultAvatar />
               )}
               <Text style={styles.name}>{data.artist.name}</Text>
               {/* The design's subline is plain text ("24 themes ·

@@ -225,7 +225,23 @@ function makeModels() {
     ),
   };
 
-  return { playlistModel, themeModel, userModel };
+  const playlistActivities: Record<string, unknown>[] = [];
+  const playlistActivityModel = {
+    docs: playlistActivities,
+    create: jest.fn(async (data: Record<string, unknown>) => {
+      const now = new Date((clock += 1000));
+      const doc = {
+        _id: `507f1f77bcf86cd79943${String(2000 + ++seq)}`,
+        createdAt: now,
+        updatedAt: now,
+        ...data,
+      };
+      playlistActivities.push(doc);
+      return doc;
+    }),
+  };
+
+  return { playlistModel, themeModel, userModel, playlistActivityModel };
 }
 
 function makeService() {
@@ -234,6 +250,7 @@ function makeService() {
     models.playlistModel as never,
     models.themeModel as never,
     models.userModel as never,
+    models.playlistActivityModel as never,
   );
   return { models, service };
 }
@@ -567,5 +584,62 @@ describe('PlaylistsService — items', () => {
     const noop = await service.removeItem('user-1', owned.id, 'anime_a-op1-1');
     expect(noop.themeCount).toBe(1);
     expect(models.playlistModel.docs[0].themes).toEqual([THEME_B]);
+  });
+});
+
+describe('PlaylistsService — playlist-add activity records', () => {
+  it('records one event per real add, with the name snapshot', async () => {
+    const { service, models } = makeService();
+    const owned = await service.createPlaylist('user-1', { name: 'My Mix' });
+    await service.addItem('user-1', owned.id, { slug: 'anime_a-op1-1' });
+    await service.addItem('user-1', owned.id, { slug: 'anime_b-ed1-2' });
+
+    const docs = models.playlistActivityModel.docs;
+    expect(docs).toHaveLength(2);
+    expect(docs[0]).toMatchObject({
+      userId: 'user-1',
+      playlistId: owned.id,
+      playlistName: 'My Mix',
+      themeId: THEME_A,
+      themeSlug: 'anime_a-op1-1',
+    });
+    expect(docs[1]).toMatchObject({
+      playlistName: 'My Mix',
+      themeId: THEME_B,
+      themeSlug: 'anime_b-ed1-2',
+    });
+  });
+
+  it('records nothing for a duplicate (no-op) add', async () => {
+    const { service, models } = makeService();
+    const owned = await service.createPlaylist('user-1', { name: 'Mix' });
+    await service.addItem('user-1', owned.id, { slug: 'anime_a-op1-1' });
+    await service.addItem('user-1', owned.id, { slug: 'anime_a-op1-1' });
+    expect(models.playlistActivityModel.docs).toHaveLength(1);
+  });
+
+  it('records a fresh event when a removed theme is re-added', async () => {
+    const { service, models } = makeService();
+    const owned = await service.createPlaylist('user-1', { name: 'Mix' });
+    await service.addItem('user-1', owned.id, { slug: 'anime_a-op1-1' });
+    await service.removeItem('user-1', owned.id, 'anime_a-op1-1');
+    await service.addItem('user-1', owned.id, { slug: 'anime_a-op1-1' });
+    // Two real adds happened (the remove itself records nothing).
+    expect(models.playlistActivityModel.docs).toHaveLength(2);
+  });
+
+  it('still adds when no activity model is wired', async () => {
+    const models = makeModels();
+    const bare = new PlaylistsService(
+      models.playlistModel as never,
+      models.themeModel as never,
+      models.userModel as never,
+    );
+    const owned = await bare.createPlaylist('user-1', { name: 'Mix' });
+    const after = await bare.addItem('user-1', owned.id, {
+      slug: 'anime_a-op1-1',
+    });
+    expect(after.themeCount).toBe(1);
+    expect(models.playlistActivityModel.docs).toHaveLength(0);
   });
 });

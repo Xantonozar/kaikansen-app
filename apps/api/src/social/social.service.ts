@@ -46,6 +46,10 @@ import {
   Notification,
   type NotificationDocument,
 } from './notification.schema';
+import {
+  PlaylistActivity,
+  type PlaylistActivityDocument,
+} from '../playlists/playlist-activity.schema';
 
 /** The web's notification list cap (GET /api/notifications). */
 const NOTIFICATION_LIST_LIMIT = 50;
@@ -132,6 +136,10 @@ type NotificationDoc = Notification & {
   createdAt?: Date;
   updatedAt?: Date;
 };
+type PlaylistActivityDoc = PlaylistActivity & {
+  _id: unknown;
+  createdAt?: Date;
+};
 
 interface SocialModels {
   users: Model<UserDocument>;
@@ -198,6 +206,13 @@ interface SocialModels {
  * - The web's limit/page parsing propagates NaN into Mongoose;
  *   unparseable or non-positive values fall back to the defaults
  *   here instead.
+ * - The friends-activity feed is ENRICHED beyond the web
+ *   (owner-approved, additive only): items carry the theme's
+ *   artist + cover, 'liked' rows carry the stored score, and a
+ *   third event kind — 'playlist_add', from the PlaylistActivity
+ *   records PlaylistsService writes at add time — joins the
+ *   merge. The web's fields, order and follow-gating are
+ *   untouched; the website does not consume this API.
  *
  * The models are OPTIONAL like everywhere else in this API:
  * booted without MONGODB_URI, every method answers 503 while
@@ -235,6 +250,16 @@ export class SocialService {
     @Optional()
     @InjectModel(UserRank.name)
     private readonly userRankModel?: Model<UserRankDocument>,
+    /**
+     * Playlist-add activity records, read ONLY to serve the
+     * feed's 'playlist_add' events (written by PlaylistsService).
+     * Kept out of requireModels for the same reason as the rank
+     * model above: the third event kind is additive — without
+     * the model the feed simply serves the web's two kinds.
+     */
+    @Optional()
+    @InjectModel(PlaylistActivity.name)
+    private readonly playlistActivityModel?: Model<PlaylistActivityDocument>,
   ) {}
 
   private requireModels(): SocialModels {
@@ -699,6 +724,16 @@ export class SocialService {
    * after mapping); rows whose theme is gone keep the stored slug
    * and an 'Unknown Title'. Anonymous callers and callers who
    * follow nobody get an empty feed — never a 401.
+   *
+   * App enrichment (additive, owner-approved — the contracts doc
+   * on FriendsActivityItem carries the full rationale): every
+   * item also resolves the theme's artist + cover, 'liked' rows
+   * carry the friend's stored score, and a THIRD kind joins the
+   * merge — 'playlist_add', read from the PlaylistActivity
+   * records PlaylistsService writes at add time (the web records
+   * no such event; there is no backfill). Same composition rules
+   * throughout: per-kind fetch at the limit, one merge, one sort,
+   * one slice, followed users only.
    */
   async getFriendsActivity(
     authorization: string | undefined,
@@ -727,7 +762,7 @@ export class SocialService {
     const filter: Record<string, unknown> = {
       userId: { $in: followedIds },
     };
-    const [historyDocs, ratingDocs] = await Promise.all([
+    const [historyDocs, ratingDocs, playlistDocs] = await Promise.all([
       models.history
         .find(filter)
         .sort({ viewedAt: -1 })
@@ -740,6 +775,16 @@ export class SocialService {
         .limit(fetchLimit)
         .lean()
         .exec(),
+      // The third kind is additive (see the constructor note):
+      // without the model the feed serves the web's two kinds.
+      this.playlistActivityModel
+        ? this.playlistActivityModel
+            .find(filter)
+            .sort({ createdAt: -1 })
+            .limit(fetchLimit)
+            .lean()
+            .exec()
+        : Promise.resolve([]),
     ]);
 
     const usersById = await this.resolveUsers(
@@ -747,12 +792,14 @@ export class SocialService {
       [
         ...(historyDocs as HistoryDoc[]).map((h) => h.userId),
         ...(ratingDocs as RatingDoc[]).map((r) => r.userId),
+        ...(playlistDocs as PlaylistActivityDoc[]).map((a) => a.userId),
       ],
       (u) => u,
     );
     const themeIds = [
       ...(historyDocs as HistoryDoc[]).map((h) => h.themeId),
       ...(ratingDocs as RatingDoc[]).map((r) => r.themeId),
+      ...(playlistDocs as PlaylistActivityDoc[]).map((a) => a.themeId),
     ];
     const uniqueThemeIds = [...new Set(themeIds.map((id) => String(id)))];
     const themeDocs =
@@ -777,33 +824,57 @@ export class SocialService {
       };
     };
 
+    /**
+     * The enriched item shape (see the method doc): title/slug
+     * fall back to the row's stored slug + 'Unknown Title' when
+     * the theme is gone, exactly like the web's two fields did;
+     * artist/cover resolve from the theme document when it
+     * exists (cover = animeCoverImage ?? animeCoverImageSmall,
+     * the Home rails' rule); score and playlistName are each set
+     * by exactly one event kind and null on the others.
+     */
+    const mapItem = (
+      themeId: unknown,
+      storedSlug: string,
+      extra: { score?: number | null; playlistName?: string | null } = {},
+    ) => {
+      const t = themesById.get(String(themeId));
+      return {
+        title: t?.songTitle || 'Unknown Title',
+        slug: t?.slug || storedSlug,
+        artist: t?.artistName ?? null,
+        cover: t
+          ? (t.animeCoverImage ?? t.animeCoverImageSmall ?? null)
+          : null,
+        score: extra.score ?? null,
+        playlistName: extra.playlistName ?? null,
+      };
+    };
+
     const activities: FriendsActivityItem[] = [
-      ...(historyDocs as HistoryDoc[]).map((h) => {
-        const t = themesById.get(String(h.themeId));
-        return {
-          id: String(h._id),
-          user: mapUser(h.userId),
-          type: 'listening' as const,
-          item: {
-            title: t?.songTitle || 'Unknown Title',
-            slug: t?.slug || h.themeSlug,
-          },
-          timestamp: iso(h.viewedAt),
-        };
-      }),
-      ...(ratingDocs as RatingDoc[]).map((r) => {
-        const t = themesById.get(String(r.themeId));
-        return {
-          id: String(r._id),
-          user: mapUser(r.userId),
-          type: 'liked' as const,
-          item: {
-            title: t?.songTitle || 'Unknown Title',
-            slug: t?.slug || r.themeSlug,
-          },
-          timestamp: iso(r.createdAt),
-        };
-      }),
+      ...(historyDocs as HistoryDoc[]).map((h) => ({
+        id: String(h._id),
+        user: mapUser(h.userId),
+        type: 'listening' as const,
+        item: mapItem(h.themeId, h.themeSlug),
+        timestamp: iso(h.viewedAt),
+      })),
+      ...(ratingDocs as RatingDoc[]).map((r) => ({
+        id: String(r._id),
+        user: mapUser(r.userId),
+        type: 'liked' as const,
+        item: mapItem(r.themeId, r.themeSlug, { score: r.score ?? null }),
+        timestamp: iso(r.createdAt),
+      })),
+      ...(playlistDocs as PlaylistActivityDoc[]).map((a) => ({
+        id: String(a._id),
+        user: mapUser(a.userId),
+        type: 'playlist_add' as const,
+        item: mapItem(a.themeId, a.themeSlug, {
+          playlistName: a.playlistName,
+        }),
+        timestamp: iso(a.createdAt),
+      })),
     ]
       .filter((a) => a.user.username !== 'unknown')
       .sort((a, b) => timeOf(b.timestamp) - timeOf(a.timestamp))

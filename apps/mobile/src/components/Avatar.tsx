@@ -2,28 +2,43 @@ import { useMemo } from 'react';
 import { Image, StyleSheet, Text, View } from 'react-native';
 import { fontFamilies, typeStyles, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
+import { pickDefaultAvatar } from '../defaultAvatars';
 
 /**
  * User avatar (Slice M5) — the shared circle for feed rows, comments,
- * profiles and notifications. Renders the stored avatar image when
- * there is a raster URL; otherwise (and for SVG URLs — DiceBear
- * fallbacks are SVG, which React Native's Image cannot draw) it
- * falls back to the initial-on-accent-container treatment the header
- * and drawer already use (P-20).
+ * profiles and notifications. Three cases:
+ * - A raster avatar URL renders as the stored image, as before.
+ * - NO avatar (null/empty URL): the user's deterministic bundled
+ *   chibi (see defaultAvatars.ts) fills the circle instead of the
+ *   old initial-letter disc. `seed` picks the chibi — callers pass
+ *   the user id where they have it, else the username; with no seed
+ *   the display `name` is hashed.
+ * - An SVG URL (DiceBear fallbacks are SVG, which React Native's
+ *   Image cannot draw) ALSO gets the deterministic chibi (owner
+ *   decision 2026-11-09): in the app there is no renderable stored
+ *   avatar to show, so the chibi stands in — on the web the same
+ *   user's DiceBear still renders normally.
+ * `disableDefaultAvatar` opts a non-user borrower (the artist hero)
+ * out of the chibi and back to the initial disc — for every
+ * unusable-avatar case above.
  */
 export function Avatar({
   url,
   name,
   size = 40,
+  seed,
+  disableDefaultAvatar = false,
 }: {
   url: string | null;
   name: string;
   size?: number;
+  seed?: string;
+  disableDefaultAvatar?: boolean;
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const usable =
-    url !== null && url.length > 0 && !url.toLowerCase().includes('.svg');
+  const hasUrl = url !== null && url.length > 0;
+  const usable = hasUrl && !url.toLowerCase().includes('.svg');
   const initial = (name.trim().charAt(0) || '?').toUpperCase();
   const box = {
     width: size,
@@ -35,6 +50,15 @@ export function Avatar({
     return (
       <Image
         source={{ uri: url }}
+        style={[styles.image, box]}
+        accessibilityLabel={`${name}'s avatar`}
+      />
+    );
+  }
+  if (!usable && !disableDefaultAvatar) {
+    return (
+      <Image
+        source={pickDefaultAvatar(seed ?? name)}
         style={[styles.image, box]}
         accessibilityLabel={`${name}'s avatar`}
       />
