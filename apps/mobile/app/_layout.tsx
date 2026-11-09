@@ -88,6 +88,7 @@ function Shell() {
         <Stack.Screen name="(drawer)" />
         <Stack.Screen name="login" />
         <Stack.Screen name="register" />
+        <Stack.Screen name="forgot-password" />
         <Stack.Screen name="anilist-handoff" />
       </Stack>
     </GestureHandlerRootView>
