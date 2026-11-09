@@ -82,7 +82,10 @@ export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
             }}
             style={styles.tab}
           >
-            <View style={[styles.pill, focused && styles.pillActive]}>
+            <View style={styles.pill}>
+              <View
+                style={[styles.pillFill, focused && styles.pillFillActive]}
+              />
               <Icon size={22} color={iconColor} strokeWidth={2} />
             </View>
           </Pressable>
@@ -124,14 +127,31 @@ const createStyles = (theme: Theme) =>
     minHeight: 52, // ≥44px touch target (DESIGN.md §10)
   },
   pill: {
+    // The pill's SHAPE lives on this view and never changes: fixed
+    // size, pill radius, overflow hidden. Do not put the active
+    // background colour here — on Android (RN's BackgroundDrawable)
+    // a background fill whose colour toggles on re-render can paint
+    // through drawRect with the radius dropped, which is exactly the
+    // "square pill on second selection" bug this structure prevents:
+    // the colour is painted by the dumb inner fill below and this
+    // view's rounded clip (clipToPaddingBox) enforces the silhouette
+    // no matter how the fill itself is drawn.
     minWidth: 58,
     height: 34,
     paddingHorizontal: spacing.md,
     borderRadius: radii.pill,
+    overflow: 'hidden',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  pillActive: {
+  pillFill: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  pillFillActive: {
     backgroundColor: theme.accent,
   },
 });
