@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -13,7 +14,12 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Camera, ChevronLeft, Image as ImageIcon } from 'lucide-react-native';
+import {
+  Camera,
+  Check,
+  ChevronLeft,
+  Image as ImageIcon,
+} from 'lucide-react-native';
 import {
   fontFamilies,
   radii,
@@ -24,6 +30,10 @@ import {
 import { useTheme } from '../../src/theme-context';
 import { useAuth } from '../../src/auth';
 import { Avatar } from '../../src/components/Avatar';
+import {
+  DEFAULT_AVATARS,
+  DEFAULT_AVATAR_URLS,
+} from '../../src/defaultAvatars';
 import { updateMyProfile } from '../../src/socialApi';
 import { CONTENT_MAX_WIDTH } from '../../src/layout';
 
@@ -39,7 +49,13 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * - Avatar: the web has NO upload endpoint — its form is an avatar
  *   URL field behind the camera affordance. The badge and "Change
  *   photo" here open the same URL field; saving sends the trimmed
- *   URL, or null (cleared) when emptied.
+ *   URL, or null (cleared) when emptied. Under the field sits the
+ *   defaults picker (owner's order, 2026-11-10): the 10 bundled
+ *   chibis rendered from their local assets; tapping one saves
+ *   THAT chibi's hosted Cloudinary URL as the avatarUrl right
+ *   away (a partial PATCH — the form's other fields are not
+ *   written), so the stored value is a plain image URL the
+ *   website renders like any other avatar.
  * - Username is read-only — the web's form fixes it ("Usernames
  *   cannot be changed"); when an AniList account is linked, the
  *   design's note names it instead.
@@ -59,6 +75,7 @@ export default function EditProfileScreen() {
   const [editBio, setEditBio] = useState('');
   const [editAvatar, setEditAvatar] = useState('');
   const [photoOpen, setPhotoOpen] = useState(false);
+  const [picking, setPicking] = useState<number | null>(null);
   const [isPublic, setIsPublic] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -117,6 +134,40 @@ export default function EditProfileScreen() {
         ),
       )
       .finally(() => setBusy(false));
+  };
+
+  /**
+   * Defaults picker: save the tapped chibi's hosted URL as the
+   * avatar — a partial PATCH /auth/me carrying ONLY avatarUrl, so
+   * unsaved name/bio edits in the form are never written by a
+   * pick. The response replaces the session profile at once and
+   * the screen returns to Profile on the same beat as Save. A
+   * failed save keeps the old avatar and shows the error.
+   */
+  const onPickDefault = (index: number) => {
+    if (busy || picking !== null || !user) return;
+    const url = DEFAULT_AVATAR_URLS[index];
+    if (user.avatarUrl === url) {
+      // Already the saved picture — just sync the field/preview.
+      setEditAvatar(url);
+      return;
+    }
+    setPicking(index);
+    setError(null);
+    setSaved(false);
+    updateMyProfile({ avatarUrl: url })
+      .then((updated) => {
+        updateUser(updated);
+        setEditAvatar(url);
+        setSaved(true);
+        backTimer.current = setTimeout(goBack, 800);
+      })
+      .catch((e: unknown) =>
+        setError(
+          e instanceof Error ? e.message : 'Could not save your profile.',
+        ),
+      )
+      .finally(() => setPicking(null));
   };
 
   const linkedName = user?.anilist?.username ?? anilistUsername;
@@ -197,6 +248,51 @@ export default function EditProfileScreen() {
                       Set an avatar URL — the same avatar field the website
                       uses. Leave it empty to clear your photo.
                     </Text>
+                    <Text style={styles.pickerLabel}>
+                      Or choose a default
+                    </Text>
+                    <View style={styles.pickerGrid}>
+                      {DEFAULT_AVATARS.map((source, i) => {
+                        const url = DEFAULT_AVATAR_URLS[i];
+                        const selected = editAvatar.trim() === url;
+                        return (
+                          <Pressable
+                            key={url}
+                            onPress={() => onPickDefault(i)}
+                            disabled={busy || picking !== null}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Choose default avatar ${i + 1}`}
+                            accessibilityState={{ selected }}
+                            style={({ pressed }) => [
+                              styles.pickerCell,
+                              selected && styles.pickerCellSelected,
+                              pressed && styles.pressed,
+                            ]}
+                          >
+                            {picking === i ? (
+                              <ActivityIndicator
+                                size="small"
+                                color={theme.accent}
+                              />
+                            ) : (
+                              <Image
+                                source={source}
+                                style={styles.pickerImage}
+                              />
+                            )}
+                            {selected && picking === null && (
+                              <View style={styles.pickerCheck}>
+                                <Check
+                                  size={11}
+                                  color={theme.onAccent}
+                                  strokeWidth={3}
+                                />
+                              </View>
+                            )}
+                          </Pressable>
+                        );
+                      })}
+                    </View>
                   </>
                 )}
               </View>
@@ -384,6 +480,53 @@ const createStyles = (theme: Theme) =>
       color: theme.text,
       minHeight: 44,
       paddingVertical: 0,
+    },
+    pickerLabel: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.muted,
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+      alignSelf: 'stretch',
+      marginTop: spacing.md,
+      marginBottom: spacing.sm,
+    },
+    pickerGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+      alignSelf: 'stretch',
+    },
+    pickerCell: {
+      width: 56,
+      height: 56,
+      borderRadius: radii.pill,
+      borderWidth: 2.5,
+      borderColor: 'transparent',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    pickerCellSelected: {
+      borderColor: theme.accent,
+    },
+    pickerImage: {
+      width: 48,
+      height: 48,
+      borderRadius: radii.pill,
+      backgroundColor: theme.surface,
+    },
+    pickerCheck: {
+      position: 'absolute',
+      right: -1,
+      bottom: -1,
+      width: 18,
+      height: 18,
+      borderRadius: radii.pill,
+      backgroundColor: theme.accent,
+      borderWidth: 2,
+      borderColor: theme.background,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     card: {
       backgroundColor: theme.surface,

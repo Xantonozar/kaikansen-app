@@ -537,6 +537,28 @@ describe('AuthService', () => {
       expect(res.avatarUrl).toBeNull();
     });
 
+    it('stores a picked default-avatar (Cloudinary) URL verbatim', async () => {
+      const { model, service, reg } = await seeded();
+      // Registration seeded a DiceBear URL; the app's defaults
+      // picker replaces it with the chibi's hosted URL — a plain
+      // https image URL the web's URL check accepts unchanged.
+      expect(reg.user.avatarUrl).toContain('dicebear');
+      const picked =
+        'https://res.cloudinary.com/chirkut/image/upload/v1794261844/avatar-01_n0q719.png';
+      const res = await service.updateProfile(reg.user.id, {
+        avatarUrl: picked,
+      });
+      expect(res.avatarUrl).toBe(picked);
+      expect(model.users[0].avatarUrl).toBe(picked);
+      expect(model.findByIdAndUpdate).toHaveBeenCalledWith(
+        reg.user.id,
+        { $set: { avatarUrl: picked } },
+        { new: true },
+      );
+      // What PATCH returns is exactly what GET /auth/me serves.
+      await expect(service.me(reg.user.id)).resolves.toEqual(res);
+    });
+
     it('ignores unknown fields — email, username and counters are not editable', async () => {
       const { model, service, reg } = await seeded();
       const res = await service.updateProfile(reg.user.id, {

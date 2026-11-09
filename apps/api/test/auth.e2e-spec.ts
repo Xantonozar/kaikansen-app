@@ -299,6 +299,28 @@ describe('Auth flow with a mocked model (e2e)', () => {
     expect(res.body.displayName).toBe('Edited Name');
   });
 
+  it('PATCH /auth/me stores a picked default-avatar (Cloudinary) URL verbatim', async () => {
+    const http = request(app.getHttpServer());
+    // One of the 10 hosted defaults the app's picker writes — a
+    // plain https image URL on the shared avatarUrl field, so the
+    // website renders it as an ordinary image.
+    const picked =
+      'https://res.cloudinary.com/chirkut/image/upload/v1794261844/avatar-03_ucq9cu.png';
+    const res = await http
+      .patch('/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ avatarUrl: picked })
+      .expect(200);
+    expect(res.body.avatarUrl).toBe(picked);
+    expect(res.body.displayName).toBe('Edited Name');
+
+    const after = await http
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    expect(after.body.avatarUrl).toBe(picked);
+  });
+
   it('PATCH /auth/me toggles isPublic (the Edit Profile switch) and GET /auth/me reflects it', async () => {
     const http = request(app.getHttpServer());
     const off = await http
