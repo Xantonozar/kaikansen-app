@@ -1,4 +1,5 @@
 import type {
+  AnilistEntriesResponse,
   CreatePlaylistRequest,
   FavoriteState,
   FavoritesResponse,
@@ -121,6 +122,29 @@ export async function fetchLibraryThemes(): Promise<LibraryThemesResponse> {
     themes.push(...res.themes);
   }
   return { ...first, themes, page: 1, limit: themes.length };
+}
+
+/**
+ * The caller's AniList Watching + Completed ENTRIES
+ * (GET /library/anilist-entries) — per-entry progress, score,
+ * format and episodes read from AniList itself by the API. The
+ * response degrades by flags, never by error: `available: false`
+ * (unlinked, or AniList unreachable with no cache) tells the
+ * Library segment to fall back to the themes union above.
+ * Fixture mode resolves the honest unlinked shape — a demo
+ * library invents no AniList entries.
+ */
+export async function fetchAnilistEntries(): Promise<AnilistEntriesResponse> {
+  if (fixtureMode) {
+    return {
+      linked: false,
+      available: false,
+      anilistUser: null,
+      watching: [],
+      completed: [],
+    };
+  }
+  return apiJson<AnilistEntriesResponse>('/library/anilist-entries');
 }
 
 /* ------------------------------------------------------------------ */

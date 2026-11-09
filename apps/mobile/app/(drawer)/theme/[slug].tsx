@@ -56,6 +56,7 @@ import {
 } from '../../../src/api';
 import { ThemeComments } from '../../../src/components/ThemeComments';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import { ThemeRowMenu } from '../../../src/components/ThemeRowMenu';
 import { AddToPlaylistSheet } from '../../../src/components/AddToPlaylistSheet';
 import { useAuth } from '../../../src/auth';
 import {
@@ -397,8 +398,10 @@ export default function ThemeDetailScreen() {
     ]),
   );
 
-  /** Rounded-square back button; `glass` floats it over the artwork. */
-  const backTile = (glass: boolean) => (
+  /** Rounded-square back button — now only the error/missing
+      state's; the ready screen's back lives in the header row
+      above the hero (detailHeader below). */
+  const backTile = () => (
     <Pressable
       onPress={() => router.back()}
       hitSlop={3}
@@ -406,7 +409,7 @@ export default function ThemeDetailScreen() {
       accessibilityLabel="Back"
       style={styles.backHit}
     >
-      <View style={[styles.tile, glass ? styles.tileGlass : styles.tileSolid]}>
+      <View style={[styles.tile, styles.tileSolid]}>
         <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
       </View>
     </Pressable>
@@ -416,7 +419,7 @@ export default function ThemeDetailScreen() {
     return (
       <View style={styles.screen}>
         <View style={[styles.topRow, { paddingTop: insets.top + spacing.sm }]}>
-          {backTile(false)}
+          {backTile()}
         </View>
         <View style={styles.center}>
           <Text style={styles.message}>
@@ -662,6 +665,46 @@ export default function ThemeDetailScreen() {
     </View>
   );
 
+  /* Screen header (design polish pass): the mock draws a header
+     row ABOVE the hero — bare back chevron left, the share / ⋮
+     pair right — instead of a glass back tile floating over the
+     artwork. The ⋮ is the shared ThemeRowMenu (Play / View theme
+     / Save / Add to playlist / Download, all wired); its Play
+     starts watch playback here. While the detail loads, the row
+     carries the back chevron alone. */
+  const detailHeader = (
+    <View
+      style={[styles.detailHeader, { paddingTop: insets.top + spacing.sm }]}
+    >
+      <Pressable
+        onPress={() => router.back()}
+        hitSlop={3}
+        accessibilityRole="button"
+        accessibilityLabel="Back"
+        style={styles.backHit}
+      >
+        <ChevronLeft size={24} color={theme.text} strokeWidth={2} />
+      </Pressable>
+      {ready && detail ? (
+        <View style={styles.headerActions}>
+          <Pressable
+            onPress={onShare}
+            hitSlop={3}
+            accessibilityRole="button"
+            accessibilityLabel="Share theme"
+            style={styles.headerActionHit}
+          >
+            <Share2 size={20} color={theme.text} strokeWidth={2} />
+          </Pressable>
+          <ThemeRowMenu
+            item={detail}
+            onPlay={() => startPlayback('watch')}
+          />
+        </View>
+      ) : null}
+    </View>
+  );
+
   return (
     <>
     <ScrollView style={styles.screen} showsVerticalScrollIndicator={false}>
@@ -671,19 +714,15 @@ export default function ThemeDetailScreen() {
              below, which fetch on their own) render immediately;
              only this zone waits for the detail payload. */
           <View>
-            <View style={styles.coverPlaceholder}>
-              <View
-                style={[styles.overlay, { top: insets.top + spacing.sm }]}
-              >
-                {backTile(true)}
-              </View>
-            </View>
+            {detailHeader}
+            <View style={styles.coverPlaceholder} />
             <View style={styles.loadingZone}>
               <ActivityIndicator color={theme.accent} />
             </View>
           </View>
         ) : (
           <>
+            {detailHeader}
             {/* 1 — Media hero (the player, once playing) */}
             <View style={styles.artWrap}>
               {playMode === 'watch' ? (
@@ -724,11 +763,6 @@ export default function ThemeDetailScreen() {
                   )}
                 </>
               )}
-              <View
-                style={[styles.overlay, { top: insets.top + spacing.sm }]}
-              >
-                {backTile(true)}
-              </View>
               {playMode === null && (
                 <>
                   {/* The v7 hero's bottom-left type chip ("OP 1",
@@ -1426,12 +1460,23 @@ const createStyles = (theme: Theme) =>
   tileSolid: {
     backgroundColor: theme.raised,
   },
-  tileGlass: {
-    // Translucent fill stands in for backdrop blur (no blur dependency
-    // in this slice); both are derived from the active token set.
-    backgroundColor: withOpacity(theme.background, 0.62),
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: withOpacity(theme.text, 0.14),
+  detailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.screenEdge,
+    paddingBottom: spacing.sm,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  headerActionHit: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   center: {
     flex: 1,
@@ -1448,8 +1493,11 @@ const createStyles = (theme: Theme) =>
     position: 'relative',
   },
   cover: {
+    // 16:9 in BOTH states (design polish pass): the paused
+    // hero's 3:2 was the audit's delta — the mock's paused hero
+    // matches the playing surface's 16:9.
     width: '100%',
-    aspectRatio: 3 / 2,
+    aspectRatio: 16 / 9,
     backgroundColor: theme.surface,
   },
   coverEmpty: {
@@ -1457,7 +1505,7 @@ const createStyles = (theme: Theme) =>
   },
   coverPlaceholder: {
     width: '100%',
-    aspectRatio: 3 / 2,
+    aspectRatio: 16 / 9,
     backgroundColor: theme.surface,
     position: 'relative',
   },
@@ -1465,19 +1513,12 @@ const createStyles = (theme: Theme) =>
     paddingVertical: spacing.xxxl,
     alignItems: 'center',
   },
-  overlay: {
-    position: 'absolute',
-    left: spacing.sm,
-    right: spacing.sm,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    zIndex: 5,
-  },
   fab: {
-    // The v7 hero's centre play disc: 56px, mauveDeep, centred on
-    // the artwork (it straddled the hero's bottom-right corner in
-    // the pre-fidelity build).
+    // The v7 hero's centre play disc: 56px, centred on the
+    // artwork (it straddled the hero's bottom-right corner in
+    // the pre-fidelity build). Glass fill (design polish pass):
+    // the mock's disc is translucent mauveDeep, matching the
+    // hero chip's withOpacity(accent, 0.85).
     position: 'absolute',
     left: '50%',
     top: '50%',
@@ -1486,7 +1527,7 @@ const createStyles = (theme: Theme) =>
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: theme.accent,
+    backgroundColor: withOpacity(theme.accent, 0.85),
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 6,

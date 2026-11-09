@@ -35,10 +35,17 @@ export interface TabBarProps {
 }
 
 /**
- * Bottom navigation (DESIGN.md §5): 64px bar, four tabs. Lavender Dusk
+ * Bottom navigation (DESIGN.md §5): four tabs. Lavender Dusk
  * treatment (owner decision 2026-11-09, all 38 approved screens): the bar
  * is ICON-ONLY — the active tab's icon sits in a solid mauveDeep pill,
  * inactive tabs are bare icons. Labels survive as accessibility labels.
+ *
+ * Design polish pass: the bar FLOATS as the mocks draw it — a
+ * white rounded container inset from the screen edges over the
+ * page background, not a full-bleed white bar on a hairline. The
+ * shell is transparent so the page shows around the float; the
+ * bottom inset is halved into the float's margin (the rest of
+ * the gesture area stays clear of the container's edge).
  *
  * Above the bar sits the mini player (layout-fidelity Slice 1): the
  * finalized mocks float it over the page background just above the
@@ -54,7 +61,7 @@ export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
       <View
         style={[
           styles.bar,
-          { paddingBottom: insets.bottom, height: shell.tabBarHeight + insets.bottom },
+          { marginBottom: spacing.sm + Math.round(insets.bottom / 2) },
         ]}
       >
       {state.routes.map((route, index) => {
@@ -89,16 +96,25 @@ export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
   shell: {
-    backgroundColor: theme.background,
+    // Transparent: the floating bar (and the mini player above
+    // it) sit over the page background, as the mocks draw them.
+    backgroundColor: 'transparent',
   },
   bar: {
     flexDirection: 'row',
     alignItems: 'center',
+    height: shell.tabBarHeight,
+    marginHorizontal: spacing.md,
     paddingHorizontal: spacing.sm,
-    paddingTop: spacing.xs,
     backgroundColor: theme.surface,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: theme.border,
+    borderRadius: 28,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    shadowColor: '#2D2329',
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
   },
   tab: {
     flex: 1,

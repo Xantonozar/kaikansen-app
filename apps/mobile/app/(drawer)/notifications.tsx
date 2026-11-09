@@ -171,7 +171,11 @@ export default function NotificationsScreen() {
           </View>
         </Pressable>
         <Text style={styles.title}>Notifications</Text>
-        {signedIn && !fixtureMode && unreadCount > 0 && (
+        {/* "Mark all read" is always drawn for a signed-in live
+            session (design polish pass — the mock shows it
+            unconditionally); with nothing unread the handler is
+            a no-op, as before. */}
+        {signedIn && !fixtureMode && (
           <Pressable
             onPress={onMarkAll}
             disabled={markingAll}

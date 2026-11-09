@@ -15,11 +15,14 @@ import {
 } from 'expo-router';
 import { VideoView } from 'expo-video';
 import {
+  Check,
   Download,
   Headphones,
   Maximize,
   Pause,
   Play,
+  Repeat,
+  Repeat1,
   RotateCcw,
   SkipBack,
   SkipForward,
@@ -27,25 +30,38 @@ import {
 } from 'lucide-react-native';
 import type { PlaybackMode } from '@kaikansen/contracts';
 import { fixtureMode } from '../../src/api';
-import { formatTime } from '../../src/playback';
+import { downloadId, useDownloads } from '../../src/downloads';
+import { entryHasAudio, formatTime } from '../../src/playback';
 import { usePlaybackSession } from '../../src/playback-context';
 import {
   fontFamilies,
   radii,
   spacing,
   typeStyles,
-  withOpacity,
   type Theme,
 } from '../../src/theme';
 import { useTheme } from '../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../src/layout';
 
 /**
- * Player route (Slice M1) — full-screen Watch/Listen playback on
- * expo-video, opened from the Library (Offline rows) and playlist
- * screens with { slug, mode, entry (atEntryId) }. The theme detail
- * screen no longer comes here: it plays INLINE on the page, like
- * the website and the design (the hero card is the player).
+ * Player route — full-screen Watch/Listen playback on expo-video,
+ * opened from the Library (Offline rows) and playlist screens with
+ * { slug, mode, entry (atEntryId) }. The theme detail screen no
+ * longer comes here: it plays INLINE on the page, like the website
+ * and the design (the hero card is the player).
+ *
+ * Composition follows the Lavender Dusk player mock (design
+ * polish pass): NO header bar — the media carries two dark-glass
+ * discs (✕ top-left, maximize top-right, watch only) and the
+ * OP/resolution chips at its bottom-left; below it a centred
+ * title block (song, artist, "ANIME · SEASON YEAR" pill), the
+ * Watch/Listen segmented toggle, the seek bar, and the transport
+ * row: repeat · prev · pause disc · next · download. Repeat is
+ * the provider's real repeat mode (off → queue → one, honoured
+ * at track end — see src/playback-context.tsx); Download drives
+ * the shared downloads store for the current theme + mode,
+ * exactly like the detail screen's download sheet (tap again on
+ * a downloaded track removes it; tap while downloading cancels).
  *
  * The playback engine itself — source resolution (highest-
  * resolution video for watch; the listen chain stored audio →
@@ -53,21 +69,16 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * downloads, history recording, error/retry — lives in
  * src/usePlayback.ts, owned by the ONE PlaybackProvider instance
  * (src/playback-context.tsx) and shared with the detail screen and
- * the mini player. This route is the presentation shell: header
- * (song/anime, Offline + mode chips), the video surface (watch) or
- * artwork with a hidden surface (listen), and custom icon-led
- * controls — play/pause (replay once ended), a tap-to-seek bar
- * with time labels, fullscreen (watch only) and close. Closing it
- * leaves the session playing under the mini player.
+ * the mini player.
  *
  * On focus the route ADOPTS its params into the shared session —
  * but only when they identify a different track than the session's
  * current item, and only once per distinct param set: when the
- * session runs a queue (Slice 2.5), the queue may advance the
- * session well past the params this route was opened with, and
- * returning here must never clobber that queue — the route renders
- * whatever the session holds, so an advance while the route is
- * open is FOLLOWED (header, artwork and engine all move to the
+ * session runs a queue, the queue may advance the session well
+ * past the params this route was opened with, and returning here
+ * must never clobber that queue — the route renders whatever the
+ * session holds, so an advance while the route is open is
+ * FOLLOWED (media, title block and engine all move to the
  * now-playing theme), never hijacked back to the stale params.
  * When the session carries a queue, the mock's Up Next card
  * appears under the controls. The provider resolves the claimed
@@ -75,7 +86,9 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  *
  * A usable local download renders the player even when the
  * catalogue fetch failed (fully offline open from the Library):
- * header and artwork fall back to the download's stored snapshot.
+ * title block and artwork fall back to the download's stored
+ * snapshot; the catalogue-only chips (type / resolution) and the
+ * season pill simply don't render without a detail.
  */
 export default function PlayerScreen() {
   const theme = useTheme();
@@ -101,6 +114,8 @@ export default function PlayerScreen() {
     next,
     prev,
     nextQueueItem,
+    repeatMode,
+    cycleRepeat,
     startSession,
     updateSession,
   } = usePlaybackSession();
@@ -114,10 +129,7 @@ export default function PlayerScreen() {
      identify a different track, the route claims that track as a
      fresh single play and the provider resolves its detail. Once
      adopted, later session movement (queue advances, another
-     screen's claim) is followed, never fought. The control row
-     always carries prev/next flanking the main button — disabled
-     at the queue bounds, and in single-track sessions (no queue),
-     where both bounds are met at once. */
+     screen's claim) is followed, never fought. */
   const adoptedKeyRef = useRef<string | null>(null);
   const adoptParams = useCallback(() => {
     const key = `${params.slug}:${paramEntry ?? ''}:${paramMode}`;
@@ -157,17 +169,16 @@ export default function PlayerScreen() {
   useFocusEffect(adoptParams);
 
   /* Everything renders from the shared session: its detail (the
-     provider resolves claimed tracks), its entry (for the header's
-     version line) and its mode (a queue keeps its claimed mode
-     across tracks, so the chips follow the session, not the
-     possibly-stale params). */
+     provider resolves claimed tracks), its entry (the chips and
+     the download target) and its mode (a queue keeps its claimed
+     mode across tracks, so the toggle follows the session, not
+     the possibly-stale params). */
   const detail = session.detail;
-  const entry = session.entry;
+  const entry = session.entry ?? detail?.entries[0] ?? null;
   const mode = session.mode;
   const {
     player,
     localUsable,
-    offline,
     unavailable,
     buffering,
     playerError,
@@ -179,23 +190,39 @@ export default function PlayerScreen() {
   const videoRef = useRef<VideoView>(null);
   const [barWidth, setBarWidth] = useState(0);
 
-  const closeTile = (
+  /* Download state for the current theme + mode — the same store
+     and the same states the detail screen's download sheet shows. */
+  const downloads = useDownloads();
+  const dlEntryId = entry?.atEntryId ?? session.entryIdOverride ?? null;
+  const dlId =
+    session.slug && dlEntryId != null
+      ? downloadId(session.slug, dlEntryId, mode)
+      : null;
+  const dlRecord =
+    session.slug && dlEntryId != null
+      ? downloads.find(session.slug, dlEntryId, mode)
+      : undefined;
+  const dlProgress = dlId ? downloads.progressFor(dlId) : undefined;
+  const dlError = dlId ? downloads.errorFor(dlId) : null;
+  const dlDownloading = dlProgress !== undefined;
+  const dlDownloaded = !!dlRecord && !dlRecord.fileMissing;
+
+  const closeDisc = (
     <Pressable
       onPress={() => router.back()}
       hitSlop={3}
       accessibilityRole="button"
       accessibilityLabel="Close player"
-      style={styles.closeHit}
+      style={({ pressed }) => [styles.glassDisc, pressed && styles.pressed]}
     >
-      <View style={styles.closeTileInner}>
-        <X size={22} color={theme.text} strokeWidth={2} />
-      </View>
+      <X size={20} color="#FFFFFF" strokeWidth={2} />
     </Pressable>
   );
 
   // A usable local download renders the player even when the
   // catalogue fetch failed (fully offline open from the Library):
-  // header and artwork fall back to the download's stored snapshot.
+  // title block and artwork fall back to the download's stored
+  // snapshot.
   if (!detail && !localUsable) {
     const resolutionFailed =
       resolution !== null &&
@@ -204,7 +231,7 @@ export default function PlayerScreen() {
     return (
       <View style={styles.screen}>
         <View style={[styles.topRow, { paddingTop: insets.top + spacing.sm }]}>
-          {closeTile}
+          {closeDisc}
         </View>
         <View style={styles.center}>
           {resolutionFailed ? (
@@ -224,53 +251,49 @@ export default function PlayerScreen() {
   const cover = detail
     ? (detail.animeGrillImage ?? detail.animeCoverImage)
     : (localUsable?.coverImage ?? null);
-  const headerSong = detail?.songTitle ?? localUsable?.songTitle ?? '';
-  const headerMeta = detail
-    ? `${detail.animeTitle}${entry ? ` · ${entry.version}` : ''}`
-    : localUsable
-      ? `${localUsable.animeTitle} · ${localUsable.version}`
-      : '';
+  const titleSong = detail?.songTitle ?? localUsable?.songTitle ?? '';
+  const titleArtist = detail
+    ? detail.allArtists.length > 0
+      ? detail.allArtists.join(' / ')
+      : (detail.artistName ?? '')
+    : (localUsable?.artistName ?? '');
+  const seasonPill = detail
+    ? detail.animeSeason && detail.animeSeasonYear
+      ? `${detail.animeTitle} · ${detail.animeSeason} ${detail.animeSeasonYear}`
+      : detail.animeTitle
+    : null;
+  /* The media chips: the theme's type + sequence, and (watch
+     only) the top resolution the current entry streams at. */
+  const maxResolution =
+    mode === 'watch' && entry && entry.videoSources.length > 0
+      ? Math.max(...entry.videoSources.map((v) => v.resolution))
+      : null;
+  const listenAvailable = detail
+    ? entryHasAudio(detail, entry)
+    : mode === 'listen';
 
   const onSeek = (locationX: number) => {
     if (barWidth <= 0) return;
     playback.seekToRatio(locationX / barWidth);
   };
 
+  const onDownloadPress = () => {
+    if (!dlId) return;
+    if (dlDownloading) {
+      void downloads.cancel(dlId);
+    } else if (dlDownloaded) {
+      void downloads.remove(dlId);
+    } else if (detail && entry) {
+      void downloads.start(detail, entry, mode);
+    }
+  };
+
+  const RepeatIcon = repeatMode === 'one' ? Repeat1 : Repeat;
+  const nextDisabled = !hasNext && repeatMode !== 'queue';
+
   return (
     <View style={styles.screen}>
       <View style={styles.column}>
-        <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
-          {closeTile}
-          <View style={styles.headerText}>
-            <Text style={styles.song} numberOfLines={1}>
-              {headerSong}
-            </Text>
-            <Text style={styles.meta} numberOfLines={1}>
-              {headerMeta}
-            </Text>
-          </View>
-          {offline && (
-            <View style={styles.modeChip}>
-              <Download
-                size={13}
-                color={theme.onAccentContainer}
-                strokeWidth={2}
-              />
-              <Text style={styles.modeChipText}>Offline</Text>
-            </View>
-          )}
-          <View style={styles.modeChip}>
-            {mode === 'listen' ? (
-              <Headphones size={13} color={theme.onAccentContainer} strokeWidth={2} />
-            ) : (
-              <Play size={13} color={theme.onAccentContainer} strokeWidth={2} />
-            )}
-            <Text style={styles.modeChipText}>
-              {mode === 'listen' ? 'Listen' : 'Watch'}
-            </Text>
-          </View>
-        </View>
-
         <View style={styles.mediaWrap}>
           {mode === 'watch' ? (
             <VideoView
@@ -298,9 +321,123 @@ export default function PlayerScreen() {
           )}
           {buffering && (
             <View style={styles.overlayCenter}>
-              <ActivityIndicator color={theme.accent} size="large" />
+              <ActivityIndicator color="#FFFFFF" size="large" />
             </View>
           )}
+          {/* Overlaid media chrome (the mock): dark-glass discs,
+              no header bar. */}
+          <View
+            style={[
+              styles.mediaTopRow,
+              { paddingTop: insets.top + spacing.sm },
+            ]}
+          >
+            {closeDisc}
+            {mode === 'watch' && (
+              <Pressable
+                onPress={() => {
+                  void videoRef.current?.enterFullscreen();
+                }}
+                hitSlop={3}
+                accessibilityRole="button"
+                accessibilityLabel="Fullscreen"
+                style={({ pressed }) => [
+                  styles.glassDisc,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Maximize size={19} color="#FFFFFF" strokeWidth={2} />
+              </Pressable>
+            )}
+          </View>
+          {detail && (
+            <View style={styles.mediaChips}>
+              <View style={styles.mediaChip}>
+                <Text style={styles.mediaChipText}>
+                  {detail.type} {detail.sequence}
+                </Text>
+              </View>
+              {maxResolution !== null && (
+                <View style={styles.mediaChip}>
+                  <View style={styles.resDot} />
+                  <Text style={styles.mediaChipText}>
+                    {maxResolution}p
+                  </Text>
+                </View>
+              )}
+            </View>
+          )}
+        </View>
+
+        {/* Centred title block (the mock): song, artist, and the
+            "ANIME · SEASON YEAR" pill. */}
+        <View style={styles.titleBlock}>
+          <Text style={styles.songTitle} numberOfLines={2}>
+            {titleSong}
+          </Text>
+          {titleArtist ? (
+            <Text style={styles.artistLine} numberOfLines={1}>
+              {titleArtist}
+            </Text>
+          ) : null}
+          {seasonPill ? (
+            <View style={styles.seasonPill}>
+              <Text style={styles.seasonPillText} numberOfLines={1}>
+                {seasonPill}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+
+        {/* Watch/Listen toggle — the session's mode switch (the
+            same segmented treatment as the detail page's). */}
+        <View style={styles.modeToggle}>
+          {(
+            [
+              { value: 'watch', label: 'Watch', Icon: Play },
+              { value: 'listen', label: 'Listen', Icon: Headphones },
+            ] as const
+          ).map(({ value, label, Icon }) => {
+            const active = mode === value;
+            const disabled = value === 'listen' && !listenAvailable;
+            return (
+              <Pressable
+                key={value}
+                onPress={() => updateSession({ mode: value })}
+                disabled={disabled}
+                accessibilityRole="button"
+                accessibilityLabel={label}
+                accessibilityState={{ selected: active, disabled }}
+                style={({ pressed }) => [
+                  styles.modeSegment,
+                  active && styles.modeSegmentActive,
+                  disabled && styles.segmentDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Icon
+                  size={15}
+                  color={
+                    disabled
+                      ? theme.muted
+                      : active
+                        ? theme.onAccent
+                        : theme.secondary
+                  }
+                  strokeWidth={2}
+                />
+                <Text
+                  style={[
+                    styles.modeSegmentText,
+                    active && styles.modeSegmentTextActive,
+                    disabled && { color: theme.muted },
+                  ]}
+                >
+                  {label}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
 
         <View style={styles.controls}>
@@ -355,24 +492,42 @@ export default function PlayerScreen() {
                   {formatTime(progress.duration)}
                 </Text>
               </View>
-              <View style={styles.buttonRow}>
-                <View style={[styles.buttonSide, styles.buttonSideStart]}>
-                  <Pressable
-                    onPress={prev}
-                    disabled={!hasPrev}
-                    hitSlop={6}
-                    accessibilityRole="button"
-                    accessibilityLabel="Previous track"
-                    accessibilityState={{ disabled: !hasPrev }}
-                    style={({ pressed }) => [
-                      styles.sideButton,
-                      !hasPrev && styles.navDisabled,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <SkipBack size={24} color={theme.text} strokeWidth={2} />
-                  </Pressable>
-                </View>
+              {/* Transport (the mock): repeat · prev · pause disc ·
+                  next · download. */}
+              <View style={styles.transport}>
+                <Pressable
+                  onPress={cycleRepeat}
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Repeat: ${repeatMode}`}
+                  style={({ pressed }) => [
+                    styles.transportButton,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <RepeatIcon
+                    size={21}
+                    color={
+                      repeatMode === 'off' ? theme.muted : theme.accent
+                    }
+                    strokeWidth={2}
+                  />
+                </Pressable>
+                <Pressable
+                  onPress={prev}
+                  disabled={!hasPrev}
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel="Previous track"
+                  accessibilityState={{ disabled: !hasPrev }}
+                  style={({ pressed }) => [
+                    styles.transportButton,
+                    !hasPrev && styles.navDisabled,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <SkipBack size={25} color={theme.text} strokeWidth={2} />
+                </Pressable>
                 <Pressable
                   onPress={playback.toggleMain}
                   accessibilityRole="button"
@@ -392,48 +547,78 @@ export default function PlayerScreen() {
                     <Play size={26} color={theme.onAccent} strokeWidth={2} />
                   )}
                 </Pressable>
-                <View style={[styles.buttonSide, styles.buttonSideEnd]}>
-                  <Pressable
-                    onPress={next}
-                    disabled={!hasNext}
-                    hitSlop={6}
-                    accessibilityRole="button"
-                    accessibilityLabel="Next track"
-                    accessibilityState={{ disabled: !hasNext }}
-                    style={({ pressed }) => [
-                      styles.sideButton,
-                      !hasNext && styles.navDisabled,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <SkipForward
-                      size={24}
-                      color={theme.text}
+                <Pressable
+                  onPress={next}
+                  disabled={nextDisabled}
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel="Next track"
+                  accessibilityState={{ disabled: nextDisabled }}
+                  style={({ pressed }) => [
+                    styles.transportButton,
+                    nextDisabled && styles.navDisabled,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <SkipForward
+                    size={25}
+                    color={theme.text}
+                    strokeWidth={2}
+                  />
+                </Pressable>
+                <Pressable
+                  onPress={onDownloadPress}
+                  disabled={!dlId || (!dlDownloading && !dlDownloaded && !detail)}
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    dlDownloading
+                      ? 'Cancel download'
+                      : dlDownloaded
+                        ? 'Downloaded — tap to remove'
+                        : 'Download for offline playback'
+                  }
+                  accessibilityState={{
+                    disabled:
+                      !dlId ||
+                      (!dlDownloading && !dlDownloaded && !detail),
+                  }}
+                  style={({ pressed }) => [
+                    styles.transportButton,
+                    !dlId && styles.navDisabled,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  {dlDownloading ? (
+                    dlProgress !== null ? (
+                      <Text style={styles.dlPercent}>
+                        {Math.floor(dlProgress * 100)}%
+                      </Text>
+                    ) : (
+                      <ActivityIndicator size="small" color={theme.accent} />
+                    )
+                  ) : dlDownloaded ? (
+                    <Check size={22} color={theme.success} strokeWidth={2} />
+                  ) : (
+                    <Download
+                      size={21}
+                      color={detail ? theme.text : theme.muted}
                       strokeWidth={2}
                     />
-                  </Pressable>
-                  {mode === 'watch' && (
-                    <Pressable
-                      onPress={() => {
-                        void videoRef.current?.enterFullscreen();
-                      }}
-                      hitSlop={6}
-                      accessibilityRole="button"
-                      accessibilityLabel="Fullscreen"
-                      style={styles.sideButton}
-                    >
-                      <Maximize size={20} color={theme.text} strokeWidth={2} />
-                    </Pressable>
                   )}
-                </View>
+                </Pressable>
               </View>
+              {dlError && !dlDownloading && (
+                <Text style={styles.dlErrorText}>{dlError}</Text>
+              )}
             </>
           )}
         </View>
 
-        {/* Up Next (the mock's card): the queue's next item, when
-            there is one. Tapping it — or its play disc — skips to
-            it, same as the Next control. */}
+        {/* Up Next (the mock's card): eyebrow + one line
+            "title — artist" + lavender play disc. No cover
+            thumbnail — the mock draws none. Tapping it — or its
+            play disc — skips to it, same as the Next control. */}
         {hasNext && nextQueueItem && (
           <Pressable
             onPress={next}
@@ -444,27 +629,14 @@ export default function PlayerScreen() {
               pressed && styles.pressed,
             ]}
           >
-            {nextQueueItem.coverUrl ? (
-              <Image
-                source={{ uri: nextQueueItem.coverUrl }}
-                style={styles.upNextCover}
-              />
-            ) : (
-              <View
-                style={[styles.upNextCover, styles.artworkPlaceholder]}
-              />
-            )}
             <View style={styles.upNextText}>
-              <Text style={styles.upNextEyebrow}>UP NEXT</Text>
-              <Text style={styles.upNextTitle} numberOfLines={1}>
-                {nextQueueItem.title}
-              </Text>
-              <Text style={styles.upNextArtist} numberOfLines={1}>
-                {nextQueueItem.artistLine}
+              <Text style={styles.upNextEyebrow}>Up next</Text>
+              <Text style={styles.upNextLine} numberOfLines={1}>
+                {nextQueueItem.title} — {nextQueueItem.artistLine}
               </Text>
             </View>
             <View style={styles.upNextDisc}>
-              <Play size={16} color={theme.onAccent} strokeWidth={2} />
+              <Play size={16} color={theme.accent} strokeWidth={2} />
             </View>
           </Pressable>
         )}
@@ -500,55 +672,9 @@ const createStyles = (theme: Theme) =>
       color: theme.muted,
       textAlign: 'center',
     },
-    header: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
-      paddingHorizontal: spacing.screenEdge,
-      paddingBottom: spacing.md,
-    },
-    closeHit: {
-      width: 44,
-      height: 44,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    closeTileInner: {
-      width: 38,
-      height: 38,
-      borderRadius: radii.base,
-      backgroundColor: theme.raised,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    headerText: {
-      flex: 1,
-    },
-    song: {
-      ...typeStyles.sectionLabel,
-      color: theme.text,
-    },
-    meta: {
-      ...typeStyles.bodySmall,
-      color: theme.muted,
-      marginTop: 2,
-    },
-    modeChip: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.xs,
-      backgroundColor: withOpacity(theme.accent, 0.16),
-      borderRadius: radii.pill,
-      paddingHorizontal: spacing.sm + 2,
-      paddingVertical: spacing.xs + 2,
-    },
-    modeChipText: {
-      ...typeStyles.caption,
-      color: theme.onAccentContainer,
-    },
     mediaWrap: {
       position: 'relative',
-      backgroundColor: theme.surface,
+      backgroundColor: '#000',
     },
     video: {
       width: '100%',
@@ -574,9 +700,121 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
     },
-    controls: {
+    mediaTopRow: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.screenEdge,
+    },
+    glassDisc: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: 'rgba(16, 7, 12, 0.45)',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    mediaChips: {
+      position: 'absolute',
+      left: spacing.screenEdge,
+      bottom: spacing.md,
+      flexDirection: 'row',
+      gap: spacing.sm,
+    },
+    mediaChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.xs + 2,
+      backgroundColor: 'rgba(16, 7, 12, 0.55)',
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: spacing.xs + 1,
+    },
+    mediaChipText: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      letterSpacing: 0.4,
+      color: '#FFFFFF',
+    },
+    resDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: '#FFFFFF',
+    },
+    titleBlock: {
+      alignItems: 'center',
       paddingHorizontal: spacing.screenEdge,
       paddingTop: spacing.xl,
+      gap: spacing.xs,
+    },
+    songTitle: {
+      fontFamily: fontFamilies.display,
+      fontSize: 20,
+      color: theme.text,
+      textAlign: 'center',
+    },
+    artistLine: {
+      ...typeStyles.body,
+      color: theme.secondary,
+      textAlign: 'center',
+    },
+    seasonPill: {
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.xs + 1,
+      marginTop: spacing.xs,
+      maxWidth: '100%',
+    },
+    seasonPillText: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+      color: theme.onAccentContainer,
+    },
+    modeToggle: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 3,
+      padding: 3,
+      borderRadius: radii.pill,
+      backgroundColor: theme.accentContainer,
+      marginHorizontal: spacing.screenEdge,
+      marginTop: spacing.lg,
+    },
+    modeSegment: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: spacing.xs + 2,
+      paddingVertical: spacing.sm,
+      borderRadius: radii.pill,
+    },
+    modeSegmentActive: {
+      backgroundColor: theme.accent,
+    },
+    segmentDisabled: {
+      opacity: 0.55,
+    },
+    modeSegmentText: {
+      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.secondary,
+    },
+    modeSegmentTextActive: {
+      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.onAccent,
+    },
+    controls: {
+      paddingHorizontal: spacing.screenEdge,
+      paddingTop: spacing.lg,
       gap: spacing.md,
     },
     seekHit: {
@@ -609,75 +847,21 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.mono,
       color: theme.muted,
     },
-    buttonRow: {
+    transport: {
       flexDirection: 'row',
       alignItems: 'center',
-      marginTop: spacing.sm,
+      justifyContent: 'center',
+      gap: spacing.md,
+      marginTop: spacing.xs,
     },
-    buttonSide: {
-      flex: 1,
-      alignItems: 'flex-end',
-    },
-    buttonSideStart: {
-      flexDirection: 'row',
+    transportButton: {
+      width: 44,
+      height: 44,
       alignItems: 'center',
-      justifyContent: 'flex-start',
-    },
-    buttonSideEnd: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'flex-end',
+      justifyContent: 'center',
     },
     navDisabled: {
       opacity: 0.3,
-    },
-    upNext: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
-      backgroundColor: theme.surface,
-      borderRadius: radii.card,
-      padding: spacing.md,
-      marginHorizontal: spacing.screenEdge,
-      marginTop: spacing.xl,
-    },
-    upNextCover: {
-      width: 44,
-      height: 44,
-      borderRadius: radii.base,
-      backgroundColor: theme.raised,
-    },
-    upNextText: {
-      flex: 1,
-    },
-    upNextEyebrow: {
-      ...typeStyles.caption,
-      color: theme.secondary,
-    },
-    upNextTitle: {
-      ...typeStyles.body,
-      fontFamily: fontFamilies.bodyStrong,
-      color: theme.text,
-      marginTop: 1,
-    },
-    upNextArtist: {
-      ...typeStyles.bodySmall,
-      color: theme.muted,
-      marginTop: 1,
-    },
-    upNextDisc: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      backgroundColor: theme.accent,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    sideButton: {
-      width: 44,
-      height: 44,
-      alignItems: 'center',
-      justifyContent: 'center',
     },
     mainButton: {
       width: 64,
@@ -686,6 +870,16 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.accent,
       alignItems: 'center',
       justifyContent: 'center',
+    },
+    dlPercent: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.accent,
+    },
+    dlErrorText: {
+      ...typeStyles.caption,
+      color: theme.accent,
+      textAlign: 'center',
     },
     retryButton: {
       flexDirection: 'row',
@@ -701,6 +895,40 @@ const createStyles = (theme: Theme) =>
     retryText: {
       ...typeStyles.sectionLabel,
       color: theme.onAccent,
+    },
+    upNext: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: theme.surface,
+      borderRadius: radii.card,
+      padding: spacing.md,
+      marginHorizontal: spacing.screenEdge,
+      marginTop: spacing.xl,
+    },
+    upNextText: {
+      flex: 1,
+      gap: 2,
+    },
+    upNextEyebrow: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+      color: theme.secondary,
+    },
+    upNextLine: {
+      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
+    },
+    upNextDisc: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: theme.accentContainer,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     pressed: {
       opacity: 0.85,

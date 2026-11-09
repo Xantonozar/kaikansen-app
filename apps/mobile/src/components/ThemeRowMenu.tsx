@@ -56,7 +56,8 @@ type SheetView = 'none' | 'actions' | 'download';
 
 /**
  * The ⋮ menu on song rows (Slice 5, design law #8 — "every song row
- * gets a ⋮ menu"). Rendered by ThemeRow as the last tile, so it
+ * gets a ⋮ menu"). Rendered by ThemeRow as the last, bare element
+ * of the row's right-side cluster, so it
  * appears in Library (all segments), Search, Playlist detail,
  * Favourites, profiles and the Season/Anime/Artist lists with no
  * per-screen wiring. PopularCard on Home is the one row variant
@@ -479,10 +480,10 @@ export function ThemeRowMenu({
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
     tile: {
+      // Bare ⋮ (design polish pass): the mocks draw the dots with
+      // no disc behind them; the 32px box is only the hit area.
       width: 32,
       height: 32,
-      borderRadius: radii.pill,
-      backgroundColor: theme.accentContainer,
       alignItems: 'center',
       justifyContent: 'center',
     },

@@ -18,6 +18,31 @@ import {
  * "N RP to <next tier>" line. At Kage the next-target line and
  * the bar's remainder simply complete: tier + RP only.
  */
+/**
+ * The rank card's loading state (design polish pass): the same
+ * card shell with muted placeholder shapes where the medal disc,
+ * tier/RP lines and progress bar will land. Callers render this
+ * while /rank/me is in flight instead of letting the card vanish
+ * (the fidelity audit's Quiz Hub / Profile delta).
+ */
+export function RankCardSkeleton() {
+  const theme = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+
+  return (
+    <View style={styles.card} accessibilityLabel="Loading your rank">
+      <View style={styles.headRow}>
+        <View style={[styles.disc, styles.skeletonDisc]} />
+        <View style={styles.nameBlock}>
+          <View style={[styles.skeletonBar, styles.skeletonTier]} />
+          <View style={[styles.skeletonBar, styles.skeletonRp]} />
+        </View>
+      </View>
+      <View style={styles.barTrack} />
+    </View>
+  );
+}
+
 export function RankCard({ profile }: { profile: UserRankProfile }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -112,6 +137,20 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.bodySmall,
       color: theme.muted,
       textAlign: 'right',
+    },
+    skeletonDisc: {
+      backgroundColor: theme.accentContainer,
+    },
+    skeletonBar: {
+      height: 12,
+      borderRadius: 6,
+      backgroundColor: theme.raised,
+    },
+    skeletonTier: {
+      width: '45%',
+    },
+    skeletonRp: {
+      width: '30%',
     },
     barTrack: {
       height: 8,

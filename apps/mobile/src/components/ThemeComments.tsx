@@ -8,7 +8,7 @@ import {
   View,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { MessageCircle, Send } from 'lucide-react-native';
+import { Send } from 'lucide-react-native';
 import type { ThemeComment } from '@kaikansen/contracts';
 import { fixtureMode } from '../api';
 import { useAuth } from '../auth';
@@ -98,7 +98,8 @@ export function ThemeComments({ slug }: { slug: string }) {
   return (
     <View style={styles.section}>
       <View style={styles.header}>
-        <MessageCircle size={17} color={theme.muted} strokeWidth={2} />
+        {/* The mock's heading is the bare word (design polish
+            pass) — no leading icon. */}
         <Text style={styles.heading}>Comments</Text>
         {comments !== null && comments.length > 0 && (
           <Text style={styles.count}>{comments.length}</Text>

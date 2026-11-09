@@ -4,7 +4,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ComponentType,
 } from 'react';
 import {
   ActivityIndicator,
@@ -18,10 +17,8 @@ import {
 } from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import {
-  Bookmark,
   ChevronRight,
-  Clock,
-  Download,
+  CircleCheck,
   Headphones,
   Library as LibraryIcon,
   Link2,
@@ -29,9 +26,12 @@ import {
   Lock,
   Play,
   Plus,
+  RefreshCw,
   Trash2,
 } from 'lucide-react-native';
 import type {
+  AnilistEntriesResponse,
+  AnilistEntry,
   FavoritesResponse,
   LibraryThemesResponse,
   PlaylistSummary,
@@ -46,6 +46,7 @@ import {
 } from '../../../src/favoritesStore';
 import {
   createPlaylist,
+  fetchAnilistEntries,
   fetchFavorites,
   fetchHistory,
   fetchLibraryThemes,
@@ -78,20 +79,18 @@ type Section = 'saved' | 'recent' | 'playlists' | 'anilist' | 'offline';
 
 type TypeFilter = 'ALL' | 'OP' | 'ED';
 
-type IconComponent = ComponentType<{
-  size?: number;
-  color?: string;
-  strokeWidth?: number;
-}>;
-
-const SECTIONS: { key: Section; label: string; Icon: IconComponent }[] = [
-  { key: 'saved', label: 'Saved', Icon: Bookmark },
-  { key: 'recent', label: 'Recent', Icon: Clock },
-  { key: 'playlists', label: 'Playlists', Icon: ListMusic },
-  // The design's segment order (handoff pack §4): Offline BEFORE
-  // AniList — Slice 6 fixes the swap the fidelity audit named.
-  { key: 'offline', label: 'Offline', Icon: Download },
-  { key: 'anilist', label: 'AniList', Icon: Link2 },
+/**
+ * The segment order follows the MOCK IMAGES — Saved · Playlists ·
+ * Recent · Offline · AniList (owner ruling 2026-11-09, superseding
+ * the handoff pack's text order that Slice 6 shipped). The pills
+ * are TEXT-ONLY on one row, as every Library mock draws them.
+ */
+const SECTIONS: { key: Section; label: string }[] = [
+  { key: 'saved', label: 'Saved' },
+  { key: 'playlists', label: 'Playlists' },
+  { key: 'recent', label: 'Recent' },
+  { key: 'offline', label: 'Offline' },
+  { key: 'anilist', label: 'AniList' },
 ];
 
 function relativeTime(iso: string): string {
@@ -120,15 +119,23 @@ function relativeTime(iso: string): string {
  * prompt as a body state. Tapping a download opens the player on the
  * local file.
  *
- * The AniList segment reads GET /library/themes — the union
- * of the caller's watch history and the themes of anime on their
- * AniList COMPLETED + CURRENT (watching) lists (the API widens
- * the web's completed-only read) — grouped by anime with an
- * All / OP / ED filter. Signed-in
- * but unlinked gets a prompt to link AniList in Settings; the link
- * state comes from the session profile's `anilist` field (with the
- * session-local link username as a fallback for a link made moments
- * ago), never guessed.
+ * The AniList segment leads with the designed ENTRY list
+ * (design polish pass): GET /library/anilist-entries serves the
+ * caller's AniList Watching / Completed entries themselves —
+ * poster, progress bar + "Episode X of Y" + percent for Watching;
+ * format pill, "✓ Completed" and "Score: n/10" for Completed —
+ * behind the "Synced from AniList · @user" line and the
+ * Watching/Completed toggle pills. When that read degrades
+ * (AniList unreachable, no cache), the segment silently falls
+ * back to the previous themes view: GET /library/themes — the
+ * union of the caller's watch history and the themes of anime on
+ * their AniList COMPLETED + CURRENT (watching) lists (the API
+ * widens the web's completed-only read) — grouped by anime with
+ * an All / OP / ED filter. Signed-in but unlinked gets a prompt
+ * to link AniList in Settings; the link state comes from the
+ * session profile's `anilist` field (with the session-local link
+ * username as a fallback for a link made moments ago), never
+ * guessed.
  *
  * Honest states throughout: signed-out gets a log-in prompt, fixture
  * mode gets clearly-labelled demo empties (a demo library stores
@@ -186,6 +193,25 @@ export default function LibraryScreen() {
   const [libError, setLibError] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('ALL');
 
+  /* AniList ENTRIES (the designed segment): null until the first
+     fetch lands. `available: false` (or a failed fetch) silently
+     degrades the segment to the themes union below. The toggle
+     pick is the user's explicit choice; until they make one, the
+     tab defaults to Watching — or Completed when they are
+     watching nothing (the mock's default is Watching). */
+  const [entries, setEntries] = useState<AnilistEntriesResponse | null>(
+    null,
+  );
+  const [entriesError, setEntriesError] = useState<string | null>(null);
+  const [tabPick, setTabPick] = useState<'watching' | 'completed' | null>(
+    null,
+  );
+  const anilistTab =
+    tabPick ??
+    (entries && entries.watching.length === 0 && entries.completed.length > 0
+      ? 'completed'
+      : 'watching');
+
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newPublic, setNewPublic] = useState(true);
@@ -240,10 +266,24 @@ export default function LibraryScreen() {
           e instanceof Error ? e.message : 'Could not load playlists.',
         ),
       );
-    /* The AniList union is only fetched when a link is known to
+    /* The AniList reads are only fetched when a link is known to
        exist — unlinked, the segment renders its link prompt and
-       there is nothing AniList-side to load. */
+       there is nothing AniList-side to load. Entries lead; the
+       themes union is fetched alongside as the degradation
+       fallback (and for its favorites sync). */
     if (anilistLinked) {
+      fetchAnilistEntries()
+        .then((res) => {
+          setEntries(res);
+          setEntriesError(null);
+        })
+        .catch((e: unknown) =>
+          setEntriesError(
+            e instanceof Error
+              ? e.message
+              : 'Could not load your AniList entries.',
+          ),
+        );
       fetchLibraryThemes()
         .then((res) => {
           setLibThemes(res);
@@ -802,6 +842,173 @@ export default function LibraryScreen() {
     );
   };
 
+  /* One AniList entry card (the mock): poster, title, and the
+     status block — Watching draws the sage progress bar with
+     "Episode X of Y" + percent; Completed draws the format pill,
+     "✓ Completed" and the caller's score. Cards are display-only:
+     no app screen is keyed by AniList media id, so there is
+     nowhere honest for a tap to go. */
+  const entryCard = (entry: AnilistEntry, status: 'watching' | 'completed') => {
+    const percent =
+      entry.episodes && entry.episodes > 0
+        ? Math.min(100, Math.round((entry.progress / entry.episodes) * 100))
+        : null;
+    const formatPill = [
+      entry.format,
+      entry.episodes ? `${entry.episodes} eps` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    return (
+      <View key={entry.mediaId} style={styles.entryCard}>
+        {entry.coverImage ? (
+          <Image source={{ uri: entry.coverImage }} style={styles.entryPoster} />
+        ) : (
+          <View style={[styles.entryPoster, styles.plCoverEmpty]} />
+        )}
+        <View style={styles.entryMain}>
+          <View style={styles.entryHeadRow}>
+            <Text style={styles.entryTitle} numberOfLines={1}>
+              {entry.title}
+            </Text>
+            {status === 'watching' ? (
+              <View style={styles.watchingPill}>
+                <Text style={styles.watchingPillText}>Watching</Text>
+              </View>
+            ) : formatPill ? (
+              <View style={styles.formatPill}>
+                <Text style={styles.formatPillText}>{formatPill}</Text>
+              </View>
+            ) : null}
+          </View>
+          {status === 'watching' ? (
+            <>
+              {percent !== null && (
+                <View style={styles.progressTrack}>
+                  <View
+                    style={[
+                      styles.progressFill,
+                      { width: `${percent}%` },
+                    ]}
+                  />
+                </View>
+              )}
+              <View style={styles.entryFootRow}>
+                <Text style={styles.entryMeta}>
+                  Episode {entry.progress}
+                  {entry.episodes ? ` of ${entry.episodes}` : ''}
+                </Text>
+                {percent !== null && (
+                  <Text style={styles.entryPercent}>{percent}%</Text>
+                )}
+              </View>
+            </>
+          ) : (
+            <View style={styles.entryFootRow}>
+              <View style={styles.completedMark}>
+                <CircleCheck size={16} color={theme.success} strokeWidth={2} />
+                <Text style={styles.completedText}>Completed</Text>
+              </View>
+              {entry.score !== null && (
+                <Text style={styles.entryMeta}>
+                  Score: {entry.score}/10
+                </Text>
+              )}
+            </View>
+          )}
+        </View>
+      </View>
+    );
+  };
+
+  /* The designed AniList segment: synced line, Watching/Completed
+     toggle pills with counts, then the active group's entry
+     cards. */
+  const renderAnilistEntries = (res: AnilistEntriesResponse) => {
+    const list = anilistTab === 'watching' ? res.watching : res.completed;
+    const tabPill = (
+      key: 'watching' | 'completed',
+      label: string,
+      count: number,
+    ) => {
+      const active = anilistTab === key;
+      return (
+        <Pressable
+          key={key}
+          onPress={() => setTabPick(key)}
+          accessibilityRole="button"
+          accessibilityState={{ selected: active }}
+          accessibilityLabel={`${label}, ${count} entries`}
+          style={[
+            styles.tabPill,
+            active &&
+              (key === 'watching'
+                ? styles.tabPillWatchingActive
+                : styles.tabPillCompletedActive),
+          ]}
+        >
+          <Text
+            style={[
+              styles.tabPillText,
+              active &&
+                (key === 'watching'
+                  ? styles.tabPillWatchingText
+                  : styles.tabPillCompletedText),
+            ]}
+          >
+            {label}
+          </Text>
+          <View
+            style={[
+              styles.tabCount,
+              active &&
+                (key === 'watching'
+                  ? styles.tabCountWatching
+                  : styles.tabCountCompleted),
+            ]}
+          >
+            <Text
+              style={[
+                styles.tabCountText,
+                active &&
+                  (key === 'watching'
+                    ? styles.tabPillWatchingText
+                    : styles.tabPillCompletedText),
+              ]}
+            >
+              {count}
+            </Text>
+          </View>
+        </Pressable>
+      );
+    };
+    return (
+      <>
+        <View style={styles.syncedRow}>
+          <RefreshCw size={14} color={theme.secondary} strokeWidth={2} />
+          <Text style={styles.syncedText}>
+            Synced from AniList ·{' '}
+            <Text style={styles.syncedName}>
+              @{res.anilistUser ?? anilistName ?? 'AniList'}
+            </Text>
+          </Text>
+        </View>
+        <View style={styles.tabRow}>
+          {tabPill('watching', 'Watching', res.watching.length)}
+          {tabPill('completed', 'Completed', res.completed.length)}
+        </View>
+        {list.map((entry) => entryCard(entry, anilistTab))}
+        {list.length === 0 && (
+          <Text style={styles.emptyText}>
+            {anilistTab === 'watching'
+              ? 'You are not watching anything on AniList right now.'
+              : 'No completed anime on AniList yet.'}
+          </Text>
+        )}
+      </>
+    );
+  };
+
   const renderAnilist = () => {
     if (!fixtureMode && !signedIn) return renderLoginPrompt();
     if (fixtureMode) {
@@ -836,6 +1043,19 @@ export default function LibraryScreen() {
           >
             <Text style={styles.primaryButtonText}>Open Settings</Text>
           </Pressable>
+        </View>
+      );
+    }
+    /* Entries lead when AniList served them; while that read is
+       still in flight the segment waits (the themes fallback
+       would flash the wrong UI). Settled-unavailable — or a
+       failed entries fetch — degrades silently to the themes
+       union below. */
+    if (entries?.available) return renderAnilistEntries(entries);
+    if (!entries && !entriesError && !libError) {
+      return (
+        <View style={styles.sectionState}>
+          <ActivityIndicator color={theme.accent} />
         </View>
       );
     }
@@ -1109,7 +1329,7 @@ export default function LibraryScreen() {
         </View>
 
         <View style={styles.segmentedBar}>
-          {SECTIONS.map(({ key, label, Icon }) => {
+          {SECTIONS.map(({ key, label }) => {
             const active = section === key;
             return (
               <Pressable
@@ -1123,16 +1343,12 @@ export default function LibraryScreen() {
                   active && { backgroundColor: theme.accent },
                 ]}
               >
-                <Icon
-                  size={15}
-                  color={active ? theme.onAccent : theme.onAccentContainer}
-                  strokeWidth={2}
-                />
                 <Text
                   style={[
                     styles.barSegmentText,
                     active && { color: theme.onAccent },
                   ]}
+                  numberOfLines={1}
                 >
                   {label}
                 </Text>
@@ -1249,20 +1465,19 @@ const createStyles = (theme: Theme) =>
     justifyContent: 'center',
   },
   segmentedBar: {
-    // Lavender Dusk mock: the Library segments are separate chips in a
-    // row — lavender inactive, mauveDeep filled active — not one bar.
+    // Lavender Dusk mock: the Library segments are separate
+    // TEXT-ONLY pills on ONE row — lavender inactive, mauveDeep
+    // filled active — not one bar, no icons, never wrapping.
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: spacing.sm,
     marginHorizontal: spacing.screenEdge,
   },
   barSegment: {
-    flexDirection: 'row',
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: spacing.xs + 2,
     minHeight: 36,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: spacing.xs,
     borderRadius: radii.pill,
     backgroundColor: theme.accentContainer,
   },
@@ -1270,6 +1485,159 @@ const createStyles = (theme: Theme) =>
     ...typeStyles.bodySmall,
     fontFamily: fontFamilies.bodyStrong,
     color: theme.onAccentContainer,
+  },
+  syncedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs + 2,
+    paddingBottom: spacing.md,
+  },
+  syncedText: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+  },
+  syncedName: {
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
+  },
+  tabRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingBottom: spacing.md,
+  },
+  tabPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs + 2,
+    minHeight: 36,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.pill,
+    backgroundColor: theme.accentContainer,
+  },
+  tabPillWatchingActive: {
+    backgroundColor: theme.successContainer,
+  },
+  tabPillCompletedActive: {
+    backgroundColor: theme.accentContainer,
+  },
+  tabPillText: {
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.muted,
+  },
+  tabPillWatchingText: {
+    color: theme.success,
+  },
+  tabPillCompletedText: {
+    color: theme.onAccentContainer,
+  },
+  tabCount: {
+    minWidth: 22,
+    alignItems: 'center',
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.xs + 2,
+    paddingVertical: 1,
+  },
+  tabCountWatching: {
+    backgroundColor: theme.surface,
+  },
+  tabCountCompleted: {
+    backgroundColor: theme.surface,
+  },
+  tabCountText: {
+    ...typeStyles.caption,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.muted,
+  },
+  entryCard: {
+    flexDirection: 'row',
+    gap: spacing.md,
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    borderRadius: radii.card,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  entryPoster: {
+    width: 56,
+    height: 74,
+    borderRadius: radii.base,
+    backgroundColor: theme.surface,
+  },
+  entryMain: {
+    flex: 1,
+    gap: spacing.sm,
+    justifyContent: 'center',
+  },
+  entryHeadRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  entryTitle: {
+    flex: 1,
+    ...typeStyles.body,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
+  },
+  watchingPill: {
+    backgroundColor: theme.successContainer,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
+  watchingPillText: {
+    ...typeStyles.caption,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.success,
+  },
+  formatPill: {
+    backgroundColor: theme.accentContainer,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
+  formatPillText: {
+    ...typeStyles.caption,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.onAccentContainer,
+  },
+  progressTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: theme.accentContainer,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 3,
+    backgroundColor: theme.success,
+  },
+  entryFootRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  entryMeta: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+  },
+  entryPercent: {
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.success,
+  },
+  completedMark: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs + 2,
+  },
+  completedText: {
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.success,
   },
   fixtureNote: {
     ...typeStyles.caption,

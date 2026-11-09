@@ -18,13 +18,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   Check,
-  ChevronLeft,
   ChevronRight,
   Flame,
   Hourglass,
   RotateCcw,
   SkipForward,
-  Star,
   Trophy,
   X,
 } from 'lucide-react-native';
@@ -47,7 +45,6 @@ import {
   radii,
   spacing,
   typeStyles,
-  withOpacity,
   type Theme,
 } from '../../../src/theme';
 import { useTheme } from '../../../src/theme-context';
@@ -277,6 +274,8 @@ export default function SoloQuizScreen() {
     else router.replace('/(tabs)/quiz');
   };
 
+  /* Header (the mock): a bare ✕, the centred "Question N of M",
+     and the streak pill at the top-right once a streak is live. */
   const header = (
     <View style={styles.header}>
       <Pressable
@@ -286,9 +285,7 @@ export default function SoloQuizScreen() {
         accessibilityLabel="Leave game"
         style={styles.backHit}
       >
-        <View style={styles.backTile}>
-          <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-        </View>
+        <X size={22} color={theme.text} strokeWidth={2} />
       </Pressable>
       <View style={styles.headerMain}>
         <Text style={styles.headerTitle}>
@@ -296,8 +293,28 @@ export default function SoloQuizScreen() {
             ? `Question ${question.index} of ${totalQuestions}`
             : 'Solo quiz'}
         </Text>
-        <Text style={styles.headerSub}>{GUESS_LABEL[quizType]}</Text>
       </View>
+      <View style={styles.headerSide}>
+        {streak >= 2 && (
+          <View style={styles.streakPill}>
+            <Flame size={13} color={theme.secondary} strokeWidth={2} />
+            <Text style={styles.streakPillText}>Streak x{streak}</Text>
+          </View>
+        )}
+      </View>
+    </View>
+  );
+
+  /* Score block (the mock): the centred "Score" label + big
+     total, with the countdown ring centred beneath it — the
+     chips row and progress bar the audit flagged are gone
+     ("Question N of M" in the header carries progress). */
+  const scoreBlock = (
+    <View style={styles.scoreBlock}>
+      <Text style={styles.scoreBlockLabel}>Score</Text>
+      <Text style={styles.scoreBlockValue}>
+        {totalScore.toLocaleString('en-US')}
+      </Text>
       {(phase === 'question' || phase === 'feedback') && question && (
         <CountdownRing
           deadlineMs={deadlineMs}
@@ -305,47 +322,6 @@ export default function SoloQuizScreen() {
           onExpire={phase === 'question' ? onExpire : undefined}
         />
       )}
-    </View>
-  );
-
-  const scoreRow = (
-    <View style={styles.scoreRow}>
-      <View style={styles.scoreChip}>
-        <Star size={13} color={theme.onAccentContainer} strokeWidth={2} />
-        <Text style={styles.scoreChipText}>{totalScore} pts</Text>
-      </View>
-      <View
-        style={[
-          styles.scoreChip,
-          streak >= 2 && styles.scoreChipHot,
-        ]}
-      >
-        <Flame
-          size={13}
-          color={streak >= 2 ? theme.secondary : theme.onAccentContainer}
-          strokeWidth={2}
-        />
-        <Text style={styles.scoreChipText}>{streak} streak</Text>
-      </View>
-      <View style={styles.progressTrack}>
-        <View
-          style={[
-            styles.progressFill,
-            {
-              width: `${
-                question
-                  ? Math.min(
-                      100,
-                      ((question.index - (phase === 'question' ? 1 : 0)) /
-                        totalQuestions) *
-                        100,
-                    )
-                  : 0
-              }%`,
-            },
-          ]}
-        />
-      </View>
     </View>
   );
 
@@ -592,7 +568,7 @@ export default function SoloQuizScreen() {
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.column}>
         {header}
-        {(phase === 'question' || phase === 'feedback') && scoreRow}
+        {(phase === 'question' || phase === 'feedback') && scoreBlock}
         {body}
       </View>
     </SafeAreaView>
@@ -625,34 +601,19 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
     },
-    backTile: {
-      width: 38,
-      height: 38,
-      borderRadius: radii.base,
-      backgroundColor: theme.raised,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
     headerMain: {
       flex: 1,
+      alignItems: 'center',
     },
     headerTitle: {
       ...typeStyles.sectionLabel,
       color: theme.text,
     },
-    headerSub: {
-      ...typeStyles.caption,
-      color: theme.muted,
-      marginTop: 1,
+    headerSide: {
+      minWidth: 44,
+      alignItems: 'flex-end',
     },
-    scoreRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
-      paddingHorizontal: spacing.screenEdge,
-      paddingBottom: spacing.md,
-    },
-    scoreChip: {
+    streakPill: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.xs,
@@ -661,24 +622,28 @@ const createStyles = (theme: Theme) =>
       paddingHorizontal: spacing.sm + 2,
       paddingVertical: spacing.xs + 2,
     },
-    scoreChipHot: {
-      backgroundColor: withOpacity(theme.secondary, 0.18),
-    },
-    scoreChipText: {
+    streakPillText: {
       ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
       color: theme.onAccentContainer,
     },
-    progressTrack: {
-      flex: 1,
-      height: 4,
-      borderRadius: 2,
-      backgroundColor: theme.raised,
-      overflow: 'hidden',
+    scoreBlock: {
+      alignItems: 'center',
+      gap: spacing.sm,
+      paddingHorizontal: spacing.screenEdge,
+      paddingBottom: spacing.md,
     },
-    progressFill: {
-      height: 4,
-      borderRadius: 2,
-      backgroundColor: theme.accent,
+    scoreBlockLabel: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      letterSpacing: 0.8,
+      textTransform: 'uppercase',
+      color: theme.muted,
+    },
+    scoreBlockValue: {
+      fontFamily: fontFamilies.display,
+      fontSize: 30,
+      color: theme.text,
     },
     gameContent: {
       paddingHorizontal: spacing.screenEdge,

@@ -35,9 +35,12 @@ import { HydratedDocument } from 'mongoose';
  * PLAINTEXT, exactly as the web stores it — mirrored deliberately;
  * hardening that storage is OPEN item O-05 (specs/DECISIONS.md).
  *
- * TWO additive fields are NOT the web's: `passwordReset` and
+ * THREE additive fields are NOT the web's: `passwordReset` and
  * `tokenVersion` exist only for this API's password-reset flow
- * (the web has no reset capability at all). They follow the same
+ * (the web has no reset capability at all), and
+ * `anilistEntriesCache` only for this API's AniList-entries read
+ * (GET /library/anilist-entries — the web stores only the merged
+ * media ids, never per-entry rows). They follow the same
  * additive pattern as the AniList sub-document: the web's models
  * neither read nor write them, and its delta saves leave them
  * untouched.
@@ -94,6 +97,63 @@ export class PasswordReset {
 
 export const PasswordResetSchema = SchemaFactory.createForClass(PasswordReset);
 
+/**
+ * One cached AniList list entry for GET /library/anilist-entries
+ * — the wire entry plus its list status, stored verbatim from the
+ * AniList GraphQL read (see AnilistLibraryClient.fetchLibraryEntries)
+ * so a stale cache can be served while a refresh runs behind the
+ * response, exactly like the stored completedMediaIds dance.
+ */
+@Schema({ _id: false })
+export class AnilistCachedEntry {
+  @Prop({ type: Number, required: true })
+  mediaId: number;
+
+  /** AniList list status: 'CURRENT' (watching) or 'COMPLETED'. */
+  @Prop({ type: String, required: true })
+  status: string;
+
+  @Prop({ type: String, required: true })
+  title: string;
+
+  @Prop({ type: String, default: null })
+  coverImage: string | null;
+
+  @Prop({ type: String, default: null })
+  format: string | null;
+
+  @Prop({ type: Number, default: null })
+  episodes: number | null;
+
+  @Prop({ type: Number, default: 0 })
+  progress: number;
+
+  @Prop({ type: Number, default: null })
+  score: number | null;
+}
+
+export const AnilistCachedEntrySchema =
+  SchemaFactory.createForClass(AnilistCachedEntry);
+
+/**
+ * The `anilistEntriesCache` sub-document — the caller's last
+ * fetched AniList Watching/Completed entries with their fetch
+ * time. The 6-hour TTL and stale-while-revalidate behaviour live
+ * in LibraryService.getAnilistEntries, mirroring the stored-ids
+ * cache the web's library read established.
+ */
+@Schema({ _id: false })
+export class AnilistEntriesCache {
+  @Prop({ type: Date })
+  syncedAt?: Date;
+
+  @Prop({ type: [AnilistCachedEntrySchema], default: undefined })
+  entries?: AnilistCachedEntry[];
+}
+
+export const AnilistEntriesCacheSchema =
+  SchemaFactory.createForClass(AnilistEntriesCache);
+
 @Schema({ collection: 'users', timestamps: true, autoIndex: false })
 export class User {
   @Prop({ type: String, required: true })
@@ -137,6 +197,15 @@ export class User {
 
   @Prop({ type: AnilistLinkSchema, default: undefined })
   anilist?: AnilistLink;
+
+  /**
+   * Cached AniList Watching/Completed entries for
+   * GET /library/anilist-entries (see AnilistEntriesCache above).
+   * Additive and API-only: the web's models neither read nor
+   * write it.
+   */
+  @Prop({ type: AnilistEntriesCacheSchema, default: undefined })
+  anilistEntriesCache?: AnilistEntriesCache;
 
   /**
    * Pending password-reset state (see PasswordReset above).

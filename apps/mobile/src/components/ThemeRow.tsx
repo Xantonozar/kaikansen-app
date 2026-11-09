@@ -7,7 +7,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { Bookmark, Play, X } from 'lucide-react-native';
+import { Heart, Play, X } from 'lucide-react-native';
 import type { ThemeSummary } from '@kaikansen/contracts';
 import { fontFamilies, radii, spacing, typeStyles, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
@@ -15,30 +15,38 @@ import { ThemeRowMenu } from './ThemeRowMenu';
 
 /**
  * Theme row — the shared list unit for Popular Themes, search results
- * and the Library. Compact/icon-led treatment (approved mockup v1): a
- * dense two-line row (song title, anime · artist), the OP/ED badge
- * (ED in tertiary), and a cluster of small icon tiles on the right.
- * The aggregate rating lives on the detail screen's fact card, not in
- * rows (mockup v1).
+ * and the Library. Row anatomy per the design polish pass (the
+ * fidelity audit's consolidated search-results anatomy, applied to
+ * every row per design law #8): cover, wrapping song title, a meta
+ * line carrying the ARTIST only with the OP/ED chip INLINE after it
+ * (lavender pill, ED in tertiary), and one right-side cluster —
+ * [duration?] [× remove?] [heart save] [play disc] [bare ⋮]. The
+ * aggregate rating lives on the detail screen's fact card, not in
+ * rows.
+ *
+ * Consolidation note: the playlist mock's rows (duration + filled
+ * heart + ⋮, no chip/play disc) and the Library mock's (play disc +
+ * heart, no ⋮/chip) differ in detail; the search anatomy wins
+ * because law #8 gives every song row a ⋮ and dropping the play
+ * disc or chip per-screen would fork this shared unit.
  *
  * Actions are opt-in per screen, so a screen only ever draws controls
  * it has wired (Slice M2):
- * - the play tile targets onPlay when given (Library rows open the
+ * - the play disc targets onPlay when given (Library rows open the
  *   player) and falls back to the row's own onPress (the pre-M2
  *   behaviour on Home/Search — opening the theme);
- * - the bookmark tile renders only with onToggleSave, filled accent
- *   when the theme is saved, and spins while that slug's toggle is in
+ * - the heart renders only with onToggleSave, filled accent when
+ *   the theme is saved, and spins while that slug's toggle is in
  *   flight (state comes from the shared favorites store);
- * - the remove (×) tile renders only with onRemove (playlist owner).
+ * - the remove (×) renders only with onRemove (playlist owner).
  * An optional `detail` caption sits under the meta line (watch
  * history's mode · relative time). An optional `durationText`
- * ("1:30") leads the right-side tile row — the playlist design's
- * row anatomy (duration + save + play); screens pass it only when
- * the item's duration is known.
- * - the ⋮ menu tile (design law #8, Slice 5) closes the tile row —
- *   duration + … + ⋮ per the design's row anatomy — and opens the
- *   shared ThemeRowMenu (Play / View theme / Save / Add to playlist /
- *   Download, all wired). It renders unless `menu={false}`.
+ * ("1:30") leads the cluster; screens pass it only when the item's
+ * duration is known.
+ * - the bare ⋮ (design law #8, Slice 5) closes the cluster and
+ *   opens the shared ThemeRowMenu (Play / View theme / Save / Add
+ *   to playlist / Download, all wired). It renders unless
+ *   `menu={false}`.
  */
 export function ThemeRow({
   item,
@@ -62,7 +70,7 @@ export function ThemeRow({
   onRemove?: () => void;
   detail?: string;
   /**
-   * Replacement for the default "anime · artist" meta line — the
+   * Replacement for the default artist-only meta line — the
    * Artist detail design shows the ANIME title alone on its rows.
    */
   metaText?: string;
@@ -90,91 +98,86 @@ export function ThemeRow({
         <Text style={styles.song} numberOfLines={2}>
           {item.songTitle}
         </Text>
-        <Text style={styles.meta} numberOfLines={1}>
-          {metaText ?? (
-            <>
-              {item.animeTitle}
-              {artist ? ` · ${artist}` : ''}
-            </>
-          )}
-        </Text>
+        <View style={styles.metaRow}>
+          <Text style={styles.meta} numberOfLines={1}>
+            {metaText ?? artist}
+          </Text>
+          <View style={styles.typeChip}>
+            <Text
+              style={[
+                styles.type,
+                { color: item.type === 'ED' ? theme.tertiary : theme.accent },
+              ]}
+            >
+              {item.type} {item.sequence}
+            </Text>
+          </View>
+        </View>
         {detail ? (
           <Text style={styles.detail} numberOfLines={1}>
             {detail}
           </Text>
         ) : null}
       </View>
-      <View style={styles.side}>
-        <View style={styles.typeChip}>
-          <Text
-            style={[
-              styles.type,
-              { color: item.type === 'ED' ? theme.tertiary : theme.accent },
-            ]}
-          >
-            {item.type} {item.sequence}
-          </Text>
-        </View>
-        <View style={styles.tiles}>
-          {durationText ? (
-            <Text style={styles.duration}>{durationText}</Text>
-          ) : null}
-          {onRemove && (
-            <Pressable
-              onPress={onRemove}
-              hitSlop={7}
-              accessibilityRole="button"
-              accessibilityLabel={`Remove ${item.songTitle} from playlist`}
-              style={({ pressed }) => [
-                styles.action,
-                pressed && styles.pressed,
-              ]}
-            >
-              <X size={14} color={theme.muted} strokeWidth={2} />
-            </Pressable>
-          )}
-          {onToggleSave && (
-            <Pressable
-              onPress={onToggleSave}
-              hitSlop={7}
-              accessibilityRole="button"
-              accessibilityLabel={
-                saved ? `Unsave ${item.songTitle}` : `Save ${item.songTitle}`
-              }
-              accessibilityState={{ selected: !!saved }}
-              style={({ pressed }) => [
-                styles.action,
-                pressed && styles.pressed,
-              ]}
-            >
-              {savePending ? (
-                <ActivityIndicator size="small" color={theme.muted} />
-              ) : (
-                <Bookmark
-                  size={15}
-                  color={saved ? theme.accent : theme.muted}
-                  fill={saved ? theme.accent : 'transparent'}
-                  strokeWidth={2}
-                />
-              )}
-            </Pressable>
-          )}
+      <View style={styles.tiles}>
+        {durationText ? (
+          <Text style={styles.duration}>{durationText}</Text>
+        ) : null}
+        {onRemove && (
           <Pressable
-            onPress={onPlay ?? onPress}
+            onPress={onRemove}
             hitSlop={7}
             accessibilityRole="button"
-            accessibilityLabel={`Play ${item.songTitle}`}
+            accessibilityLabel={`Remove ${item.songTitle} from playlist`}
             style={({ pressed }) => [
-              styles.action,
+              styles.bareAction,
               pressed && styles.pressed,
             ]}
           >
-            <Play size={15} color={theme.accent} fill={theme.accent} strokeWidth={2} />
+            <X size={15} color={theme.muted} strokeWidth={2} />
           </Pressable>
-          {menu && (
-            <ThemeRowMenu item={item} onPlay={onPlay} onOpen={onPress} />
-          )}
-        </View>
+        )}
+        {onToggleSave && (
+          <Pressable
+            onPress={onToggleSave}
+            hitSlop={7}
+            accessibilityRole="button"
+            accessibilityLabel={
+              saved ? `Unsave ${item.songTitle}` : `Save ${item.songTitle}`
+            }
+            accessibilityState={{ selected: !!saved }}
+            style={({ pressed }) => [
+              styles.bareAction,
+              pressed && styles.pressed,
+            ]}
+          >
+            {savePending ? (
+              <ActivityIndicator size="small" color={theme.muted} />
+            ) : (
+              <Heart
+                size={17}
+                color={saved ? theme.accent : theme.muted}
+                fill={saved ? theme.accent : 'transparent'}
+                strokeWidth={2}
+              />
+            )}
+          </Pressable>
+        )}
+        <Pressable
+          onPress={onPlay ?? onPress}
+          hitSlop={7}
+          accessibilityRole="button"
+          accessibilityLabel={`Play ${item.songTitle}`}
+          style={({ pressed }) => [
+            styles.playDisc,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Play size={15} color={theme.accent} fill={theme.accent} strokeWidth={2} />
+        </Pressable>
+        {menu && (
+          <ThemeRowMenu item={item} onPlay={onPlay} onOpen={onPress} />
+        )}
       </View>
     </Pressable>
   );
@@ -217,17 +220,19 @@ const createStyles = (theme: Theme) =>
     fontFamily: fontFamilies.bodyStrong,
     color: theme.text,
   },
+  metaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
   meta: {
     ...typeStyles.caption,
     color: theme.muted,
+    flexShrink: 1,
   },
   detail: {
     ...typeStyles.caption,
     color: theme.muted,
-  },
-  side: {
-    alignItems: 'flex-end',
-    gap: 4,
   },
   tiles: {
     flexDirection: 'row',
@@ -250,9 +255,15 @@ const createStyles = (theme: Theme) =>
     fontFamily: fontFamilies.bodyStrong,
     letterSpacing: 0.3,
   },
-  action: {
+  bareAction: {
     width: 32,
     height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playDisc: {
+    width: 36,
+    height: 36,
     borderRadius: radii.pill,
     backgroundColor: theme.accentContainer,
     alignItems: 'center',

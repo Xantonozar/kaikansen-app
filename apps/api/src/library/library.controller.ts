@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import type {
+  AnilistEntriesResponse,
   FavoriteRequest,
   FavoriteState,
   FavoritesResponse,
@@ -145,6 +146,17 @@ export class LibraryController {
       Number.isNaN(parsedLimit) ? 50 : parsedLimit,
       type,
     );
+  }
+
+  @Get('library/anilist-entries')
+  @ApiOkResponse({
+    description:
+      'The caller’s AniList Watching + Completed entries (progress, score, format, episodes) read from AniList with their stored token, grouped by status — the Library AniList segment’s entry list. Unlinked or unavailable degrades silently (linked/available flags), never an error.',
+  })
+  anilistEntries(
+    @Req() req: { user: TokenPayload },
+  ): Promise<AnilistEntriesResponse> {
+    return this.library.getAnilistEntries(req.user.userId);
   }
 
   @Get('themes/:slug/rating')

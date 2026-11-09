@@ -15,7 +15,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   AtSign,
-  ChevronLeft,
   Eye,
   EyeOff,
   Lock,
@@ -53,10 +52,13 @@ const GLYPH = require('../../assets/splash-icon.png');
  * and routes to /forgot-password. A `?notice=` param (set by the
  * reset flow on success) renders as a confirmation line here.
  *
- * Compact/icon-led chrome (approved mockup v1): a tile back button,
- * a leading glyph inside each field, pill-shaped actions, and the
- * form column capped and centred on wide viewports. The fields,
- * validation and submit flow are unchanged.
+ * Compact/icon-led chrome (approved mockup v1): a leading glyph
+ * inside each field, pill-shaped actions, and the form column
+ * capped and centred on wide viewports. The fields, validation
+ * and submit flow are unchanged. (Design polish pass: no back
+ * chevron, white-filled fields, Register order Display name →
+ * Username → Email → Password, AniList button carries the logo
+ * mark.)
  *
  * The AniList button runs the real OAuth round-trip in live mode on
  * native (src/anilistAuth.ts + the provider's loginWithAnilist). In
@@ -172,17 +174,10 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
           contentContainerStyle={styles.content}
           keyboardShouldPersistTaps="handled"
         >
-          <Pressable
-            onPress={goBack}
-            hitSlop={3}
-            accessibilityRole="button"
-            accessibilityLabel="Back"
-            style={styles.backHit}
-          >
-            <View style={styles.backTile}>
-              <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-            </View>
-          </Pressable>
+          {/* No back chevron (design polish pass): the Login /
+              Register mocks open straight on the brand header —
+              the screens are reached from, and return to, the
+              tabs via the footer cross-link and post-submit. */}
 
           {/* Brand header (Login/Register mocks, Slice 6): the
               real glyph, the tracked KAIKANSEN wordmark and the
@@ -208,6 +203,27 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
 
           {!isLogin && (
             <>
+              {/* Register field order per the mock (design polish
+                  pass): Display name → Username → Email → Password.
+                  The "(optional)" suffix is dropped from the label
+                  — display name stays optional in the payload
+                  (empty submits as undefined, as before). */}
+              {field(
+                'displayName',
+                'Display name',
+                User,
+                <TextInput
+                  style={styles.input}
+                  value={displayName}
+                  onChangeText={setDisplayName}
+                  onFocus={() => setFocused('displayName')}
+                  onBlur={() => setFocused(null)}
+                  placeholder="Zadid"
+                  placeholderTextColor={theme.muted}
+                  autoCorrect={false}
+                  returnKeyType="next"
+                />,
+              )}
               {field(
                 'username',
                 'Username',
@@ -221,22 +237,6 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
                   placeholder="zadid"
                   placeholderTextColor={theme.muted}
                   autoCapitalize="none"
-                  autoCorrect={false}
-                  returnKeyType="next"
-                />,
-              )}
-              {field(
-                'displayName',
-                'Display name (optional)',
-                User,
-                <TextInput
-                  style={styles.input}
-                  value={displayName}
-                  onChangeText={setDisplayName}
-                  onFocus={() => setFocused('displayName')}
-                  onBlur={() => setFocused(null)}
-                  placeholder="Zadid"
-                  placeholderTextColor={theme.muted}
                   autoCorrect={false}
                   returnKeyType="next"
                 />,
@@ -344,7 +344,16 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
             {anilistBusy ? (
               <ActivityIndicator color={theme.text} />
             ) : (
-              <Text style={styles.ghostLabel}>Continue with AniList</Text>
+              <>
+                {/* The mock's AniList logo mark. No AniList asset
+                    ships in the repo, so the mark is drawn: the
+                    brand's blue tile with its initial (a brand
+                    constant, like the media blacks in playback). */}
+                <View style={styles.anilistMark}>
+                  <Text style={styles.anilistMarkText}>A</Text>
+                </View>
+                <Text style={styles.ghostLabel}>Continue with AniList</Text>
+              </>
             )}
           </Pressable>
           {anilistTapped && (
@@ -399,23 +408,8 @@ const createStyles = (theme: Theme) =>
       maxWidth: FORM_MAX_WIDTH,
       alignSelf: 'center',
       paddingHorizontal: spacing.screenEdge,
-      paddingTop: spacing.sm,
+      paddingTop: spacing.xl,
       paddingBottom: spacing.xxxl,
-    },
-    backHit: {
-      width: 44,
-      height: 44,
-      alignItems: 'center',
-      justifyContent: 'center',
-      marginBottom: spacing.md,
-    },
-    backTile: {
-      width: 38,
-      height: 38,
-      borderRadius: radii.base,
-      backgroundColor: theme.raised,
-      alignItems: 'center',
-      justifyContent: 'center',
     },
     brand: {
       alignItems: 'center',
@@ -497,14 +491,17 @@ const createStyles = (theme: Theme) =>
       marginTop: spacing.md,
     },
     fieldBox: {
-      // Login/Register mocks: fields are pale lavender fills.
+      // Login/Register mocks (design polish pass): fields are
+      // WHITE-filled with a hairline border — the earlier
+      // lavender fill was the audit's delta. Focus still draws
+      // the accent border.
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
-      backgroundColor: theme.accentContainer,
+      backgroundColor: theme.surface,
       borderRadius: radii.md,
       borderWidth: 1,
-      borderColor: 'transparent',
+      borderColor: theme.border,
       paddingHorizontal: spacing.md,
       minHeight: 50,
     },
@@ -539,6 +536,8 @@ const createStyles = (theme: Theme) =>
       color: theme.onAccent,
     },
     ghost: {
+      flexDirection: 'row',
+      gap: spacing.sm,
       borderWidth: 1,
       borderColor: theme.border,
       borderRadius: radii.pill,
@@ -546,6 +545,19 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
       marginTop: spacing.lg,
+    },
+    anilistMark: {
+      width: 20,
+      height: 20,
+      borderRadius: 5,
+      backgroundColor: '#02A9FF',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    anilistMarkText: {
+      fontFamily: 'Inter_700Bold',
+      fontSize: 12,
+      color: '#FFFFFF',
     },
     ghostLabel: {
       ...typeStyles.body,

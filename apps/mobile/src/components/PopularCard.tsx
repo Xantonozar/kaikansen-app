@@ -68,7 +68,10 @@ export function PopularCard({
         <View style={[styles.thumb, styles.placeholder]} />
       )}
       <View style={styles.main}>
-        <Text style={styles.song} numberOfLines={1}>
+        {/* Song titles wrap (polish-pass law #9): the audit
+            flagged truncation here; the artist line below still
+            truncates, as the mocks draw it. */}
+        <Text style={styles.song} numberOfLines={2}>
           {item.songTitle}
         </Text>
         {subtitle ? (

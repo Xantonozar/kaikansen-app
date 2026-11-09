@@ -90,7 +90,10 @@ export const radii = {
   sm: 8,
   base: 12,
   md: 16,
-  card: 20,
+  // Cards sit at the Lavender Dusk mocks' measured ~24 (design
+  // polish pass — the fidelity audit measured the app's rows at
+  // 20 against the mocks' 24).
+  card: 24,
   cardLg: 24,
   pill: 999,
 } as const;

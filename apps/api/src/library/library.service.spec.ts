@@ -994,7 +994,8 @@ describe('LibraryService — ratings', () => {
 /* ------------------------------------------------------------------ */
 
 function makeServiceWithClient(client?: {
-  fetchLibraryMediaIds: jest.Mock;
+  fetchLibraryMediaIds?: jest.Mock;
+  fetchLibraryEntries?: jest.Mock;
 }) {
   const models = makeModels();
   const service = new LibraryService(
@@ -1295,6 +1296,204 @@ describe('LibraryService.listLibraryThemes', () => {
 
     const res = await service.listLibraryThemes('user-3');
     expect(res).toEqual({ themes: [], total: 0, page: 1, limit: 50 });
+  });
+});
+
+describe('LibraryService.getAnilistEntries', () => {
+  const entry = (overrides: Record<string, unknown> = {}) => ({
+    mediaId: 101,
+    status: 'CURRENT',
+    title: 'Frieren',
+    coverImage: 'https://img/l101.jpg',
+    format: 'TV',
+    episodes: 28,
+    progress: 18,
+    score: null as number | null,
+    ...overrides,
+  });
+
+  const linkedUser = (overrides: Record<string, unknown> = {}) => ({
+    _id: 'user-3',
+    username: 'three',
+    totalRatings: 0,
+    totalTime: 0,
+    anilist: {
+      accessToken: 'token-3',
+      userId: 42,
+      username: 'AniThree',
+      completedMediaIds: [42],
+    },
+    ...overrides,
+  });
+
+  it('404s when the caller’s document is gone', async () => {
+    const { service } = makeServiceWithClient();
+    const error = await service
+      .getAnilistEntries('ghost-user')
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NotFoundException);
+  });
+
+  it('answers linked:false (and never fetches) for an unlinked caller', async () => {
+    const fetchEntries = jest.fn(async () => []);
+    const { service } = makeServiceWithClient({
+      fetchLibraryEntries: fetchEntries,
+    });
+
+    const res = await service.getAnilistEntries('user-1');
+    expect(res).toEqual({
+      linked: false,
+      available: false,
+      anilistUser: null,
+      watching: [],
+      completed: [],
+    });
+    expect(fetchEntries).not.toHaveBeenCalled();
+  });
+
+  it('serves a FRESH stored cache grouped by status, without fetching', async () => {
+    const fetchEntries = jest.fn(async () => []);
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryEntries: fetchEntries,
+    });
+    models.userModel.docs.push(
+      linkedUser({
+        anilistEntriesCache: {
+          syncedAt: new Date(), // fresh — inside the 6h window
+          entries: [
+            entry(),
+            entry({
+              mediaId: 102,
+              status: 'COMPLETED',
+              title: 'Outbreak Company',
+              episodes: 12,
+              progress: 12,
+              score: 8,
+            }),
+          ],
+        },
+      }),
+    );
+
+    const res = await service.getAnilistEntries('user-3');
+    expect(fetchEntries).not.toHaveBeenCalled();
+    expect(res.linked).toBe(true);
+    expect(res.available).toBe(true);
+    expect(res.anilistUser).toBe('AniThree');
+    expect(res).not.toHaveProperty('anilistSyncDeferred');
+    expect(res.watching).toEqual([
+      {
+        mediaId: 101,
+        title: 'Frieren',
+        coverImage: 'https://img/l101.jpg',
+        format: 'TV',
+        episodes: 28,
+        progress: 18,
+        score: null,
+      },
+    ]);
+    expect(res.completed).toEqual([
+      {
+        mediaId: 102,
+        title: 'Outbreak Company',
+        coverImage: 'https://img/l101.jpg',
+        format: 'TV',
+        episodes: 12,
+        progress: 12,
+        score: 8,
+      },
+    ]);
+  });
+
+  it('fetches and PERSISTS on first sync (no cache), then serves the fetch', async () => {
+    const fetched = [
+      entry(),
+      entry({ mediaId: 102, status: 'COMPLETED', progress: 28, score: 9 }),
+    ];
+    const fetchEntries = jest.fn(async () => fetched);
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryEntries: fetchEntries,
+    });
+    models.userModel.docs.push(linkedUser());
+
+    const res = await service.getAnilistEntries('user-3');
+    expect(fetchEntries).toHaveBeenCalledWith('token-3', 42);
+    expect(res.available).toBe(true);
+    expect(res.watching).toHaveLength(1);
+    expect(res.completed).toHaveLength(1);
+    // The cache landed on the user document for next time.
+    const stored = models.userModel.docs.find((u) => u._id === 'user-3') as {
+      anilistEntriesCache?: { entries: unknown[]; syncedAt: Date };
+    };
+    expect(stored.anilistEntriesCache?.entries).toEqual(fetched);
+    expect(stored.anilistEntriesCache?.syncedAt).toBeInstanceOf(Date);
+  });
+
+  it('degrades silently (available:false) when the first-sync fetch fails', async () => {
+    const fetchEntries = jest.fn(async () => null);
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryEntries: fetchEntries,
+    });
+    models.userModel.docs.push(linkedUser());
+
+    const res = await service.getAnilistEntries('user-3');
+    expect(res).toEqual({
+      linked: true,
+      available: false,
+      anilistUser: 'AniThree',
+      watching: [],
+      completed: [],
+    });
+  });
+
+  it('degrades silently when AniList answers with a genuinely empty library', async () => {
+    const fetchEntries = jest.fn(async () => []);
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryEntries: fetchEntries,
+    });
+    models.userModel.docs.push(linkedUser());
+
+    const res = await service.getAnilistEntries('user-3');
+    expect(res.available).toBe(false);
+    expect(res.linked).toBe(true);
+    // An empty result is not persisted (the ids dance's rule).
+    const stored = models.userModel.docs.find((u) => u._id === 'user-3') as {
+      anilistEntriesCache?: unknown;
+    };
+    expect(stored.anilistEntriesCache).toBeUndefined();
+  });
+
+  it('serves a STALE cache flagged deferred+stale and refreshes in the background', async () => {
+    const fresh = [entry({ mediaId: 103, title: 'Fresh Show' })];
+    const fetchEntries = jest.fn(async () => fresh);
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryEntries: fetchEntries,
+    });
+    models.userModel.docs.push(
+      linkedUser({
+        anilistEntriesCache: {
+          syncedAt: new Date(Date.now() - 7 * 60 * 60 * 1000), // 7h old
+          entries: [entry()],
+        },
+      }),
+    );
+
+    const res = await service.getAnilistEntries('user-3');
+    // The STALE cache is what gets served…
+    expect(res.available).toBe(true);
+    expect(res.watching.map((e) => e.mediaId)).toEqual([101]);
+    expect(res.anilistSyncDeferred).toBe(true);
+    expect(res.anilistDataStale).toBe(true);
+    // …and the background refresh was fired with the stored token.
+    expect(fetchEntries).toHaveBeenCalledWith('token-3', 42);
+    // Let the fire-and-forget refresh land, then the cache is fresh.
+    await new Promise((resolve) => setImmediate(resolve));
+    const stored = models.userModel.docs.find((u) => u._id === 'user-3') as {
+      anilistEntriesCache?: { entries: { mediaId: number }[] };
+    };
+    expect(stored.anilistEntriesCache?.entries.map((e) => e.mediaId)).toEqual([
+      103,
+    ]);
   });
 });
 

@@ -11,16 +11,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
 import {
-  AtSign,
-  Check,
-  ChevronLeft,
+  ArrowLeft,
   ChevronRight,
   Download,
-  Link2,
   LogOut,
-  Mail,
   Moon,
-  Pencil,
+  RefreshCw,
   Sun,
   User,
 } from 'lucide-react-native';
@@ -37,27 +33,31 @@ import { useAnilistLink } from '../../src/hooks/useAnilistLink';
 import { CONTENT_MAX_WIDTH } from '../../src/layout';
 
 /**
- * Settings (DESIGN.md §6.27): account summary, the Edit Profile
- * row (the form itself is the standalone §6.28 screen since
- * layout-fidelity Slice 4 — it used to be an inline card here),
- * the Downloads row (§6.26), the AniList link action, the Theme
- * selection (Dark default / Light — the Gate 4 decision, wired
- * here in Slice 2), and sign-out.
- *
- * Compact/icon-led chrome (approved mockup v1): a tile back button,
- * small muted section labels, and every row led by an icon slot —
- * the rows, values, notes and actions themselves are unchanged.
+ * Settings — the Lavender Dusk mock's arrangement (design
+ * polish pass): a bare-arrow header, then ONE flow of cards —
+ * the APPEARANCE card first (segmented Light/Dark toggle, not
+ * radio rows, with the mock's caption), a rows card (Edit
+ * Profile · AniList Sync · Downloads, each led by a lavender
+ * icon disc), the Log Out card (its own white card, dusty-red
+ * row), and the version footer. The pre-polish ACCOUNT summary
+ * card (username / display name / email readouts) is gone —
+ * the mock doesn't draw it and the same data lives on Profile
+ * and Edit Profile; no working row was orphaned: Edit Profile,
+ * Downloads, the AniList link action and the version footer all
+ * remain reachable exactly as before.
  *
  * The linked AniList username shown here is session-local: it comes
  * from the link response in this session, because GET /auth/me does
  * not expose the linked account. After an app restart the action
  * shows again even though the link itself persists server-side.
+ * The Appearance card renders signed-out too (the theme choice is
+ * a device preference, as before); the account rows don't.
  */
 export default function SettingsScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const { mode, setMode } = useThemeMode();
-  const { status, user, demoMode, logout } = useAuth();
+  const { status, demoMode, logout } = useAuth();
   // The link action itself (busy state, note/error wording, the
   // fixture-mode placeholder) is shared with the drawer — see
   // src/hooks/useAnilistLink.ts.
@@ -77,46 +77,82 @@ export default function SettingsScreen() {
     router.replace('/(tabs)');
   };
 
-  const iconSlot = (Icon: typeof Moon, active = false) => (
-    <View style={[styles.iconSlot, active && styles.iconSlotActive]}>
-      <Icon
-        size={17}
-        color={active ? theme.accent : theme.muted}
-        strokeWidth={2}
-      />
-    </View>
-  );
+  const signedIn = status === 'signedIn';
 
-  const themeOption = (value: ThemeMode, label: string) => (
-    <Pressable
-      key={value}
-      onPress={() => setMode(value)}
-      style={styles.optionRow}
-      accessibilityRole="button"
-      accessibilityState={{ selected: mode === value }}
-    >
-      {iconSlot(value === 'dark' ? Moon : Sun, mode === value)}
-      <Text style={styles.optionLabel}>{label}</Text>
-      {mode === value && (
-        <Check size={18} color={theme.accent} strokeWidth={2} />
-      )}
-    </Pressable>
-  );
+  const themeSegment = (value: ThemeMode, label: string) => {
+    const active = mode === value;
+    const Icon = value === 'dark' ? Moon : Sun;
+    return (
+      <Pressable
+        key={value}
+        onPress={() => setMode(value)}
+        accessibilityRole="button"
+        accessibilityState={{ selected: active }}
+        accessibilityLabel={`${label} theme`}
+        style={({ pressed }) => [
+          styles.segment,
+          active && styles.segmentActive,
+          pressed && styles.pressed,
+        ]}
+      >
+        <Icon
+          size={16}
+          color={active ? theme.onAccent : theme.secondary}
+          strokeWidth={2}
+        />
+        <Text
+          style={[
+            styles.segmentText,
+            active && styles.segmentTextActive,
+          ]}
+        >
+          {label}
+        </Text>
+      </Pressable>
+    );
+  };
 
-  const accountRow = (
-    Icon: typeof Moon,
+  /* A settings row. With an onPress it's a button; without one
+     (the connected AniList row — a status, not an action) it
+     renders as a plain row: the app never draws a dead control. */
+  const row = (
+    Icon: typeof User,
     label: string,
-    value: string,
-    last: boolean,
-  ) => (
-    <View style={[styles.row, last && styles.rowLast]}>
-      {iconSlot(Icon)}
-      <View style={styles.rowTexts}>
+    onPress: (() => void) | null,
+    accessibilityLabel: string,
+    trailing?: React.ReactNode,
+    last = false,
+  ) => {
+    const inner = (
+      <>
+        <View style={styles.iconDisc}>
+          <Icon size={18} color={theme.accent} strokeWidth={2} />
+        </View>
         <Text style={styles.rowLabel}>{label}</Text>
-        <Text style={styles.rowValue}>{value}</Text>
-      </View>
-    </View>
-  );
+        {trailing}
+        <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
+      </>
+    );
+    if (!onPress) {
+      return (
+        <View style={[styles.row, !last && styles.rowDivider]}>{inner}</View>
+      );
+    }
+    return (
+      <Pressable
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        style={({ pressed }) => [
+          styles.row,
+          !last && styles.rowDivider,
+          pressed && styles.pressed,
+        ]}
+      >
+        {inner}
+      </Pressable>
+    );
+  };
 
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -128,44 +164,14 @@ export default function SettingsScreen() {
           accessibilityLabel="Back"
           style={styles.backHit}
         >
-          <View style={styles.backTile}>
-            <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-          </View>
+          <ArrowLeft size={24} color={theme.text} strokeWidth={2} />
         </Pressable>
         <Text style={styles.title}>Settings</Text>
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
-        {status === 'signedIn' && user ? (
-          <>
-            <Text style={styles.sectionLabel}>Account</Text>
-            <View style={styles.card}>
-              {accountRow(AtSign, 'Username', user.username, false)}
-              {accountRow(User, 'Display name', user.displayName, false)}
-              {accountRow(Mail, 'Email', user.email, true)}
-            </View>
-            {demoMode && (
-              <Text style={styles.note}>
-                Demo account — stored only on this device.
-              </Text>
-            )}
-
-            <Text style={styles.sectionLabel}>Profile</Text>
-            <View style={styles.card}>
-              <Pressable
-                onPress={() => router.push('/edit-profile')}
-                style={styles.optionRow}
-                accessibilityRole="button"
-                accessibilityLabel="Edit profile"
-              >
-                {iconSlot(Pencil)}
-                <Text style={styles.optionLabel}>Edit Profile</Text>
-                <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
-              </Pressable>
-            </View>
-          </>
-        ) : (
-          <>
+        {!signedIn && status !== 'loading' && (
+          <View style={styles.signinBlock}>
             <Text style={styles.note}>You’re not signed in.</Text>
             <Pressable
               onPress={() => router.replace('/login')}
@@ -174,84 +180,99 @@ export default function SettingsScreen() {
             >
               <Text style={styles.primaryLabel}>Log in</Text>
             </Pressable>
-          </>
+          </View>
         )}
 
-        {status === 'signedIn' && user && (
-          <>
-            <Text style={styles.sectionLabel}>Library</Text>
-            <View style={styles.card}>
-              <Pressable
-                onPress={() => router.push('/downloads')}
-                style={styles.optionRow}
-                accessibilityRole="button"
-                accessibilityLabel="Open Downloads"
-              >
-                {iconSlot(Download)}
-                <Text style={styles.optionLabel}>Downloads</Text>
-                <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
-              </Pressable>
-            </View>
-          </>
-        )}
-
-        {status === 'signedIn' && (
-          <>
-            <Text style={styles.sectionLabel}>AniList</Text>
-            <View style={styles.card}>
-              {anilistUsername ? (
-                accountRow(Link2, 'Linked account', anilistUsername, true)
-              ) : (
-                <Pressable
-                  onPress={() => void onLinkAnilist()}
-                  disabled={linkBusy}
-                  style={styles.optionRow}
-                  accessibilityRole="button"
-                >
-                  {iconSlot(Link2)}
-                  <Text style={styles.optionLabel}>Link AniList account</Text>
-                  {linkBusy ? (
-                    <ActivityIndicator color={theme.accent} />
-                  ) : (
-                    <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
-                  )}
-                </Pressable>
-              )}
-            </View>
-            {linkNote !== null && (
-              <Text style={styles.note}>{linkNote}</Text>
-            )}
-            {linkError !== null && (
-              <Text style={styles.error}>{linkError}</Text>
-            )}
-          </>
-        )}
-
-        <Text style={styles.sectionLabel}>Theme</Text>
+        {/* Appearance — the mock's first card: section label,
+            segmented Light/Dark toggle, caption. */}
         <View style={styles.card}>
-          {themeOption('light', 'Light')}
-          <View style={styles.divider} />
-          {themeOption('dark', 'Dark')}
+          <Text style={styles.cardLabel}>Appearance</Text>
+          <View style={styles.segmented}>
+            {themeSegment('light', 'Light')}
+            {themeSegment('dark', 'Dark')}
+          </View>
+          <Text style={styles.caption}>
+            Lavender Dusk is the light theme.
+          </Text>
         </View>
-        <Text style={styles.note}>
-          Light (Lavender Dusk) is the default. Your choice is remembered on
-          this device.
-        </Text>
 
-        {status === 'signedIn' && (
-          <Pressable
-            onPress={() => void onLogout()}
-            style={styles.logout}
-            accessibilityRole="button"
-          >
-            <LogOut size={18} color={theme.danger} strokeWidth={2} />
-            <Text style={styles.logoutLabel}>Log out</Text>
-          </Pressable>
+        {signedIn && (
+          <View style={styles.card}>
+            {row(
+              User,
+              'Edit Profile',
+              () => router.push('/edit-profile'),
+              'Edit profile',
+              undefined,
+              false,
+            )}
+            {anilistUsername
+              ? row(
+                  RefreshCw,
+                  'AniList Sync',
+                  null,
+                  `AniList connected as ${anilistUsername}`,
+                  <View style={styles.connectedPill}>
+                    <View style={styles.connectedDot} />
+                    <Text style={styles.connectedText}>Connected</Text>
+                  </View>,
+                  false,
+                )
+              : row(
+                  RefreshCw,
+                  'AniList Sync',
+                  () => void onLinkAnilist(),
+                  'Link AniList account',
+                  linkBusy ? (
+                    <ActivityIndicator color={theme.accent} />
+                  ) : undefined,
+                  false,
+                )}
+            {row(
+              Download,
+              'Downloads',
+              () => router.push('/downloads'),
+              'Open Downloads',
+              undefined,
+              true,
+            )}
+          </View>
+        )}
+        {signedIn && linkNote !== null && (
+          <Text style={styles.note}>{linkNote}</Text>
+        )}
+        {signedIn && linkError !== null && (
+          <Text style={styles.error}>{linkError}</Text>
+        )}
+        {signedIn && demoMode && (
+          <Text style={styles.note}>
+            Demo account — stored only on this device.
+          </Text>
         )}
 
-        {/* The design's version footer (§6.27 mock). The version is
-            the app's REAL one from its config — the mock's '1.0.0'
-            is illustrative; app.json says what the build is. */}
+        {signedIn && (
+          <View style={styles.card}>
+            <Pressable
+              onPress={() => void onLogout()}
+              accessibilityRole="button"
+              accessibilityLabel="Log out"
+              style={({ pressed }) => [
+                styles.row,
+                pressed && styles.pressed,
+              ]}
+            >
+              <View style={styles.logoutDisc}>
+                <LogOut size={18} color={theme.danger} strokeWidth={2} />
+              </View>
+              <Text style={styles.logoutLabel}>Log Out</Text>
+              <ChevronRight size={18} color={theme.danger} strokeWidth={2} />
+            </Pressable>
+          </View>
+        )}
+
+        {/* The design's version footer. The version is the app's
+            REAL one from its config — the mock's '1.0.0' is
+            illustrative; app.json says what the build is. */}
         <Text style={styles.versionFooter}>
           Kaikansen · Version {Constants.expoConfig?.version ?? '0.1.0'}
         </Text>
@@ -282,16 +303,9 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
     },
-    backTile: {
-      width: 38,
-      height: 38,
-      borderRadius: radii.base,
-      backgroundColor: theme.raised,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
     title: {
-      ...typeStyles.heading,
+      fontFamily: fontFamilies.display,
+      fontSize: 26,
       color: theme.text,
       flex: 1,
     },
@@ -301,70 +315,119 @@ const createStyles = (theme: Theme) =>
       alignSelf: 'center',
       paddingHorizontal: spacing.screenEdge,
       paddingBottom: spacing.xxxl,
+      gap: spacing.lg,
     },
-    sectionLabel: {
-      ...typeStyles.caption,
-      fontFamily: fontFamilies.bodyStrong,
-      color: theme.muted,
-      letterSpacing: 0.6,
-      textTransform: 'uppercase',
-      marginTop: spacing.xl,
-      marginBottom: spacing.sm,
+    signinBlock: {
+      gap: spacing.md,
     },
     card: {
       backgroundColor: theme.surface,
-      borderRadius: radii.md,
-      paddingHorizontal: spacing.md,
+      borderRadius: radii.card,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.sm,
     },
-    iconSlot: {
-      width: 32,
-      height: 32,
-      borderRadius: 10,
-      backgroundColor: theme.raised,
+    cardLabel: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.secondary,
+      letterSpacing: 0.8,
+      textTransform: 'uppercase',
+      marginTop: spacing.sm,
+      marginBottom: spacing.md,
+    },
+    segmented: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 3,
+      padding: 3,
+      borderRadius: radii.pill,
+      backgroundColor: theme.accentContainer,
+    },
+    segment: {
+      flex: 1,
+      flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-      flexShrink: 0,
+      gap: spacing.xs + 2,
+      paddingVertical: spacing.sm + 2,
+      borderRadius: radii.pill,
     },
-    iconSlotActive: {
-      backgroundColor: theme.accentContainer,
+    segmentActive: {
+      backgroundColor: theme.accent,
+    },
+    segmentText: {
+      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.secondary,
+    },
+    segmentTextActive: {
+      color: theme.onAccent,
+    },
+    caption: {
+      ...typeStyles.bodySmall,
+      color: theme.muted,
+      marginTop: spacing.md,
+      marginBottom: spacing.sm,
     },
     row: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
-      paddingVertical: spacing.sm + 2,
+      minHeight: 60,
+    },
+    rowDivider: {
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: theme.border,
     },
-    rowLast: {
-      borderBottomWidth: 0,
-    },
-    rowTexts: {
-      flex: 1,
-      gap: 1,
+    iconDisc: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: theme.accentContainer,
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexShrink: 0,
     },
     rowLabel: {
-      ...typeStyles.caption,
-      color: theme.muted,
-    },
-    rowValue: {
       ...typeStyles.body,
-      color: theme.text,
-    },
-    optionRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
-      minHeight: 52,
-    },
-    optionLabel: {
-      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
       color: theme.text,
       flex: 1,
     },
-    divider: {
-      height: StyleSheet.hairlineWidth,
-      backgroundColor: theme.border,
+    connectedPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.xs + 2,
+      backgroundColor: theme.successContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: spacing.xs + 1,
+    },
+    connectedDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: theme.success,
+    },
+    connectedText: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.success,
+    },
+    logoutDisc: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: theme.dangerContainer,
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexShrink: 0,
+    },
+    logoutLabel: {
+      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.danger,
+      flex: 1,
     },
     pressed: {
       opacity: 0.85,
@@ -372,13 +435,11 @@ const createStyles = (theme: Theme) =>
     note: {
       ...typeStyles.caption,
       color: theme.muted,
-      marginTop: spacing.md,
       lineHeight: 16,
     },
     error: {
       ...typeStyles.bodySmall,
       color: theme.accent,
-      marginTop: spacing.md,
     },
     primary: {
       backgroundColor: theme.accent,
@@ -386,33 +447,16 @@ const createStyles = (theme: Theme) =>
       minHeight: 52,
       alignItems: 'center',
       justifyContent: 'center',
-      marginTop: spacing.lg,
     },
     primaryLabel: {
       ...typeStyles.body,
       fontFamily: 'Inter_600SemiBold',
       color: theme.onAccent,
     },
-    logout: {
-      flexDirection: 'row',
-      gap: spacing.sm,
-      borderWidth: 1,
-      borderColor: theme.border,
-      borderRadius: radii.base,
-      minHeight: 52,
-      alignItems: 'center',
-      justifyContent: 'center',
-      marginTop: spacing.xxxl,
-    },
-    logoutLabel: {
-      ...typeStyles.body,
-      fontFamily: 'Inter_600SemiBold',
-      color: theme.danger,
-    },
     versionFooter: {
       ...typeStyles.caption,
       color: theme.muted,
       textAlign: 'center',
-      marginTop: spacing.xxl,
+      marginTop: spacing.sm,
     },
   });

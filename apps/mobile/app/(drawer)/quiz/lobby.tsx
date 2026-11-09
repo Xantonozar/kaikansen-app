@@ -249,9 +249,9 @@ export default function QuizLobbyScreen() {
           accessibilityLabel="Back to quiz home"
           style={styles.backHit}
         >
-          <View style={styles.backTile}>
-            <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-          </View>
+          {/* Bare arrow (design polish pass) — no tile, as the
+              mock draws it. */}
+          <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
         </Pressable>
         <View style={styles.headerMain}>
           <Text style={styles.headerTitle}>Multiplayer</Text>
@@ -507,16 +507,7 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
     },
-    backTile: {
-      width: 38,
-      height: 38,
-      borderRadius: radii.base,
-      backgroundColor: theme.surface,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.border,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
+
     headerMain: {
       flex: 1,
     },

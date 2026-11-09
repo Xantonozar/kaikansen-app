@@ -8,6 +8,8 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import type { Model } from 'mongoose';
 import type {
+  AnilistEntriesResponse,
+  AnilistEntry,
   FavoriteRequest,
   FavoriteState,
   FavoritesResponse,
@@ -27,7 +29,10 @@ import {
   type ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
 import { toThemeSummary, type ThemeDoc } from '../themes/theme.mapper';
-import { AnilistLibraryClient } from './anilist-library.client';
+import {
+  AnilistLibraryClient,
+  type AnilistLibraryEntry,
+} from './anilist-library.client';
 import { Favorite, type FavoriteDocument } from './favorite.schema';
 import { Rating, type RatingDocument } from './rating.schema';
 import {
@@ -613,6 +618,179 @@ export class LibraryService {
           .findByIdAndUpdate(userId, {
             'anilist.completedMediaIds': freshIds,
             'anilist.syncedAt': new Date(),
+          })
+          .exec();
+      }
+    } catch {
+      // Best-effort refresh — a failure leaves the stored cache as-is.
+    }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* AniList entries — GET /library/anilist-entries (polish pass).     */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * GET /library/anilist-entries — the caller's AniList Watching
+   * (CURRENT) + Completed entries for the Library's AniList
+   * segment: per-entry progress, score, format, episodes, cover
+   * and titles, read from AniList itself with the caller's stored
+   * token. NEW capability, no web counterpart: the web stores
+   * only the merged media ids (completedMediaIds), which cannot
+   * draw the designed entry cards.
+   *
+   * The cache dance mirrors listLibraryThemes' stored-ids dance
+   * exactly, over the API-only `anilistEntriesCache` sub-document:
+   * - fresh cache (syncedAt within 6 hours): served as-is;
+   * - stale WITH a cache: the cache is served, a best-effort
+   *   background refresh is fired, and the response flags
+   *   anilistSyncDeferred + anilistDataStale;
+   * - no cache: a single awaited fetch under the client's
+   *   1500 ms timeout; a non-empty result is persisted before
+   *   the response.
+   * Degradation is silent by contract: unlinked callers get
+   * `linked: false`, and a linked caller whose fetch failed with
+   * no cache gets `available: false` — the mobile segment falls
+   * back to the /library/themes union view in both cases. A
+   * genuinely empty AniList library (a fetch that succeeds with
+   * zero entries) is NOT persisted, mirroring the ids dance, and
+   * also answers `available: false`.
+   *
+   * Not-found: the caller's document being gone is the module's
+   * usual 404 'User not found'.
+   */
+  async getAnilistEntries(userId: string): Promise<AnilistEntriesResponse> {
+    const models = this.requireModels();
+    const user = await models.users.findById(userId).exec();
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const anilistUser = user.anilist?.username ?? null;
+    if (!user.anilist?.accessToken || !user.anilist?.userId) {
+      return {
+        linked: false,
+        available: false,
+        anilistUser,
+        watching: [],
+        completed: [],
+      };
+    }
+    const accessToken = user.anilist.accessToken;
+    const anilistUserId = user.anilist.userId;
+
+    const cache = user.anilistEntriesCache;
+    let entries: AnilistLibraryEntry[] = (cache?.entries ?? []).map(
+      (e) => ({
+        mediaId: e.mediaId,
+        status: e.status,
+        title: e.title,
+        coverImage: e.coverImage ?? null,
+        format: e.format ?? null,
+        episodes: e.episodes ?? null,
+        progress: e.progress ?? 0,
+        score: e.score ?? null,
+      }),
+    );
+    let syncDeferred = false;
+
+    const sixHours = 1000 * 60 * 60 * 6;
+    const isStale =
+      !cache?.syncedAt ||
+      new Date().getTime() - new Date(cache.syncedAt).getTime() > sixHours;
+
+    if (entries.length > 0 && isStale) {
+      // Stale but cached: serve the cache, refresh behind the
+      // response (the deferred branch, as in listLibraryThemes —
+      // its anilistDataStale is always true on this branch too).
+      syncDeferred = true;
+      void this.refreshStoredEntries(
+        models,
+        user._id,
+        accessToken,
+        anilistUserId,
+      );
+    } else if (entries.length === 0) {
+      // First sync (or an empty cache): one awaited attempt.
+      const fresh = this.anilistLibrary
+        ? await this.anilistLibrary.fetchLibraryEntries(
+            accessToken,
+            anilistUserId,
+          )
+        : null;
+      if (fresh && fresh.length > 0) {
+        entries = fresh;
+        await models.users
+          .findByIdAndUpdate(user._id, {
+            anilistEntriesCache: {
+              syncedAt: new Date(),
+              entries: fresh,
+            },
+          })
+          .exec();
+      }
+    }
+
+    if (entries.length === 0) {
+      return {
+        linked: true,
+        available: false,
+        anilistUser,
+        watching: [],
+        completed: [],
+      };
+    }
+
+    const toContract = (e: AnilistLibraryEntry): AnilistEntry => ({
+      mediaId: e.mediaId,
+      title: e.title,
+      coverImage: e.coverImage,
+      format: e.format,
+      episodes: e.episodes,
+      progress: e.progress,
+      score: e.score,
+    });
+    return {
+      linked: true,
+      available: true,
+      anilistUser,
+      watching: entries
+        .filter((e) => e.status === 'CURRENT')
+        .map(toContract),
+      completed: entries
+        .filter((e) => e.status === 'COMPLETED')
+        .map(toContract),
+      ...(syncDeferred
+        ? { anilistSyncDeferred: true, anilistDataStale: true }
+        : {}),
+    };
+  }
+
+  /**
+   * The entries cache's deferred-branch background refresh: fetch
+   * fresh entries and, on a non-empty result, store them + a new
+   * syncedAt. Entirely best-effort, like refreshStoredLibraryIds.
+   */
+  private async refreshStoredEntries(
+    models: LibraryModels,
+    userId: unknown,
+    accessToken: string,
+    anilistUserId: number,
+  ): Promise<void> {
+    try {
+      const fresh = this.anilistLibrary
+        ? await this.anilistLibrary.fetchLibraryEntries(
+            accessToken,
+            anilistUserId,
+          )
+        : null;
+      if (fresh && fresh.length > 0) {
+        await models.users
+          .findByIdAndUpdate(userId, {
+            anilistEntriesCache: {
+              syncedAt: new Date(),
+              entries: fresh,
+            },
           })
           .exec();
       }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,7 +19,11 @@ import { fixtureMode } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
 import { PersonRow } from '../../../src/components/PersonRow';
-import { fetchFriendsActivity, searchUsers } from '../../../src/socialApi';
+import {
+  fetchFriendsActivity,
+  fetchUserNetwork,
+  searchUsers,
+} from '../../../src/socialApi';
 import { relativeTime } from '../../../src/time';
 import {
   fontFamilies,
@@ -31,11 +36,17 @@ import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
 /**
- * Social (Slice M5) — the real tab. Two parts:
+ * Social (Slice M5) — the real tab. Three parts:
  *
  * - People search at the top: the users branch of search
  *   (GET /social/users/search), live from 2 characters, paged with
  *   a Load more row; results route to profiles.
+ * - The YOUR FRIENDS rail (design polish pass — the design's
+ *   avatar rail the audit found missing): the caller's own
+ *   following list (GET /users/:username/network), avatar discs
+ *   with usernames, each routing to that user's profile. It
+ *   renders only when the caller actually follows someone; a
+ *   failed fetch just hides it — the feed below is unaffected.
  * - The friends-activity feed: recent watches ('listening') and
  *   ratings ('liked') by people the caller follows. The feed is
  *   follow-based, so signed-out gets a log-in prompt as the body
@@ -55,6 +66,7 @@ export default function SocialScreen() {
 
   const [feed, setFeed] = useState<FriendsActivityItem[] | null>(null);
   const [feedError, setFeedError] = useState<string | null>(null);
+  const [friends, setFriends] = useState<NetworkUser[] | null>(null);
 
   const [query, setQuery] = useState('');
   const [people, setPeople] = useState<NetworkUser[] | null>(null);
@@ -80,10 +92,28 @@ export default function SocialScreen() {
       );
   }, [signedIn]);
 
+  /* The friends rail: the caller's own following list. A failure
+     hides the rail (null) rather than surfacing an error — the
+     feed below carries the screen's error states. */
+  const myUsername = user?.username;
+  const loadFriends = useCallback(() => {
+    if (!signedIn || fixtureMode || !myUsername) return;
+    fetchUserNetwork(myUsername)
+      .then((res) =>
+        setFriends(
+          res.following.filter(
+            (p): p is NetworkUser => p !== null,
+          ),
+        ),
+      )
+      .catch(() => setFriends(null));
+  }, [signedIn, myUsername]);
+
   useFocusEffect(
     useCallback(() => {
       loadFeed();
-    }, [loadFeed]),
+      loadFriends();
+    }, [loadFeed, loadFriends]),
   );
 
   /* People search — debounced; a short query clears back to the feed. */
@@ -266,7 +296,58 @@ export default function SocialScreen() {
           </>
         ) : (
           <>
-            <Text style={styles.heading}>Friends activity</Text>
+            {signedIn && !fixtureMode && friends && friends.length > 0 && (
+              <>
+                <Text style={styles.sectionLabel}>Your friends</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.rail}
+                  contentContainerStyle={styles.railContent}
+                >
+                  {friends.map((person) => {
+                    const usable =
+                      person.avatarUrl !== null &&
+                      person.avatarUrl.length > 0 &&
+                      !person.avatarUrl.toLowerCase().includes('.svg');
+                    return (
+                      <Pressable
+                        key={person.id}
+                        onPress={() => openProfile(person.username)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Open ${person.username}'s profile`}
+                        style={({ pressed }) => [
+                          styles.railItem,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        {usable ? (
+                          <Image
+                            source={{ uri: person.avatarUrl! }}
+                            style={styles.railAvatar}
+                          />
+                        ) : (
+                          <View
+                            style={[
+                              styles.railAvatar,
+                              styles.railAvatarFallback,
+                            ]}
+                          >
+                            <Text style={styles.railInitials}>
+                              {person.username.slice(0, 2).toUpperCase()}
+                            </Text>
+                          </View>
+                        )}
+                        <Text style={styles.railName} numberOfLines={1}>
+                          {person.username}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              </>
+            )}
+            <Text style={styles.sectionLabel}>Friends activity</Text>
             {fixtureMode ? (
               <View style={styles.promptCard}>
                 <UserPlus size={22} color={theme.muted} strokeWidth={2} />
@@ -365,6 +446,49 @@ const createStyles = (theme: Theme) =>
       color: theme.text,
       marginTop: spacing.lg,
       marginBottom: spacing.xs,
+    },
+    sectionLabel: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      letterSpacing: 0.8,
+      textTransform: 'uppercase',
+      color: theme.muted,
+      marginTop: spacing.lg,
+      marginBottom: spacing.sm,
+    },
+    rail: {
+      marginHorizontal: -spacing.screenEdge,
+    },
+    railContent: {
+      paddingHorizontal: spacing.screenEdge,
+      gap: spacing.md,
+    },
+    railItem: {
+      width: 68,
+      alignItems: 'center',
+      gap: spacing.xs + 2,
+    },
+    railAvatar: {
+      width: 60,
+      height: 60,
+      borderRadius: 30,
+      backgroundColor: theme.surface,
+    },
+    railAvatarFallback: {
+      backgroundColor: theme.accentContainer,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    railInitials: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 17,
+      color: theme.onAccentContainer,
+    },
+    railName: {
+      ...typeStyles.caption,
+      color: theme.text,
+      maxWidth: 68,
+      textAlign: 'center',
     },
     feedRow: {
       flexDirection: 'row',

@@ -102,7 +102,7 @@ export default function LeaderboardScreen() {
           onPress={() => router.back()}
           accessibilityRole="button"
           accessibilityLabel="Back"
-          style={styles.backTile}
+          style={styles.backHit}
         >
           <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
         </Pressable>
@@ -190,11 +190,11 @@ const createStyles = (theme: Theme) =>
       paddingHorizontal: spacing.screenEdge,
       paddingVertical: spacing.sm,
     },
-    backTile: {
-      width: 38,
-      height: 38,
-      borderRadius: radii.pill,
-      backgroundColor: theme.surface,
+    backHit: {
+      // Bare arrow (design polish pass): the mock's back is an
+      // untiled chevron; the 44px box is only the hit area.
+      width: 44,
+      height: 44,
       alignItems: 'center',
       justifyContent: 'center',
     },

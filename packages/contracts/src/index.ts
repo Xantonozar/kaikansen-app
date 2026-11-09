@@ -1604,6 +1604,60 @@ export interface LibraryThemesResponse {
 }
 
 /**
+ * One AniList list entry on GET /library/anilist-entries — the
+ * caller's own MediaList row for one anime, as the Library's
+ * AniList segment cards draw it. Every field comes from AniList
+ * itself (the caller's stored OAuth token reads their lists);
+ * nothing here is read from the shared catalogue, so `format`
+ * (TV / MOVIE / ONA …) is AniList's own value for the media.
+ */
+export interface AnilistEntry {
+  /** AniList media id. */
+  mediaId: number;
+  /** English title when AniList has one, else the romaji title. */
+  title: string;
+  /** Cover image URL (large, else medium), or null. */
+  coverImage: string | null;
+  /** AniList media format ('TV', 'MOVIE', …), or null. */
+  format: string | null;
+  /** Total episodes AniList knows, or null when unknown. */
+  episodes: number | null;
+  /** Episodes the caller has watched (the entry's progress). */
+  progress: number;
+  /**
+   * The caller's score normalised to AniList's POINT_10 scale,
+   * or null when the entry is unscored (AniList stores 0).
+   */
+  score: number | null;
+}
+
+/**
+ * Response body of GET /library/anilist-entries (Bearer required) —
+ * the caller's AniList Watching (CURRENT) and Completed entries
+ * for the Library's AniList segment, grouped by list status.
+ *
+ * Degradation contract (the mobile segment falls back to the
+ * /library/themes union view in both cases):
+ * - `linked: false` — the caller has no stored AniList identity +
+ *   token; both groups are empty.
+ * - `linked: true, available: false` — AniList could not be read
+ *   and no cached entries exist; both groups are empty.
+ * `available: true` serves the groups below (either may be empty).
+ * The AniList meta fields mirror /library/themes: present when a
+ * stale cache was served and a background refresh was fired.
+ */
+export interface AnilistEntriesResponse {
+  linked: boolean;
+  available: boolean;
+  /** The caller's linked AniList username, or null when unlinked. */
+  anilistUser: string | null;
+  watching: AnilistEntry[];
+  completed: AnilistEntry[];
+  anilistSyncDeferred?: boolean;
+  anilistDataStale?: boolean;
+}
+
+/**
  * Response body of GET /library/history/check?slug=… — whether the
  * caller has a watch-history row for the theme. OPTIONAL auth, like
  * the web: anonymous callers (and invalid tokens) get

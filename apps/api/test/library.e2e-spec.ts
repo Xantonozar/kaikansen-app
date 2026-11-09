@@ -13,6 +13,7 @@ import { User } from './../src/auth/user.schema';
 import { ThemeCache } from './../src/themes/theme-cache.schema';
 import { LibraryController } from './../src/library/library.controller';
 import { LibraryService } from './../src/library/library.service';
+import { AnilistLibraryClient } from './../src/library/anilist-library.client';
 import { Favorite } from './../src/library/favorite.schema';
 import { Rating } from './../src/library/rating.schema';
 import { WatchHistory } from './../src/library/watch-history.schema';
@@ -59,6 +60,9 @@ describe('Library without a database (e2e)', () => {
     await request(app.getHttpServer()).get('/library/history').expect(401);
     await request(app.getHttpServer()).get('/library/count').expect(401);
     await request(app.getHttpServer())
+      .get('/library/anilist-entries')
+      .expect(401);
+    await request(app.getHttpServer())
       .post('/library/history')
       .send({ slug: 'x', mode: 'watch' })
       .expect(401);
@@ -93,6 +97,10 @@ describe('Library without a database (e2e)', () => {
       .expect(503);
     await request(app.getHttpServer())
       .get('/library/count')
+      .set(auth)
+      .expect(503);
+    await request(app.getHttpServer())
+      .get('/library/anilist-entries')
       .set(auth)
       .expect(503);
     await request(app.getHttpServer())
@@ -442,6 +450,37 @@ describe('Library flow with mocked models (e2e)', () => {
   let app: INestApplication;
   const models = makeFakeModels();
 
+  /* The AniList library client, stubbed — no test ever touches
+     the live AniList API. fetchLibraryMediaIds fails soft (null),
+     which is the service's "serve stored ids" path; the entries
+     fetch serves a fixed two-entry library. */
+  const anilistEntriesFetch = jest.fn(async () => [
+    {
+      mediaId: 101,
+      status: 'CURRENT',
+      title: 'Frieren',
+      coverImage: 'https://img/l101.jpg',
+      format: 'TV',
+      episodes: 28,
+      progress: 18,
+      score: null,
+    },
+    {
+      mediaId: 102,
+      status: 'COMPLETED',
+      title: 'Outbreak Company',
+      coverImage: null,
+      format: 'TV',
+      episodes: 12,
+      progress: 12,
+      score: 8,
+    },
+  ]);
+  const anilistClientStub = {
+    fetchLibraryMediaIds: jest.fn(async () => null),
+    fetchLibraryEntries: anilistEntriesFetch,
+  };
+
   const tokenFor = (userId: string, tokenType = 'access') =>
     jwt.sign(
       {
@@ -468,6 +507,7 @@ process.env.JWT_SECRET = E2E_SECRET;
         AuthService,
         AccessTokenGuard,
         AnilistClient,
+        { provide: AnilistLibraryClient, useValue: anilistClientStub },
         { provide: getModelToken(User.name), useValue: models.userModel },
         {
           provide: getModelToken(ThemeCache.name),
@@ -682,5 +722,71 @@ process.env.JWT_SECRET = E2E_SECRET;
       .set('Authorization', `Bearer ${tokenFor('user-1')}`)
       .expect(200);
     expect(unlinked.body.anilist).toBeNull();
+  });
+
+  it('GET /library/anilist-entries answers linked:false for an unlinked caller', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/library/anilist-entries')
+      .set(asUser1())
+      .expect(200);
+    expect(res.body).toEqual({
+      linked: false,
+      available: false,
+      anilistUser: null,
+      watching: [],
+      completed: [],
+    });
+    expect(anilistEntriesFetch).not.toHaveBeenCalled();
+  });
+
+  it('GET /library/anilist-entries fetches, groups and caches for a linked caller', async () => {
+    const http = request(app.getHttpServer());
+    const asUser2 = {
+      Authorization: `Bearer ${tokenFor('user-2')}`,
+    };
+
+    const first = await http
+      .get('/library/anilist-entries')
+      .set(asUser2)
+      .expect(200);
+    expect(first.body.linked).toBe(true);
+    expect(first.body.available).toBe(true);
+    expect(first.body.anilistUser).toBe('AniUser');
+    expect(first.body.watching).toEqual([
+      {
+        mediaId: 101,
+        title: 'Frieren',
+        coverImage: 'https://img/l101.jpg',
+        format: 'TV',
+        episodes: 28,
+        progress: 18,
+        score: null,
+      },
+    ]);
+    expect(first.body.completed).toEqual([
+      {
+        mediaId: 102,
+        title: 'Outbreak Company',
+        coverImage: null,
+        format: 'TV',
+        episodes: 12,
+        progress: 12,
+        score: 8,
+      },
+    ]);
+    // Fetched with user-2's stored token + AniList user id.
+    expect(anilistEntriesFetch).toHaveBeenCalledTimes(1);
+    expect(anilistEntriesFetch).toHaveBeenCalledWith(
+      expect.any(String),
+      42,
+    );
+
+    // The second read serves the fresh cache — no second fetch.
+    const second = await http
+      .get('/library/anilist-entries')
+      .set(asUser2)
+      .expect(200);
+    expect(second.body).toEqual(first.body);
+    expect(anilistEntriesFetch).toHaveBeenCalledTimes(1);
   });
 });

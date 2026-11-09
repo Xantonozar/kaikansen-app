@@ -1,9 +1,4 @@
-import {
-  useCallback,
-  useMemo,
-  useState,
-  type ComponentType,
-} from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -14,39 +9,24 @@ import {
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 import {
-  Check,
-  Flame,
-  Globe,
-  Hash,
+  Headphones,
   Info,
-  Library,
   LogIn,
-  Mic,
-  Music,
   Play,
-  Plus,
-  Shuffle,
-  Swords,
-  Trophy,
-  Tv,
   Users,
-  X,
 } from 'lucide-react-native';
 import type {
   QuizGuessType,
-  QuizLeaderboardEntry,
-  QuizSource,
   RankLeaderboardEntry,
   UserRankProfile,
 } from '@kaikansen/contracts';
 import { fixtureMode } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
-import { fetchQuizLeaderboard } from '../../../src/quizApi';
 import {
   fetchMyRank,
   fetchRankLeaderboard,
 } from '../../../src/socialApi';
-import { RankCard } from '../../../src/components/RankCard';
+import { RankCard, RankCardSkeleton } from '../../../src/components/RankCard';
 import { RankRow } from '../../../src/components/RankRow';
 import {
   fontFamilies,
@@ -59,38 +39,35 @@ import {
 import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
-type IconComponent = ComponentType<{
-  size?: number;
-  color?: string;
-  strokeWidth?: number;
-}>;
-
-const TYPE_OPTIONS: { key: QuizGuessType; label: string; Icon: IconComponent }[] = [
-  { key: 'anime', label: 'Anime', Icon: Tv },
-  { key: 'title', label: 'Song', Icon: Music },
-  { key: 'artist', label: 'Artist', Icon: Mic },
+const TYPE_OPTIONS: { key: QuizGuessType; label: string }[] = [
+  { key: 'anime', label: 'Anime' },
+  { key: 'title', label: 'Song' },
+  { key: 'artist', label: 'Artist' },
 ];
 
-const TYPE_LABEL: Record<QuizGuessType, string> = {
-  anime: 'Anime',
-  title: 'Song',
-  artist: 'Artist',
+/** The Solo card's body line — the mock's sentence, per guess type. */
+const SOLO_BODY: Record<QuizGuessType, string> = {
+  anime: 'Guess the anime from the song. 10 questions, 20 seconds each.',
+  title: 'Guess the song title from the clip. 10 questions, 20 seconds each.',
+  artist: 'Guess the artist from the song. 10 questions, 20 seconds each.',
 };
 
 /**
- * Quiz home (Slice M4) — replaces the placeholder tab. Solo setup
- * (guess type as icon chips + Random/Library source), the
- * multiplayer entry points (create / join by code / public match —
- * all in the lobby route), and a live preview of the API's
- * leaderboard (top attempts; the board itself is public).
+ * Quiz home (Slice M4) — replaces the placeholder tab.
  *
- * Layout-fidelity slice: the Lavender Dusk hub's rank card (the
- * signed-in caller's /rank/me document) now sits on top, and an
- * RP leaderboard preview (GET /rank/leaderboard, "View all" →
- * the leaderboard route) sits above the top-attempts board. The
- * web's quiz hub carries the same top-attempts section fed by
- * /api/quiz/leaderboard — it stays; the web shows RP ranks on
- * its own /leaderboard page, which the preview + route port.
+ * Design polish pass — the hub now matches its Lavender Dusk
+ * mock card for card: the rank card on top (with the design's
+ * loading skeleton while /rank/me is in flight, instead of
+ * vanishing), the "Solo Run" card (guess-type text chips and a
+ * "Start Solo" button — the mock draws no Pool selector, so the
+ * solo route's library source is no longer offered here; solo
+ * games start from the random pool), the "Play with Friends"
+ * card (exactly the mock's two buttons: Create Room filled,
+ * Join with Code lavender — public-room browsing lives on the
+ * lobby screen itself), and the RP leaderboard preview
+ * (GET /rank/leaderboard, "View all" → the leaderboard route).
+ * The mock draws NO top-attempts card, so that card is gone;
+ * the solo-attempts endpoint itself is untouched.
  *
  * Honest states: signed-out gets a log-in prompt in place of the
  * play cards (the quiz API requires auth — solo games are per-user
@@ -105,43 +82,20 @@ export default function QuizScreen() {
   const { status } = useAuth();
 
   const [quizType, setQuizType] = useState<QuizGuessType>('anime');
-  const [source, setSource] = useState<QuizSource>('random');
-  const [boardType, setBoardType] = useState<QuizGuessType | null>(null);
-  const [board, setBoard] = useState<QuizLeaderboardEntry[] | null>(null);
-  const [boardError, setBoardError] = useState<string | null>(null);
-  const [boardLoading, setBoardLoading] = useState(false);
   const [myRank, setMyRank] = useState<UserRankProfile | null>(null);
+  const [rankLoading, setRankLoading] = useState(false);
   const [rankBoard, setRankBoard] = useState<RankLeaderboardEntry[] | null>(
     null,
   );
   const [rankError, setRankError] = useState<string | null>(null);
-
-  const loadBoard = useCallback(async () => {
-    setBoardLoading(true);
-    setBoardError(null);
-    try {
-      const res = await fetchQuizLeaderboard(boardType ?? undefined);
-      setBoard(res.entries);
-    } catch (e) {
-      setBoardError(
-        e instanceof Error ? e.message : 'Could not load the leaderboard.',
-      );
-    } finally {
-      setBoardLoading(false);
-    }
-  }, [boardType]);
-
-  useFocusEffect(
-    useCallback(() => {
-      void loadBoard();
-    }, [loadBoard]),
-  );
 
   const signedIn = status === 'signedIn';
 
   // Rank card + RP preview: the board is public; /rank/me only
   // exists for a signed-in caller (its failure just hides the
   // card and the YOU highlight — never an error surface here).
+  // While the fetch is in flight the card renders its loading
+  // skeleton (the design's loading state) instead of vanishing.
   const loadRank = useCallback(async () => {
     setRankError(null);
     try {
@@ -153,10 +107,13 @@ export default function QuizScreen() {
       );
     }
     if (signedIn) {
+      setRankLoading(true);
       try {
         setMyRank(await fetchMyRank());
       } catch {
         setMyRank(null);
+      } finally {
+        setRankLoading(false);
       }
     } else {
       setMyRank(null);
@@ -173,7 +130,6 @@ export default function QuizScreen() {
   const chip = (
     active: boolean,
     label: string,
-    Icon: IconComponent,
     onPress: () => void,
     disabled = false,
   ) => (
@@ -190,41 +146,10 @@ export default function QuizScreen() {
         pressed && styles.pressed,
       ]}
     >
-      <Icon
-        size={15}
-        color={active ? theme.onAccent : theme.muted}
-        strokeWidth={2}
-      />
       <Text style={[styles.chipText, active && styles.chipTextActive]}>
         {label}
       </Text>
     </Pressable>
-  );
-
-  const boardRow = (entry: QuizLeaderboardEntry, i: number) => (
-    <View key={entry.id} style={styles.boardRow}>
-      <Text style={styles.boardRank}>{i + 1}</Text>
-      <View style={styles.boardMain}>
-        <Text style={styles.boardName} numberOfLines={1}>
-          {entry.author?.displayName ?? entry.author?.username ?? 'Guest'}
-        </Text>
-        <Text style={styles.boardMeta} numberOfLines={1}>
-          {TYPE_LABEL[entry.quizType]} · {entry.themeSlug}
-        </Text>
-      </View>
-      {entry.streak >= 2 && (
-        <View style={styles.streak}>
-          <Flame size={13} color={theme.secondary} strokeWidth={2} />
-          <Text style={styles.streakText}>{entry.streak}</Text>
-        </View>
-      )}
-      {entry.correct ? (
-        <Check size={15} color={theme.success} strokeWidth={2.5} />
-      ) : (
-        <X size={15} color={theme.muted} strokeWidth={2.5} />
-      )}
-      <Text style={styles.boardScore}>{entry.score}</Text>
-    </View>
   );
 
   return (
@@ -271,38 +196,30 @@ export default function QuizScreen() {
           </View>
         ) : (
           <>
-            {myRank && <RankCard profile={myRank} />}
+            {myRank ? (
+              <RankCard profile={myRank} />
+            ) : rankLoading ? (
+              <RankCardSkeleton />
+            ) : null}
 
             <View style={styles.card}>
-              <View style={styles.cardHead}>
-                <View style={styles.iconSlot}>
-                  <Play size={17} color={theme.accent} strokeWidth={2} />
-                </View>
-                <Text style={styles.cardTitle}>Solo</Text>
-                <Text style={styles.cardHint}>10 questions · 20s each</Text>
+              <View style={styles.cardHeadSpread}>
+                <Text style={styles.cardTitle}>Solo Run</Text>
+                <Headphones size={20} color={theme.muted} strokeWidth={2} />
               </View>
-              <Text style={styles.fieldLabel}>Guess the</Text>
+              <Text style={styles.cardBody}>{SOLO_BODY[quizType]}</Text>
               <View style={styles.chipRow}>
                 {TYPE_OPTIONS.map((o) =>
-                  chip(quizType === o.key, o.label, o.Icon, () =>
+                  chip(quizType === o.key, o.label, () =>
                     setQuizType(o.key),
                   ),
-                )}
-              </View>
-              <Text style={styles.fieldLabel}>Pool</Text>
-              <View style={styles.chipRow}>
-                {chip(source === 'random', 'Random', Shuffle, () =>
-                  setSource('random'),
-                )}
-                {chip(source === 'library', 'My library', Library, () =>
-                  setSource('library'),
                 )}
               </View>
               <Pressable
                 onPress={() =>
                   router.push({
                     pathname: '/quiz/solo',
-                    params: { quizType, source },
+                    params: { quizType },
                   })
                 }
                 disabled={!canPlay}
@@ -316,18 +233,18 @@ export default function QuizScreen() {
                 ]}
               >
                 <Play size={17} color={theme.onAccent} strokeWidth={2} />
-                <Text style={styles.primaryButtonText}>Start game</Text>
+                <Text style={styles.primaryButtonText}>Start Solo</Text>
               </Pressable>
             </View>
 
             <View style={styles.card}>
-              <View style={styles.cardHead}>
-                <View style={styles.iconSlot}>
-                  <Users size={17} color={theme.accent} strokeWidth={2} />
-                </View>
-                <Text style={styles.cardTitle}>Multiplayer</Text>
-                <Text style={styles.cardHint}>Party or duel</Text>
+              <View style={styles.cardHeadSpread}>
+                <Text style={styles.cardTitle}>Play with Friends</Text>
+                <Users size={20} color={theme.muted} strokeWidth={2} />
               </View>
+              <Text style={styles.cardBody}>
+                Party for 3 to 8 players, or a 1v1 Duel.
+              </Text>
               <View style={styles.mpRow}>
                 <Pressable
                   onPress={() =>
@@ -341,13 +258,12 @@ export default function QuizScreen() {
                   accessibilityLabel="Create a room"
                   accessibilityState={{ disabled: !canPlay }}
                   style={({ pressed }) => [
-                    styles.mpButton,
+                    styles.mpPrimary,
                     !canPlay && styles.buttonDisabled,
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Plus size={16} color={theme.text} strokeWidth={2} />
-                  <Text style={styles.mpButtonText}>Create</Text>
+                  <Text style={styles.mpPrimaryText}>Create Room</Text>
                 </Pressable>
                 <Pressable
                   onPress={() =>
@@ -366,35 +282,8 @@ export default function QuizScreen() {
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Hash size={16} color={theme.text} strokeWidth={2} />
-                  <Text style={styles.mpButtonText}>Join</Text>
+                  <Text style={styles.mpButtonText}>Join with Code</Text>
                 </Pressable>
-                <Pressable
-                  onPress={() =>
-                    router.push({
-                      pathname: '/quiz/lobby',
-                      params: { intent: 'public' },
-                    })
-                  }
-                  disabled={!canPlay}
-                  accessibilityRole="button"
-                  accessibilityLabel="Browse public rooms"
-                  accessibilityState={{ disabled: !canPlay }}
-                  style={({ pressed }) => [
-                    styles.mpButton,
-                    !canPlay && styles.buttonDisabled,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Globe size={16} color={theme.text} strokeWidth={2} />
-                  <Text style={styles.mpButtonText}>Public</Text>
-                </Pressable>
-              </View>
-              <View style={styles.duelHint}>
-                <Swords size={13} color={theme.muted} strokeWidth={2} />
-                <Text style={styles.duelHintText}>
-                  Duels are 1v1 and start as soon as both players are ready.
-                </Text>
               </View>
             </View>
           </>
@@ -453,66 +342,6 @@ export default function QuizScreen() {
           </View>
         </View>
 
-        <View style={styles.card}>
-          <View style={styles.cardHead}>
-            <View style={styles.iconSlot}>
-              <Trophy size={17} color={theme.accent} strokeWidth={2} />
-            </View>
-            <Text style={styles.cardTitle}>Top attempts</Text>
-            <Text style={styles.cardHint}>Solo scores</Text>
-          </View>
-          <View style={styles.chipRow}>
-            <Pressable
-              onPress={() => setBoardType(null)}
-              accessibilityRole="button"
-              accessibilityState={{ selected: boardType === null }}
-              style={({ pressed }) => [
-                styles.chip,
-                boardType === null && styles.chipActive,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.chipText,
-                  boardType === null && styles.chipTextActive,
-                ]}
-              >
-                All
-              </Text>
-            </Pressable>
-            {TYPE_OPTIONS.map((o) =>
-              chip(boardType === o.key, o.label, o.Icon, () =>
-                setBoardType(o.key),
-              ),
-            )}
-          </View>
-          {boardLoading && board === null ? (
-            <ActivityIndicator color={theme.accent} style={styles.boardSpin} />
-          ) : boardError ? (
-            <View style={styles.boardState}>
-              <Text style={styles.errorText}>{boardError}</Text>
-              <Pressable
-                onPress={() => void loadBoard()}
-                accessibilityRole="button"
-                accessibilityLabel="Retry loading the leaderboard"
-                style={styles.retryLink}
-              >
-                <Text style={styles.retryText}>Retry</Text>
-              </Pressable>
-            </View>
-          ) : board && board.length > 0 ? (
-            <View style={styles.boardList}>
-              {board.slice(0, 5).map(boardRow)}
-            </View>
-          ) : (
-            <Text style={styles.emptyText}>
-              {fixtureMode
-                ? 'No leaderboard in demo mode.'
-                : 'No attempts yet — be the first on the board.'}
-            </Text>
-          )}
-        </View>
       </View>
     </ScrollView>
   );
@@ -558,6 +387,12 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       gap: spacing.sm,
     },
+    cardHeadSpread: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: spacing.sm,
+    },
     iconSlot: {
       width: 32,
       height: 32,
@@ -570,20 +405,9 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.heading,
       color: theme.text,
     },
-    cardHint: {
-      ...typeStyles.caption,
-      color: theme.muted,
-      marginLeft: 'auto',
-    },
     cardBody: {
       ...typeStyles.body,
       color: theme.muted,
-    },
-    fieldLabel: {
-      ...typeStyles.caption,
-      color: theme.muted,
-      textTransform: 'uppercase',
-      letterSpacing: 0.6,
     },
     chipRow: {
       flexDirection: 'row',
@@ -597,9 +421,7 @@ const createStyles = (theme: Theme) =>
       minHeight: 38,
       paddingHorizontal: spacing.md,
       borderRadius: radii.pill,
-      backgroundColor: theme.raised,
-      borderWidth: 1,
-      borderColor: theme.border,
+      backgroundColor: theme.accentContainer,
     },
     chipActive: {
       backgroundColor: theme.accent,
@@ -636,31 +458,31 @@ const createStyles = (theme: Theme) =>
       flexDirection: 'row',
       gap: spacing.sm,
     },
+    mpPrimary: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: 48,
+      borderRadius: radii.pill,
+      backgroundColor: theme.accent,
+    },
+    mpPrimaryText: {
+      ...typeStyles.sectionLabel,
+      color: theme.onAccent,
+    },
     mpButton: {
       flex: 1,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: spacing.xs + 2,
-      minHeight: 46,
-      borderRadius: radii.base,
-      backgroundColor: theme.raised,
-      borderWidth: 1,
-      borderColor: theme.border,
+      minHeight: 48,
+      borderRadius: radii.pill,
+      backgroundColor: theme.accentContainer,
     },
     mpButtonText: {
-      fontFamily: fontFamilies.bodyStrong, fontSize: 14,
-      color: theme.text,
-    },
-    duelHint: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.xs + 2,
-    },
-    duelHintText: {
-      ...typeStyles.caption,
-      color: theme.muted,
-      flex: 1,
+      ...typeStyles.sectionLabel,
+      color: theme.onAccentContainer,
     },
     sectionHead: {
       flexDirection: 'row',
@@ -705,49 +527,6 @@ const createStyles = (theme: Theme) =>
     retryText: {
       fontFamily: fontFamilies.bodyStrong, fontSize: 14,
       color: theme.accent,
-    },
-    boardList: {
-      gap: spacing.xs,
-    },
-    boardRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
-      paddingVertical: spacing.xs + 2,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: theme.border,
-    },
-    boardRank: {
-      ...typeStyles.mono,
-      color: theme.muted,
-      width: 20,
-      textAlign: 'center',
-    },
-    boardMain: {
-      flex: 1,
-    },
-    boardName: {
-      fontFamily: fontFamilies.bodyStrong, fontSize: 14,
-      color: theme.text,
-    },
-    boardMeta: {
-      ...typeStyles.caption,
-      color: theme.muted,
-    },
-    streak: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 2,
-    },
-    streakText: {
-      ...typeStyles.caption,
-      color: theme.secondary,
-    },
-    boardScore: {
-      ...typeStyles.mono,
-      color: theme.text,
-      minWidth: 34,
-      textAlign: 'right',
     },
     emptyText: {
       ...typeStyles.bodySmall,

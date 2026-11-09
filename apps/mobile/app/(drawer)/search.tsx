@@ -299,7 +299,7 @@ export default function SearchScreen() {
               style={styles.input}
               value={query}
               onChangeText={setQuery}
-              placeholder="Search themes, anime, artists…"
+              placeholder="Search anime, songs, artists…"
               placeholderTextColor={theme.muted}
               autoFocus
               returnKeyType="search"
@@ -612,7 +612,13 @@ const createStyles = (theme: Theme) =>
     gap: spacing.sm,
   },
   chip: {
-    backgroundColor: theme.accentContainer,
+    // Trending chips are OUTLINED pills in the mock (design
+    // polish pass) — transparent fill, hairline border; the
+    // content stays data-driven from the popular rail (the
+    // mock's fixed story set is illustrative).
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: theme.border,
     borderRadius: radii.pill,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
@@ -620,7 +626,7 @@ const createStyles = (theme: Theme) =>
   chipText: {
     ...typeStyles.bodySmall,
     fontFamily: fontFamilies.bodyStrong,
-    color: theme.onAccentContainer,
+    color: theme.muted,
   },
   entityRow: {
     flexDirection: 'row',

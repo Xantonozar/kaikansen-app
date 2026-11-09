@@ -78,6 +78,16 @@ import { usePlayback } from './usePlayback';
  *   and play) while the queue index still advances.
  * - Race safety: each resolution carries a monotonic token; a
  *   fetch that lands after the session/queue moved on is dropped.
+ *
+ * REPEAT (design polish pass): the player route's repeat control
+ * cycles off → queue → one through `cycleRepeat`. The mode is
+ * honoured where a track ends: 'one' replays the finished track
+ * through the engine's replay path; 'queue' advances like 'off'
+ * but wraps from the last item back to the first (a one-item or
+ * absent queue wraps onto the track itself, replayed); 'off'
+ * keeps the original advance-or-stop behaviour. Manual next()
+ * wraps the same way in 'queue' mode, so the mini player and the
+ * player route agree.
  */
 export interface PlaybackSession {
   slug: string | null;
@@ -139,6 +149,9 @@ export interface PlaybackQueue {
   index: number;
 }
 
+/** Repeat modes the player route's control cycles through. */
+export type RepeatMode = 'off' | 'queue' | 'one';
+
 /** Status of the provider's own detail resolution for a claimed
     track (queue advance, fresh player open). Screens that claim
     WITH a detail never pass through here. */
@@ -198,7 +211,12 @@ interface PlaybackContextValue {
       the session is idle) — for claim sites that think in terms of
       "the list this row belongs to" rather than a mode switch. */
   setQueue: (items: QueueItem[], startIndex: number) => void;
-  /** Advance to the next queue item (no-op at the end). */
+  /** The live repeat mode (player route's repeat control). */
+  repeatMode: RepeatMode;
+  /** Cycle the repeat mode: off → queue → one → off. */
+  cycleRepeat: () => void;
+  /** Advance to the next queue item (no-op at the end, unless
+      repeat 'queue' wraps it back to the first item). */
   next: () => void;
   /** Go back to the previous queue item (no-op at the start). */
   prev: () => void;
@@ -213,6 +231,7 @@ const PlaybackContext = createContext<PlaybackContextValue | null>(null);
 export function PlaybackProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<PlaybackSession>(IDLE_SESSION);
   const [queue, setQueue] = useState<PlaybackQueue | null>(null);
+  const [repeatMode, setRepeatMode] = useState<RepeatMode>('off');
   const [resolution, setResolution] = useState<PlaybackResolution | null>(
     null,
   );
@@ -250,6 +269,31 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   sessionRef.current = session;
   const queueRef = useRef(queue);
   queueRef.current = queue;
+  const repeatModeRef = useRef(repeatMode);
+  repeatModeRef.current = repeatMode;
+
+  const cycleRepeat = useCallback(() => {
+    setRepeatMode((prev) =>
+      prev === 'off' ? 'queue' : prev === 'queue' ? 'one' : 'off',
+    );
+  }, []);
+
+  /** Restart the current track from the top through the engine:
+      replay when it has ended, else seek to 0 and play (the same
+      restart the duplicate-advance path performs). */
+  const replayCurrent = useCallback(() => {
+    const pb = playbackRef.current;
+    try {
+      if (pb.ended) {
+        pb.toggleMain();
+      } else {
+        pb.player.currentTime = 0;
+        pb.player.play();
+      }
+    } catch {
+      // Player already released — nothing to restart.
+    }
+  }, []);
   const playbackRef = useRef(playback);
   playbackRef.current = playback;
 
@@ -391,10 +435,24 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
 
   const next = useCallback(() => {
     const currentQueue = queueRef.current;
-    if (!currentQueue || currentQueue.index >= currentQueue.items.length - 1)
+    if (!currentQueue) {
+      // No queue: repeat 'queue' wraps the queue-of-one onto
+      // the track itself.
+      if (repeatModeRef.current === 'queue') replayCurrent();
       return;
+    }
+    if (currentQueue.index >= currentQueue.items.length - 1) {
+      if (repeatModeRef.current === 'queue') {
+        if (currentQueue.items.length > 1) {
+          goToQueueIndex(0, 1);
+        } else {
+          replayCurrent();
+        }
+      }
+      return;
+    }
     goToQueueIndex(currentQueue.index + 1, 1);
-  }, [goToQueueIndex]);
+  }, [goToQueueIndex, replayCurrent]);
 
   const prev = useCallback(() => {
     const currentQueue = queueRef.current;
@@ -522,17 +580,26 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   }, [claimActive, claimSlug, claimOverride, claimDetail, goToQueueIndex]);
 
   /* Auto-advance: a genuine play-to-end transition (the engine's
-     `ended` flipping false → true) moves the queue on, when there
-     is a next item. Manual next/prev go through the same claim
-     path; the engine's load cycle resets `ended` for the new
-     track, so each track end is exactly one transition. */
+     `ended` flipping false → true) moves the queue on, honouring
+     the repeat mode: 'one' replays the finished track instead of
+     advancing; 'queue' advances through next(), which wraps at
+     the end (and replays a queue-less session onto itself);
+     'off' advances or stops at the end. Manual next/prev go
+     through the same claim path; the engine's load cycle resets
+     `ended` for the new track, so each track end is exactly one
+     transition. */
   const prevEndedRef = useRef(false);
   const ended = playback.ended;
   useEffect(() => {
     const wasEnded = prevEndedRef.current;
     prevEndedRef.current = ended;
-    if (!wasEnded && ended) next();
-  }, [ended, next]);
+    if (wasEnded || !ended) return;
+    if (repeatModeRef.current === 'one') {
+      replayCurrent();
+      return;
+    }
+    next();
+  }, [ended, next, replayCurrent]);
 
   const currentQueueItem = useMemo<QueueItem | null>(() => {
     if (!queue) return null;
@@ -607,6 +674,8 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       hasPrevious: hasPrev,
       startQueue,
       setQueue: setQueueClaim,
+      repeatMode,
+      cycleRepeat,
       next,
       prev,
       previous: prev,
@@ -626,6 +695,8 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       hasPrev,
       startQueue,
       setQueueClaim,
+      repeatMode,
+      cycleRepeat,
       next,
       prev,
       resolution,

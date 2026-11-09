@@ -20,7 +20,7 @@ import {
 import type { UserRankProfile } from '@kaikansen/contracts';
 import { useAuth } from '../../src/auth';
 import { Avatar } from '../../src/components/Avatar';
-import { RankCard } from '../../src/components/RankCard';
+import { RankCard, RankCardSkeleton } from '../../src/components/RankCard';
 import { fetchPlaylists } from '../../src/libraryApi';
 import { fetchMyRank } from '../../src/socialApi';
 import {
@@ -62,15 +62,18 @@ export default function OwnProfileScreen() {
   const signedIn = status === 'signedIn' && user !== null;
 
   const [rank, setRank] = useState<UserRankProfile | null>(null);
+  const [rankLoading, setRankLoading] = useState(false);
   const [playlistCount, setPlaylistCount] = useState<number | null>(null);
 
   const userId = user?.id;
   useEffect(() => {
     if (!signedIn) return;
     let live = true;
+    setRankLoading(true);
     fetchMyRank()
       .then((r) => live && setRank(r))
-      .catch(() => live && setRank(null));
+      .catch(() => live && setRank(null))
+      .finally(() => live && setRankLoading(false));
     fetchPlaylists()
       .then((res) => live && setPlaylistCount(res.playlists.length))
       .catch(() => live && setPlaylistCount(null));
@@ -130,7 +133,7 @@ export default function OwnProfileScreen() {
           accessibilityLabel="Open settings"
           style={styles.backHit}
         >
-          <View style={styles.backTile}>
+          <View style={styles.gearCircle}>
             <SettingsIcon size={20} color={theme.text} strokeWidth={2} />
           </View>
         </Pressable>
@@ -183,7 +186,16 @@ export default function OwnProfileScreen() {
               </Pressable>
             </View>
 
-            {rank && <RankCard profile={rank} />}
+            {/* Loading state (design polish pass): the rank
+                card renders its skeleton while /rank/me is in
+                flight instead of vanishing — same treatment as
+                the Quiz hub. A failed fetch still degrades to
+                no card, never a fabricated rank. */}
+            {rank ? (
+              <RankCard profile={rank} />
+            ) : rankLoading ? (
+              <RankCardSkeleton />
+            ) : null}
 
             <View style={styles.statsCard}>
               {stat('Ratings', String(user.totalRatings))}
@@ -258,11 +270,15 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
     },
-    backTile: {
+    gearCircle: {
+      // The mock's gear sits in a plain WHITE circle (design
+      // polish pass) — surface fill, fully round, hairline edge.
       width: 38,
       height: 38,
-      borderRadius: radii.base,
-      backgroundColor: theme.raised,
+      borderRadius: radii.pill,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
       alignItems: 'center',
       justifyContent: 'center',
     },
@@ -395,9 +411,13 @@ const createStyles = (theme: Theme) =>
       marginTop: spacing.xl,
     },
     logoutLabel: {
+      // Muted mauve in the mock (design polish pass) — the
+      // strong danger red was the audit's delta here. (The
+      // Settings screen's Log Out row keeps its dusty-red card
+      // treatment, as its own mock draws.)
       ...typeStyles.body,
       fontFamily: fontFamilies.bodyStrong,
-      color: theme.danger,
+      color: theme.secondary,
     },
     note: {
       ...typeStyles.caption,

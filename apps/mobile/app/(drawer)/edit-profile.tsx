@@ -235,7 +235,10 @@ export default function EditProfileScreen() {
                   maxLength={240}
                   accessibilityLabel="Bio"
                 />
-                <Text style={styles.counter}>{editBio.length}/200</Text>
+                {/* No character counter (design polish pass):
+                    the mock draws none, and the old one lied
+                    anyway — it counted to /200 against a real
+                    240 limit. */}
               </View>
 
               <View style={[styles.card, styles.publicCard]}>
@@ -420,20 +423,17 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
     },
     readonlyText: {
+      // Normal text colour (design polish pass): the username
+      // is a value, not a hint — the box's page-background fill
+      // is what marks it read-only.
       ...typeStyles.body,
-      color: theme.muted,
+      color: theme.text,
     },
     hint: {
       ...typeStyles.caption,
       color: theme.muted,
       lineHeight: 16,
       marginTop: spacing.xs + 2,
-    },
-    counter: {
-      ...typeStyles.caption,
-      color: theme.muted,
-      textAlign: 'right',
-      marginTop: spacing.xs,
     },
     publicCard: {
       flexDirection: 'row',
