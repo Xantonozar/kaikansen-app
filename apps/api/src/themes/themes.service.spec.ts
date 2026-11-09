@@ -278,7 +278,8 @@ describe('ThemesService.getSeasonThemes', () => {
   it('serves the season in the contract shape, querying the web seasonal filter', async () => {
     const doc = makeDoc({ slug: 'spring-theme', animeSeason: 'SPRING' });
     const find = jest.fn(() => queryOf([doc]));
-    const service = serviceWith({ find });
+    const countDocuments = jest.fn(() => queryOf(1));
+    const service = serviceWith({ find, countDocuments });
 
     const res = await service.getSeasonThemes('spring', '2026');
 
@@ -292,6 +293,12 @@ describe('ThemesService.getSeasonThemes', () => {
     expect(res.themes[0]).not.toHaveProperty('entries');
     // One partial page: no more pages behind it.
     expect(res.hasMore).toBe(false);
+    // The season's real size, counted under the same filter.
+    expect(countDocuments).toHaveBeenCalledWith({
+      animeSeason: 'SPRING',
+      animeSeasonYear: 2026,
+    });
+    expect(res.total).toBe(1);
   });
 
   it('sorts sequence asc then avgRating desc, pages by 20, and reports hasMore on a full page', async () => {
@@ -313,7 +320,8 @@ describe('ThemesService.getSeasonThemes', () => {
     chain.lean = () => chain;
     chain.exec = async () => docs;
     const find = jest.fn(() => chain);
-    const service = serviceWith({ find });
+    const countDocuments = jest.fn(() => queryOf(45));
+    const service = serviceWith({ find, countDocuments });
 
     const res = await service.getSeasonThemes('FALL', '2026', undefined, '2');
 
@@ -321,11 +329,14 @@ describe('ThemesService.getSeasonThemes', () => {
     expect(skips).toEqual([20]);
     expect(res.page).toBe(2);
     expect(res.hasMore).toBe(true);
+    // Total spans all pages, not just the one served.
+    expect(res.total).toBe(45);
   });
 
   it('applies the OP/ED type filter only for a real type (the web’s rule)', async () => {
     const find = jest.fn(() => queryOf([]));
-    const service = serviceWith({ find });
+    const countDocuments = jest.fn(() => queryOf(0));
+    const service = serviceWith({ find, countDocuments });
 
     await service.getSeasonThemes('SUMMER', '2026', 'ed');
     expect(find).toHaveBeenCalledWith({

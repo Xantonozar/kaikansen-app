@@ -13,6 +13,9 @@ import { ThemeCache } from './../src/themes/theme-cache.schema';
 import { Comment } from './../src/comments/comment.schema';
 import { CommentsController } from './../src/comments/comments.controller';
 import { CommentsService } from './../src/comments/comments.service';
+import { Follow } from './../src/social/follow.schema';
+import { Notification } from './../src/social/notification.schema';
+import { FollowerActivityService } from './../src/social/follower-activity.service';
 
 /**
  * Suite 1 — the real AppModule with NO MONGODB_URI: the app boots,
@@ -139,8 +142,53 @@ function makeFakeModels() {
     },
   ];
   const comments: Record<string, unknown>[] = [];
+  // Bob follows Alice — the seed Suite 3's notification fan-out
+  // resolves recipients from (Suite 2's service is built without a
+  // notifier, so the rows sit unused there).
+  const follows: Record<string, unknown>[] = [
+    { followerId: USER_2, followeeId: USER_1 },
+  ];
+  const notifications: Record<string, unknown>[] = [];
   let seq = 0;
   let clock = Date.parse('2026-11-07T00:00:00.000Z');
+
+  const rowMatches = (
+    doc: Record<string, unknown>,
+    filter: Record<string, unknown>,
+  ) =>
+    Object.entries(filter).every(([key, condition]) => {
+      if (
+        condition !== null &&
+        typeof condition === 'object' &&
+        '$in' in (condition as Record<string, unknown>)
+      ) {
+        const list = (condition as { $in: unknown[] }).$in;
+        return list.some((v) => String(v) === String(doc[key]));
+      }
+      return String(doc[key]) === String(condition);
+    });
+
+  const followModel = {
+    docs: follows,
+    find: (filter: Record<string, unknown>) =>
+      chain(follows.filter((f) => rowMatches(f, filter))),
+  };
+
+  const notificationModel = {
+    docs: notifications,
+    find: (filter: Record<string, unknown>) =>
+      chain(notifications.filter((n) => rowMatches(n, filter))),
+    insertMany: jest.fn(async (docs: Record<string, unknown>[]) => {
+      const inserted = docs.map((d) => ({
+        _id: `notif-${++seq}`,
+        createdAt: new Date((clock += 1000)),
+        updatedAt: new Date(clock),
+        ...d,
+      }));
+      notifications.push(...inserted);
+      return inserted;
+    }),
+  };
 
   const commentModel = {
     docs: comments,
@@ -175,7 +223,13 @@ function makeFakeModels() {
     },
   };
 
-  return { commentModel, themeModel, userModel };
+  return {
+    commentModel,
+    themeModel,
+    userModel,
+    followModel,
+    notificationModel,
+  };
 }
 
 const E2E_SECRET = ['e2e', 'comments', 'access', 'secret'].join('-');
@@ -335,5 +389,149 @@ describe('Comments flow with mocked models (e2e)', () => {
 
     // Nothing was written by the rejected posts.
     expect(models.commentModel.docs).toHaveLength(2);
+  });
+});
+
+/**
+ * Suite 3 — the follower-activity fan-out over real HTTP: the same
+ * controller/service composition as Suite 2, PLUS the
+ * FollowerActivityService wired to fake Follow/Notification
+ * models. Bob (USER_2) follows Alice (USER_1) in the seed, so
+ * Alice's comments must land in Bob's notifications — and nobody
+ * else's.
+ */
+describe('Comments follower notifications with mocked models (e2e)', () => {
+  let app: INestApplication;
+  const models = makeFakeModels();
+
+  const tokenFor = (userId: string, tokenType = 'access') =>
+    jwt.sign(
+      {
+        userId,
+        username: userId,
+        email: `${userId}@example.com`,
+        tokenType,
+      },
+      E2E_SECRET,
+      { expiresIn: '15m' },
+    );
+  const asUser1 = () => ({ Authorization: `Bearer ${tokenFor(USER_1)}` });
+  const asUser2 = () => ({ Authorization: `Bearer ${tokenFor(USER_2)}` });
+
+  const commentRows = () =>
+    models.notificationModel.docs.filter((n) => n.type === 'comment');
+
+  beforeAll(async () => {
+    process.env.JWT_SECRET = E2E_SECRET;
+    process.env.JWT_REFRESH_SECRET = E2E_REFRESH_SECRET;
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [ConfigModule.forRoot({ isGlobal: true })],
+      controllers: [CommentsController],
+      providers: [
+        CommentsService,
+        AuthService,
+        AccessTokenGuard,
+        AnilistClient,
+        FollowerActivityService,
+        {
+          provide: getModelToken(Comment.name),
+          useValue: models.commentModel,
+        },
+        {
+          provide: getModelToken(ThemeCache.name),
+          useValue: models.themeModel,
+        },
+        { provide: getModelToken(User.name), useValue: models.userModel },
+        {
+          provide: getModelToken(Follow.name),
+          useValue: models.followModel,
+        },
+        {
+          provide: getModelToken(Notification.name),
+          useValue: models.notificationModel,
+        },
+      ],
+    }).compile();
+    app = moduleFixture.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    delete process.env.JWT_SECRET;
+    delete process.env.JWT_REFRESH_SECRET;
+  });
+
+  it('notifies the commenter’s followers, with the theme title in meta', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/themes/anime_a-op1-1/comments')
+      .set(asUser1())
+      .send({ content: 'Great OP!' })
+      .expect(200);
+    expect(res.body.content).toBe('Great OP!');
+
+    expect(commentRows()).toHaveLength(1);
+    expect(commentRows()[0]).toMatchObject({
+      recipientId: USER_2,
+      actorId: USER_1,
+      type: 'comment',
+      entityId: THEME_A,
+      read: false,
+    });
+    expect(commentRows()[0].entityMeta).toEqual({
+      themeTitle: 'Song A',
+    });
+    // The actor is never their own recipient.
+    expect(
+      models.notificationModel.docs.some(
+        (n) => n.recipientId === USER_1,
+      ),
+    ).toBe(false);
+  });
+
+  it('does not stack a second unread row for another comment on the same theme', async () => {
+    await request(app.getHttpServer())
+      .post('/themes/anime_a-op1-1/comments')
+      .set(asUser1())
+      .send({ content: 'Second thought' })
+      .expect(200);
+    expect(commentRows()).toHaveLength(1);
+  });
+
+  it('writes nothing when the commenter has no followers', async () => {
+    const before = models.notificationModel.docs.length;
+    await request(app.getHttpServer())
+      .post('/themes/anime_a-op1-1/comments')
+      .set(asUser2())
+      .send({ content: 'Bob here' })
+      .expect(200);
+    expect(models.notificationModel.docs).toHaveLength(before);
+  });
+
+  it('still posts the comment when the notification insert blows up', async () => {
+    // Read the outstanding row first, so the fan-out is NOT
+    // dedupe-skipped and actually reaches the failing insert.
+    commentRows()[0].read = true;
+    const original = models.notificationModel.insertMany;
+    models.notificationModel.insertMany = jest.fn(
+      async (_docs: Record<string, unknown>[]) => {
+        throw new Error('db down');
+      },
+    );
+    try {
+      const res = await request(app.getHttpServer())
+        .post('/themes/anime_a-op1-1/comments')
+        .set(asUser1())
+        .send({ content: 'Posted anyway' })
+        .expect(200);
+      expect(res.body.content).toBe('Posted anyway');
+    } finally {
+      models.notificationModel.insertMany = original;
+    }
+    // The failed insert wrote nothing (and the comment stands).
+    expect(commentRows()).toHaveLength(1);
+    expect(models.commentModel.docs.map((c) => c.content)).toContain(
+      'Posted anyway',
+    );
   });
 });

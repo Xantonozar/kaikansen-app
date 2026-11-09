@@ -38,6 +38,7 @@ import {
   radii,
   spacing,
   typeStyles,
+  withOpacity,
   type Theme,
 } from '../../src/theme';
 import { useTheme } from '../../src/theme-context';
@@ -83,6 +84,14 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * When the session carries a queue, the mock's Up Next card
  * appears under the controls. The provider resolves the claimed
  * track's detail itself; this route no longer fetches.
+ *
+ * The resolution chip names the source ACTUALLY playing — the
+ * engine's active URL matched back to the entry's video sources
+ * (the fallback chain can land on a lower encode; a local
+ * download or a fallback URL has no knowable resolution, so the
+ * chip is then omitted, never guessed). The hero is 16:9 in both
+ * modes (the mock's single canvas); watch keeps contentFit
+ * "contain" so no frame of a non-16:9 video is ever cropped.
  *
  * A usable local download renders the player even when the
  * catalogue fetch failed (fully offline open from the Library):
@@ -215,7 +224,7 @@ export default function PlayerScreen() {
       accessibilityLabel="Close player"
       style={({ pressed }) => [styles.glassDisc, pressed && styles.pressed]}
     >
-      <X size={20} color="#FFFFFF" strokeWidth={2} />
+      <X size={19} color="#FFFFFF" strokeWidth={2} />
     </Pressable>
   );
 
@@ -263,10 +272,17 @@ export default function PlayerScreen() {
       : detail.animeTitle
     : null;
   /* The media chips: the theme's type + sequence, and (watch
-     only) the top resolution the current entry streams at. */
-  const maxResolution =
-    mode === 'watch' && entry && entry.videoSources.length > 0
-      ? Math.max(...entry.videoSources.map((v) => v.resolution))
+     only) the resolution of the source ACTUALLY playing — the
+     engine's active URL matched back to the entry's video
+     sources in the chain's own order. A fallback URL (entry /
+     theme videoUrl) or a local download matches no source, so
+     the chip is omitted rather than naming the highest
+     resolution the entry merely offers. */
+  const activeResolution =
+    mode === 'watch' && entry && !localUsable && playback.url
+      ? ([...entry.videoSources]
+          .sort((a, b) => b.resolution - a.resolution)
+          .find((v) => v.url === playback.url)?.resolution ?? null)
       : null;
   const listenAvailable = detail
     ? entryHasAudio(detail, entry)
@@ -307,7 +323,11 @@ export default function PlayerScreen() {
           ) : (
             <>
               {cover ? (
-                <Image source={{ uri: cover }} style={styles.artwork} />
+                <Image
+                  source={{ uri: cover }}
+                  style={styles.artwork}
+                  resizeMode="cover"
+                />
               ) : (
                 <View style={[styles.artwork, styles.artworkPlaceholder]} />
               )}
@@ -353,16 +373,16 @@ export default function PlayerScreen() {
           </View>
           {detail && (
             <View style={styles.mediaChips}>
-              <View style={styles.mediaChip}>
-                <Text style={styles.mediaChipText}>
+              <View style={styles.opChip}>
+                <Text style={styles.opChipText}>
                   {detail.type} {detail.sequence}
                 </Text>
               </View>
-              {maxResolution !== null && (
-                <View style={styles.mediaChip}>
+              {activeResolution !== null && (
+                <View style={styles.resChip}>
                   <View style={styles.resDot} />
-                  <Text style={styles.mediaChipText}>
-                    {maxResolution}p
+                  <Text style={styles.resChipText}>
+                    {activeResolution}p
                   </Text>
                 </View>
               )}
@@ -370,10 +390,14 @@ export default function PlayerScreen() {
           )}
         </View>
 
+        {/* The mock's centre stack: title block, mode toggle and
+            controls spread evenly through the space between the
+            hero and the bottom-pinned Up Next card. */}
+        <View style={styles.middle}>
         {/* Centred title block (the mock): song, artist, and the
             "ANIME · SEASON YEAR" pill. */}
         <View style={styles.titleBlock}>
-          <Text style={styles.songTitle} numberOfLines={2}>
+          <Text style={styles.songTitle} numberOfLines={1}>
             {titleSong}
           </Text>
           {titleArtist ? (
@@ -417,7 +441,7 @@ export default function PlayerScreen() {
                 ]}
               >
                 <Icon
-                  size={15}
+                  size={13}
                   color={
                     disabled
                       ? theme.muted
@@ -507,9 +531,9 @@ export default function PlayerScreen() {
                   ]}
                 >
                   <RepeatIcon
-                    size={21}
+                    size={22}
                     color={
-                      repeatMode === 'off' ? theme.muted : theme.accent
+                      repeatMode === 'off' ? theme.secondary : theme.accent
                     }
                     strokeWidth={2}
                   />
@@ -527,7 +551,7 @@ export default function PlayerScreen() {
                     pressed && styles.pressed,
                   ]}
                 >
-                  <SkipBack size={25} color={theme.text} strokeWidth={2} />
+                  <SkipBack size={28} color={theme.secondary} strokeWidth={2} />
                 </Pressable>
                 <Pressable
                   onPress={playback.toggleMain}
@@ -541,11 +565,11 @@ export default function PlayerScreen() {
                   ]}
                 >
                   {ended ? (
-                    <RotateCcw size={26} color={theme.onAccent} strokeWidth={2} />
+                    <RotateCcw size={32} color={theme.onAccent} strokeWidth={2} />
                   ) : isPlaying ? (
-                    <Pause size={26} color={theme.onAccent} strokeWidth={2} />
+                    <Pause size={32} color={theme.onAccent} strokeWidth={2} />
                   ) : (
-                    <Play size={26} color={theme.onAccent} strokeWidth={2} />
+                    <Play size={32} color={theme.onAccent} strokeWidth={2} />
                   )}
                 </Pressable>
                 <Pressable
@@ -562,8 +586,8 @@ export default function PlayerScreen() {
                   ]}
                 >
                   <SkipForward
-                    size={25}
-                    color={theme.text}
+                    size={28}
+                    color={theme.secondary}
                     strokeWidth={2}
                   />
                 </Pressable>
@@ -602,8 +626,8 @@ export default function PlayerScreen() {
                     <Check size={22} color={theme.success} strokeWidth={2} />
                   ) : (
                     <Download
-                      size={21}
-                      color={detail ? theme.text : theme.muted}
+                      size={22}
+                      color={detail ? theme.secondary : theme.muted}
                       strokeWidth={2}
                     />
                   )}
@@ -614,6 +638,7 @@ export default function PlayerScreen() {
               )}
             </>
           )}
+        </View>
         </View>
 
         {/* Up Next (the mock's card): eyebrow + one line
@@ -672,6 +697,7 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.body,
       color: theme.muted,
       textAlign: 'center',
+      paddingHorizontal: spacing.screenEdge,
     },
     mediaWrap: {
       position: 'relative',
@@ -684,7 +710,8 @@ const createStyles = (theme: Theme) =>
     },
     artwork: {
       width: '100%',
-      aspectRatio: 3 / 2,
+      // The mock's hero is one 16:9 canvas in both modes.
+      aspectRatio: 16 / 9,
       backgroundColor: theme.surface,
     },
     artworkPlaceholder: {
@@ -708,48 +735,71 @@ const createStyles = (theme: Theme) =>
       right: 0,
       flexDirection: 'row',
       justifyContent: 'space-between',
-      paddingHorizontal: spacing.screenEdge,
+      // The mock's overlay inset (HTML left/right-3.5).
+      paddingHorizontal: 14,
     },
     glassDisc: {
-      width: 40,
-      height: 40,
-      borderRadius: 20,
+      // The mock's glass discs are 36pt (HTML w-9 h-9).
+      width: 36,
+      height: 36,
+      borderRadius: 18,
       backgroundColor: 'rgba(16, 7, 12, 0.45)',
       alignItems: 'center',
       justifyContent: 'center',
     },
     mediaChips: {
       position: 'absolute',
-      left: spacing.screenEdge,
+      left: 14,
       bottom: spacing.md,
       flexDirection: 'row',
+      alignItems: 'center',
       gap: spacing.sm,
     },
-    mediaChip: {
+    // Type chip (HTML): dark glass, small square corners.
+    opChip: {
+      backgroundColor: 'rgba(16, 7, 12, 0.5)',
+      borderRadius: 6,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: spacing.xs,
+    },
+    opChipText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 12,
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+      color: '#FFFFFF',
+    },
+    // Resolution chip (HTML): translucent WHITE glass pill with
+    // a green dot — a different treatment from the type chip.
+    resChip: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.xs + 2,
-      backgroundColor: 'rgba(16, 7, 12, 0.55)',
+      backgroundColor: 'rgba(255, 255, 255, 0.2)',
       borderRadius: radii.pill,
-      paddingHorizontal: spacing.sm + 2,
-      paddingVertical: spacing.xs + 1,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 2,
     },
-    mediaChipText: {
-      ...typeStyles.caption,
-      fontFamily: fontFamilies.bodyStrong,
-      letterSpacing: 0.4,
-      color: '#FFFFFF',
+    resChipText: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 10,
+      color: 'rgba(255, 255, 255, 0.9)',
     },
     resDot: {
       width: 6,
       height: 6,
       borderRadius: 3,
-      backgroundColor: '#FFFFFF',
+      backgroundColor: theme.success,
+    },
+    // Centre stack (HTML: flex-1, justify-evenly) between the
+    // hero and the bottom-pinned Up Next card.
+    middle: {
+      flex: 1,
+      justifyContent: 'space-evenly',
     },
     titleBlock: {
       alignItems: 'center',
-      paddingHorizontal: spacing.screenEdge,
-      paddingTop: spacing.xl,
+      paddingHorizontal: spacing.xxl,
       gap: spacing.xs,
     },
     songTitle: {
@@ -759,42 +809,49 @@ const createStyles = (theme: Theme) =>
       textAlign: 'center',
     },
     artistLine: {
-      ...typeStyles.body,
-      color: theme.secondary,
+      // HTML: 14pt medium in the muted tone.
+      fontFamily: fontFamilies.caption,
+      fontSize: 14,
+      color: theme.muted,
       textAlign: 'center',
     },
     seasonPill: {
-      backgroundColor: theme.accentContainer,
+      // HTML: mauve text on a half-strength lavender wash.
+      backgroundColor: withOpacity(theme.accentContainer, 0.5),
       borderRadius: radii.pill,
-      paddingHorizontal: spacing.md,
-      paddingVertical: spacing.xs + 1,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: 2,
       marginTop: spacing.xs,
       maxWidth: '100%',
     },
     seasonPillText: {
-      ...typeStyles.caption,
       fontFamily: fontFamilies.bodyStrong,
+      fontSize: 12,
       letterSpacing: 0.6,
       textTransform: 'uppercase',
-      color: theme.onAccentContainer,
+      color: theme.secondary,
     },
     modeToggle: {
+      // The mock's toggle is a CENTRED, content-width pill
+      // (HTML: inline-flex, p-1, hairline ring), not a
+      // full-width bar.
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 3,
-      padding: 3,
+      alignSelf: 'center',
+      gap: spacing.xs,
+      padding: spacing.xs,
       borderRadius: radii.pill,
+      borderWidth: 1,
+      borderColor: theme.border,
       backgroundColor: theme.accentContainer,
-      marginHorizontal: spacing.screenEdge,
-      marginTop: spacing.lg,
     },
     modeSegment: {
-      flex: 1,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
       gap: spacing.xs + 2,
-      paddingVertical: spacing.sm,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.xs + 2,
       borderRadius: radii.pill,
     },
     modeSegmentActive: {
@@ -814,46 +871,59 @@ const createStyles = (theme: Theme) =>
       color: theme.onAccent,
     },
     controls: {
-      paddingHorizontal: spacing.screenEdge,
-      paddingTop: spacing.lg,
       gap: spacing.md,
     },
     seekHit: {
+      // HTML: the seek section is inset 28pt from the canvas.
+      paddingHorizontal: 28,
       paddingVertical: spacing.sm,
     },
     seekTrack: {
-      height: 4,
-      borderRadius: 2,
+      height: 6,
+      borderRadius: 3,
       backgroundColor: theme.raised,
       justifyContent: 'center',
     },
     seekFill: {
-      height: 4,
-      borderRadius: 2,
+      height: 6,
+      borderRadius: 3,
       backgroundColor: theme.accent,
     },
     seekKnob: {
+      // HTML: 16pt knob with a 2pt white ring and a soft shadow.
       position: 'absolute',
-      width: 12,
-      height: 12,
-      borderRadius: 6,
-      marginLeft: -6,
+      width: 16,
+      height: 16,
+      borderRadius: 8,
+      marginLeft: -8,
       backgroundColor: theme.accent,
+      borderWidth: 2,
+      borderColor: '#FFFFFF',
+      shadowColor: '#000000',
+      shadowOffset: { width: 0, height: 1 },
+      shadowOpacity: 0.2,
+      shadowRadius: 2,
+      elevation: 2,
     },
     timeRow: {
       flexDirection: 'row',
       justifyContent: 'space-between',
+      paddingHorizontal: 28,
     },
     timeText: {
-      ...typeStyles.mono,
+      // HTML: 12pt medium, body face (not mono).
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
       color: theme.muted,
     },
     transport: {
+      // HTML: the five controls spread across the row (px-8,
+      // justify-between) instead of clustering at the centre.
       flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'center',
-      gap: spacing.md,
-      marginTop: spacing.xs,
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.xxxl,
+      marginTop: spacing.sm,
     },
     transportButton: {
       width: 44,
@@ -871,6 +941,12 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.accent,
       alignItems: 'center',
       justifyContent: 'center',
+      // HTML: a soft mauve-tinted drop shadow under the disc.
+      shadowColor: theme.accent,
+      shadowOffset: { width: 0, height: 6 },
+      shadowOpacity: 0.25,
+      shadowRadius: 12,
+      elevation: 6,
     },
     dlPercent: {
       ...typeStyles.caption,
@@ -881,6 +957,7 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.caption,
       color: theme.accent,
       textAlign: 'center',
+      paddingHorizontal: spacing.screenEdge,
     },
     retryButton: {
       flexDirection: 'row',
@@ -898,35 +975,40 @@ const createStyles = (theme: Theme) =>
       color: theme.onAccent,
     },
     upNext: {
+      // HTML: bottom-pinned footer card — mx-5, mb-6, p-3.5,
+      // rounded-2xl, hairline border.
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
       backgroundColor: theme.surface,
-      borderRadius: radii.card,
-      padding: spacing.md,
-      marginHorizontal: spacing.screenEdge,
-      marginTop: spacing.xl,
+      borderRadius: radii.md,
+      borderWidth: 1,
+      borderColor: theme.border,
+      padding: spacing.md + 2,
+      marginHorizontal: spacing.xl,
+      marginBottom: spacing.xxl,
     },
     upNextText: {
       flex: 1,
       gap: 2,
     },
     upNextEyebrow: {
-      ...typeStyles.caption,
       fontFamily: fontFamilies.bodyStrong,
+      fontSize: 11,
       letterSpacing: 0.6,
       textTransform: 'uppercase',
       color: theme.secondary,
     },
     upNextLine: {
-      ...typeStyles.body,
-      fontFamily: fontFamilies.bodyStrong,
+      // HTML: 14pt medium.
+      fontFamily: fontFamilies.caption,
+      fontSize: 14,
       color: theme.text,
     },
     upNextDisc: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
+      width: 32,
+      height: 32,
+      borderRadius: 16,
       backgroundColor: theme.accentContainer,
       alignItems: 'center',
       justifyContent: 'center',

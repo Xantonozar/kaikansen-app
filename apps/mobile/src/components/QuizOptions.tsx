@@ -40,16 +40,20 @@ export function QuizOptions({
   correctValue?: string | null;
   pickedValue?: string | null;
   /** 'large' = the Quiz Question v2 anatomy (solo question screen):
-   *  taller card-radius rows, a tinted letter disc, a chevron. */
-  variant?: 'standard' | 'large';
+   *  taller card-radius rows, a tinted letter disc, a chevron.
+   *  'room' = the Quiz Room in-game anatomy: 16pt-radius rows, a
+   *  32pt letter disc, and — for the locked-in pick — a filled
+   *  check disc at the right in place of the chevron. */
+  variant?: 'standard' | 'large' | 'room';
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const revealed = correctValue !== null;
   const large = variant === 'large';
+  const room = variant === 'room';
 
   return (
-    <View style={styles.list}>
+    <View style={[styles.list, room && styles.listRoom]}>
       {options.map((option, i) => {
         const isCorrect = revealed && option === correctValue;
         const isWrongPick =
@@ -67,7 +71,9 @@ export function QuizOptions({
             style={({ pressed }) => [
               styles.row,
               large && styles.rowLarge,
+              room && styles.rowRoom,
               isPicked && !revealed && styles.rowSelected,
+              room && isPicked && !revealed && styles.rowRoomSelected,
               isCorrect && styles.rowCorrect,
               isWrongPick && styles.rowWrong,
               dim && styles.rowDim,
@@ -78,6 +84,7 @@ export function QuizOptions({
               style={[
                 styles.letter,
                 large && styles.letterLarge,
+                room && styles.letterRoom,
                 isPicked && !isCorrect && styles.letterActive,
                 isCorrect && styles.letterCorrect,
                 isWrongPick && styles.letterWrong,
@@ -92,6 +99,7 @@ export function QuizOptions({
                   style={[
                     styles.letterText,
                     large && styles.letterTextLarge,
+                    room && styles.letterTextRoom,
                     isPicked && styles.letterTextActive,
                   ]}
                 >
@@ -99,11 +107,23 @@ export function QuizOptions({
                 </Text>
               )}
             </View>
-            <Text style={[styles.label, large && styles.labelLarge, isCorrect && styles.labelCorrect]} numberOfLines={2}>
+            <Text style={[styles.label, large && styles.labelLarge, room && styles.labelRoom, room && isPicked && styles.labelRoomPicked, isCorrect && styles.labelCorrect]} numberOfLines={2}>
               {option}
             </Text>
             {large && !revealed && (
               <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
+            )}
+            {room && !revealed && isPicked && (
+              <View style={styles.checkDisc}>
+                <Check size={16} color={theme.onAccent} strokeWidth={2.5} />
+              </View>
+            )}
+            {room && !revealed && !isPicked && (
+              <ChevronRight
+                size={18}
+                color={withOpacity(theme.secondary, 0.4)}
+                strokeWidth={2}
+              />
             )}
           </Pressable>
         );
@@ -116,6 +136,9 @@ const createStyles = (theme: Theme) =>
   StyleSheet.create({
     list: {
       gap: spacing.sm,
+    },
+    listRoom: {
+      gap: 10,
     },
     row: {
       flexDirection: 'row',
@@ -138,6 +161,45 @@ const createStyles = (theme: Theme) =>
       borderRadius: radii.card,
       paddingHorizontal: spacing.lg,
       gap: spacing.md,
+    },
+    rowRoom: {
+      minHeight: 56,
+      borderRadius: radii.md,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.md,
+      gap: spacing.md,
+    },
+    rowRoomSelected: {
+      // The HTML's border-2 on the picked card (the base row is 1)
+      // and its pale tint fill (the accentContainer token stands
+      // in for the HTML's tint, overriding rowSelected's wash).
+      borderWidth: 2,
+      backgroundColor: theme.accentContainer,
+    },
+    letterRoom: {
+      width: 32,
+      height: 32,
+      borderRadius: 16,
+    },
+    letterTextRoom: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 13,
+      color: theme.accent,
+    },
+    labelRoom: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 17,
+    },
+    labelRoomPicked: {
+      fontFamily: fontFamilies.bodyStrong,
+    },
+    checkDisc: {
+      width: 24,
+      height: 24,
+      borderRadius: 12,
+      backgroundColor: theme.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     rowCorrect: {
       // Lavender Dusk Answered state: sage tint + sage border, dark label.

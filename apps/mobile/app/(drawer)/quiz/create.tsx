@@ -28,7 +28,6 @@ import {
   fontFamilies,
   radii,
   spacing,
-  typeStyles,
   type Theme,
 } from '../../../src/theme';
 import { useTheme } from '../../../src/theme-context';
@@ -49,14 +48,42 @@ const POOL_OPTIONS: { key: QuizPoolMode; label: string }[] = [
 const ROUND_OPTIONS = [5, 10, 15];
 const TIME_OPTIONS = [10, 20, 30];
 
+/* Party size bounds — the lobby card's own copy ("Host a Party of
+   3 to 8 players, or a 1v1 Duel"). The web/API impose no party
+   floor (the web hard-codes 6 and never offers the choice), so the
+   design's stated range is the rule here. Duels are 1v1: the
+   server forces maxPlayers 2 for duel creates regardless of the
+   payload (quiz-rooms.service, mirroring the web create route). */
+const PARTY_MIN_PLAYERS = 3;
+const PARTY_MAX_PLAYERS = 8;
+const DUEL_PLAYERS = 2;
+
 /**
  * Create Room (Slice 5, design §6.23) — the designed single form
  * for multiplayer room creation, reached from the lobby's Create
  * card. One card per setting group, exactly as designed: Room type
  * (Party/Duel segmented), Guess the… chips, Question pool chips,
- * Rounds chips, a combined card with the Max players stepper (party
- * only — duels are 1v1) and Time per round chips, and the Visibility
- * segmented (Public / Invite only).
+ * Rounds chips, a combined card with the Max players stepper and
+ * Time per round chips, and the Visibility segmented (Public /
+ * Invite only). The Create Room CTA sits in a footer under the
+ * scroll area, as the mock draws it.
+ *
+ * Create Room fidelity pass (2026-11-10, measured from the Stitch
+ * HTML; the earlier build had the skeleton but generic shapes):
+ * cards at the mock's 16pt radius with 16pt padding and 14pt
+ * semibold labels; chips and segments at 12pt radius with 14pt
+ * medium labels, unselected text in the deep-mauve accent (the
+ * HTML's colour), the segmented track and the stepper pill in the
+ * page-pale tone; Rounds chips flexed equal-width; Time per round
+ * as the mock's small right-aligned chips on the label's own row;
+ * the CTA at 16pt radius with a 16pt label. The header is the
+ * lobby family's bare arrow + bold title at this screen's own
+ * measurements (40pt hit area, 24pt title).
+ *
+ * Duel handling: the stepper row stays on screen (the mock's card
+ * always has both rows) pinned to 2 with both steppers disabled —
+ * the real 1v1 constraint — and the create payload keeps omitting
+ * maxPlayers for duels, since the server forces 2 either way.
  *
  * Wiring: creation goes through the existing `room:create` gateway
  * event with the form's settings. The create contract has no time-
@@ -64,7 +91,11 @@ const TIME_OPTIONS = [10, 20, 30];
  * rule) — so the chosen limit is applied immediately after creation
  * with `room:update-settings`, the web's own settings mechanism,
  * while the room is still waiting and this user is its host. The
- * default selection is the design's 20s.
+ * default selection is the design's 20s. Visibility maps to the
+ * create payload's `matchmaking`: 'public' rooms are listed by
+ * `room:list-public` in the lobby; 'invite' rooms are unlisted and
+ * joinable by code only (there is deliberately no in-app invite
+ * system — "Invite only" names the listing, nothing more).
  *
  * Socket ownership: this screen is only ever pushed over the lobby,
  * which owns the shared connection; it therefore never disconnects
@@ -109,6 +140,10 @@ export default function CreateRoomScreen() {
   }, []);
 
   const connected = connStatus === 'connected';
+  const isDuel = roomType === 'duel';
+  const shownPlayers = isDuel ? DUEL_PLAYERS : maxPlayers;
+  const minusDisabled = isDuel || maxPlayers <= PARTY_MIN_PLAYERS;
+  const plusDisabled = isDuel || maxPlayers >= PARTY_MAX_PLAYERS;
 
   const goBack = () => {
     if (router.canGoBack()) router.back();
@@ -161,6 +196,7 @@ export default function CreateRoomScreen() {
     active: boolean,
     label: string,
     onPress: () => void,
+    grow = false,
   ) => (
     <Pressable
       key={label}
@@ -169,6 +205,7 @@ export default function CreateRoomScreen() {
       accessibilityState={{ selected: active }}
       style={({ pressed }) => [
         styles.chip,
+        grow && styles.chipGrow,
         active && styles.chipActive,
         pressed && styles.pressed,
       ]}
@@ -216,14 +253,13 @@ export default function CreateRoomScreen() {
           accessibilityLabel="Back to multiplayer lobby"
           style={styles.backHit}
         >
-          <View style={styles.backTile}>
-            <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-          </View>
+          <ChevronLeft size={24} color={theme.text} strokeWidth={2} />
         </Pressable>
         <Text style={styles.headerTitle}>Create Room</Text>
       </View>
 
       <ScrollView
+        style={styles.scroll}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -283,60 +319,81 @@ export default function CreateRoomScreen() {
                 <Text style={styles.cardLabel}>Rounds</Text>
                 <View style={styles.chipRow}>
                   {ROUND_OPTIONS.map((n) =>
-                    chip(roundCount === n, `${n}`, () => setRoundCount(n)),
+                    chip(roundCount === n, `${n}`, () => setRoundCount(n), true),
                   )}
                 </View>
               </View>
 
-              <View style={styles.card}>
-                {roomType === 'party' && (
-                  <>
-                    <View style={styles.stepperRow}>
-                      <Text style={styles.cardLabel}>Max players</Text>
-                      <View style={styles.stepper}>
-                        <Pressable
-                          onPress={() =>
-                            setMaxPlayers((n) => Math.max(2, n - 1))
-                          }
-                          disabled={maxPlayers <= 2}
-                          accessibilityRole="button"
-                          accessibilityLabel="Fewer players"
-                          accessibilityState={{ disabled: maxPlayers <= 2 }}
-                          style={({ pressed }) => [
-                            styles.stepperButton,
-                            maxPlayers <= 2 && styles.buttonDisabled,
-                            pressed && styles.pressed,
+              <View style={[styles.card, styles.settingsCard]}>
+                <View style={styles.stepperRow}>
+                  <Text style={styles.cardLabel}>Max players</Text>
+                  <View style={styles.stepper}>
+                    <Pressable
+                      onPress={() =>
+                        setMaxPlayers((n) =>
+                          Math.max(PARTY_MIN_PLAYERS, n - 1),
+                        )
+                      }
+                      disabled={minusDisabled}
+                      accessibilityRole="button"
+                      accessibilityLabel="Fewer players"
+                      accessibilityState={{ disabled: minusDisabled }}
+                      style={({ pressed }) => [
+                        styles.stepperButton,
+                        minusDisabled && styles.buttonDisabled,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Minus size={18} color={theme.accent} strokeWidth={2.5} />
+                    </Pressable>
+                    <Text style={styles.stepperValue}>{shownPlayers}</Text>
+                    <Pressable
+                      onPress={() =>
+                        setMaxPlayers((n) =>
+                          Math.min(PARTY_MAX_PLAYERS, n + 1),
+                        )
+                      }
+                      disabled={plusDisabled}
+                      accessibilityRole="button"
+                      accessibilityLabel="More players"
+                      accessibilityState={{ disabled: plusDisabled }}
+                      style={({ pressed }) => [
+                        styles.stepperButton,
+                        plusDisabled && styles.buttonDisabled,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Plus size={18} color={theme.accent} strokeWidth={2.5} />
+                    </Pressable>
+                  </View>
+                </View>
+                <View style={styles.divider} />
+                <View style={styles.stepperRow}>
+                  <Text style={styles.cardLabel}>Time per round</Text>
+                  <View style={styles.timeRow}>
+                    {TIME_OPTIONS.map((n) => (
+                      <Pressable
+                        key={n}
+                        onPress={() => setTimeLimit(n)}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: timeLimit === n }}
+                        style={({ pressed }) => [
+                          styles.timeChip,
+                          timeLimit === n && styles.chipActive,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.timeChipText,
+                            timeLimit === n && styles.chipTextActive,
                           ]}
                         >
-                          <Minus size={16} color={theme.text} strokeWidth={2} />
-                        </Pressable>
-                        <Text style={styles.stepperValue}>{maxPlayers}</Text>
-                        <Pressable
-                          onPress={() =>
-                            setMaxPlayers((n) => Math.min(8, n + 1))
-                          }
-                          disabled={maxPlayers >= 8}
-                          accessibilityRole="button"
-                          accessibilityLabel="More players"
-                          accessibilityState={{ disabled: maxPlayers >= 8 }}
-                          style={({ pressed }) => [
-                            styles.stepperButton,
-                            maxPlayers >= 8 && styles.buttonDisabled,
-                            pressed && styles.pressed,
-                          ]}
-                        >
-                          <Plus size={16} color={theme.text} strokeWidth={2} />
-                        </Pressable>
-                      </View>
-                    </View>
-                    <View style={styles.divider} />
-                  </>
-                )}
-                <Text style={styles.cardLabel}>Time per round</Text>
-                <View style={styles.chipRow}>
-                  {TIME_OPTIONS.map((n) =>
-                    chip(timeLimit === n, `${n}s`, () => setTimeLimit(n)),
-                  )}
+                          {`${n}s`}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
                 </View>
               </View>
 
@@ -351,30 +408,34 @@ export default function CreateRoomScreen() {
                   )}
                 </View>
               </View>
-
-              <Pressable
-                onPress={() => void onCreate()}
-                disabled={!connected || busy}
-                accessibilityRole="button"
-                accessibilityLabel="Create room"
-                accessibilityState={{ disabled: !connected || busy, busy }}
-                style={({ pressed }) => [
-                  styles.primaryButton,
-                  (!connected || busy) && styles.buttonDisabled,
-                  pressed && styles.pressed,
-                ]}
-              >
-                {busy ? (
-                  <ActivityIndicator color={theme.onAccent} size="small" />
-                ) : null}
-                <Text style={styles.primaryButtonText}>
-                  {busy ? 'Creating…' : 'Create Room'}
-                </Text>
-              </Pressable>
             </>
           )}
         </View>
       </ScrollView>
+
+      {!fatal && (
+        <View style={styles.footer}>
+          <Pressable
+            onPress={() => void onCreate()}
+            disabled={!connected || busy}
+            accessibilityRole="button"
+            accessibilityLabel="Create room"
+            accessibilityState={{ disabled: !connected || busy, busy }}
+            style={({ pressed }) => [
+              styles.primaryButton,
+              (!connected || busy) && styles.buttonDisabled,
+              pressed && styles.pressed,
+            ]}
+          >
+            {busy ? (
+              <ActivityIndicator color={theme.onAccent} size="small" />
+            ) : null}
+            <Text style={styles.primaryButtonText}>
+              {busy ? 'Creating…' : 'Create Room'}
+            </Text>
+          </Pressable>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -385,10 +446,14 @@ const createStyles = (theme: Theme) =>
       flex: 1,
       backgroundColor: theme.background,
     },
+    /* Header — this screen's HTML: a 40pt bare-arrow hit area
+       nudged 8pt left, 12pt gap, 24pt display title; no back tile,
+       no subtitle (the lobby header family at this mock's own
+       measurements). */
     header: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.sm,
+      gap: spacing.md,
       paddingHorizontal: spacing.screenEdge,
       paddingTop: spacing.sm,
       paddingBottom: spacing.md,
@@ -397,53 +462,60 @@ const createStyles = (theme: Theme) =>
       alignSelf: 'center',
     },
     backHit: {
-      width: 44,
-      height: 44,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    backTile: {
-      width: 38,
-      height: 38,
-      borderRadius: radii.base,
-      backgroundColor: theme.surface,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.border,
+      width: 40,
+      height: 40,
+      marginLeft: -8,
       alignItems: 'center',
       justifyContent: 'center',
     },
     headerTitle: {
-      ...typeStyles.heading,
-      fontSize: 20,
+      fontFamily: fontFamilies.display,
+      fontSize: 24,
       color: theme.text,
+    },
+    scroll: {
+      flex: 1,
     },
     content: {
       paddingHorizontal: spacing.screenEdge,
-      paddingBottom: spacing.xxxl,
+      paddingBottom: spacing.xxl,
     },
     column: {
       width: '100%',
       maxWidth: FORM_MAX_WIDTH,
       alignSelf: 'center',
+      // The mock stacks its cards 12 apart (gap-3).
       gap: spacing.md,
     },
+    /* Cards — this screen's HTML rounds them at 16 (rounded-2xl)
+       with 16pt padding; the generic radii.card (24) belongs to
+       other screens' mocks, not this one. The label sits 12 above
+       its control (the HTML's mb-3), via the card gap. */
     card: {
       backgroundColor: theme.surface,
-      borderRadius: radii.card,
+      borderRadius: radii.md,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.border,
       padding: spacing.lg,
       gap: spacing.md,
     },
+    settingsCard: {
+      // Rows + the divider's own margins carry this card's rhythm.
+      gap: 0,
+    },
     cardLabel: {
-      ...typeStyles.bodySmall,
       fontFamily: fontFamilies.bodyStrong,
+      fontSize: 14,
       color: theme.text,
     },
+    /* Segmented control — pale page-tone track (the HTML's
+       #FAF5F8, the background family), 4pt padding, 8pt between
+       segments, 12pt radii; the unselected label is the deep
+       mauve, not ink. */
     segmentRow: {
       flexDirection: 'row',
-      gap: spacing.xs,
-      backgroundColor: theme.accentContainer,
+      gap: spacing.sm,
+      backgroundColor: theme.background,
       borderRadius: radii.base,
       padding: spacing.xs,
     },
@@ -451,20 +523,23 @@ const createStyles = (theme: Theme) =>
       flex: 1,
       alignItems: 'center',
       justifyContent: 'center',
-      minHeight: 40,
-      borderRadius: radii.sm + 2,
+      paddingVertical: spacing.sm,
+      borderRadius: radii.base,
     },
     segmentActive: {
       backgroundColor: theme.accent,
     },
     segmentText: {
-      ...typeStyles.bodySmall,
-      fontFamily: fontFamilies.bodyStrong,
-      color: theme.text,
+      fontFamily: fontFamilies.caption,
+      fontSize: 14,
+      color: theme.accent,
     },
     segmentTextActive: {
       color: theme.onAccent,
     },
+    /* Chips — the HTML's 12pt radius (rounded-xl, not pills),
+       16×8 padding, 14pt medium labels in the deep mauve on the
+       lavender chip tone. */
     chipRow: {
       flexDirection: 'row',
       flexWrap: 'wrap',
@@ -473,18 +548,21 @@ const createStyles = (theme: Theme) =>
     chip: {
       alignItems: 'center',
       justifyContent: 'center',
-      minHeight: 38,
       paddingHorizontal: spacing.lg,
-      borderRadius: radii.pill,
+      paddingVertical: spacing.sm,
+      borderRadius: radii.base,
       backgroundColor: theme.accentContainer,
+    },
+    chipGrow: {
+      flex: 1,
     },
     chipActive: {
       backgroundColor: theme.accent,
     },
     chipText: {
-      ...typeStyles.bodySmall,
-      fontFamily: fontFamilies.bodyStrong,
-      color: theme.text,
+      fontFamily: fontFamilies.caption,
+      fontSize: 14,
+      color: theme.accent,
     },
     chipTextActive: {
       color: theme.onAccent,
@@ -494,29 +572,67 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'space-between',
     },
+    /* Stepper — the mock's pale pill: page-tone container with a
+       hairline, 32pt lavender discs for −/+, a 16pt bold value on
+       a 32pt minimum measure. */
     stepper: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
+      gap: spacing.xs,
+      backgroundColor: theme.background,
+      borderRadius: radii.pill,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      padding: spacing.xs,
     },
     stepperButton: {
-      width: 36,
-      height: 36,
+      width: 32,
+      height: 32,
       borderRadius: radii.pill,
       backgroundColor: theme.accentContainer,
       alignItems: 'center',
       justifyContent: 'center',
     },
     stepperValue: {
-      ...typeStyles.body,
       fontFamily: fontFamilies.bodyStrong,
+      fontSize: 16,
       color: theme.text,
-      minWidth: 20,
+      minWidth: 32,
       textAlign: 'center',
     },
     divider: {
       height: StyleSheet.hairlineWidth,
-      backgroundColor: theme.border,
+      backgroundColor: theme.accentContainer,
+      marginVertical: spacing.md,
+    },
+    /* Time per round — the mock's small chips on the label's row:
+       12×6 padding, 8pt radius, 12pt semibold labels, 6pt apart. */
+    timeRow: {
+      flexDirection: 'row',
+      gap: 6,
+    },
+    timeChip: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: spacing.md,
+      paddingVertical: 6,
+      borderRadius: radii.sm,
+      backgroundColor: theme.accentContainer,
+    },
+    timeChipText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 12,
+      color: theme.accent,
+    },
+    /* Footer CTA — the mock pins it under the form: 16pt radius,
+       14pt vertical padding, 16pt semibold label. */
+    footer: {
+      paddingHorizontal: spacing.screenEdge,
+      paddingTop: spacing.lg,
+      paddingBottom: spacing.sm,
+      width: '100%',
+      maxWidth: FORM_MAX_WIDTH,
+      alignSelf: 'center',
     },
     primaryButton: {
       flexDirection: 'row',
@@ -524,24 +640,27 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
       gap: spacing.sm,
       backgroundColor: theme.accent,
-      borderRadius: radii.base,
-      minHeight: 52,
+      borderRadius: radii.md,
+      paddingVertical: 14,
       paddingHorizontal: spacing.lg,
     },
     primaryButtonText: {
-      ...typeStyles.sectionLabel,
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 16,
       color: theme.onAccent,
     },
     buttonDisabled: {
       opacity: 0.45,
     },
     hint: {
-      ...typeStyles.caption,
+      fontFamily: fontFamilies.caption,
+      fontSize: 11,
       color: theme.muted,
       textAlign: 'center',
     },
     errorText: {
-      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.bodySmall,
+      fontSize: 12,
       color: theme.secondary,
       textAlign: 'center',
     },

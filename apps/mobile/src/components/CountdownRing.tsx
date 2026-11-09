@@ -19,6 +19,7 @@ export function CountdownRing({
   size = 46,
   glyph,
   caption,
+  variant = 'standard',
 }: {
   deadlineMs: number;
   totalSeconds: number;
@@ -30,6 +31,10 @@ export function CountdownRing({
   /** Large rings only: a caption under the seconds number
    *  (the solo question screen's "seconds"). */
   caption?: string;
+  /** 'room' = the Quiz Room in-game design's centrepiece cut:
+   *  a 30pt accent number over a 10pt uppercase seconds caption.
+   *  The default keeps the solo question screen's styling. */
+  variant?: 'standard' | 'room';
 }) {
   const theme = useTheme();
   const styles = createStyles(theme);
@@ -101,12 +106,22 @@ export function CountdownRing({
           style={[
             styles.label,
             large && styles.labelLarge,
+            variant === 'room' && styles.labelRoom,
             urgent && { color: theme.secondary },
           ]}
         >
           {seconds}
         </Text>
-        {caption ? <Text style={styles.caption}>{caption}</Text> : null}
+        {caption ? (
+          <Text
+            style={[
+              styles.caption,
+              variant === 'room' && styles.captionRoom,
+            ]}
+          >
+            {caption}
+          </Text>
+        ) : null}
       </View>
     </View>
   );
@@ -133,9 +148,22 @@ const createStyles = (theme: Theme) =>
       fontSize: 40,
       lineHeight: 44,
     },
+    labelRoom: {
+      fontSize: 30,
+      lineHeight: 34,
+      color: theme.accent,
+    },
     caption: {
       fontFamily: fontFamilies.body,
       fontSize: 13,
       color: theme.muted,
+    },
+    captionRoom: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 10,
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+      color: theme.secondary,
+      marginTop: 2,
     },
   });

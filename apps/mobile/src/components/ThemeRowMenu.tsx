@@ -87,10 +87,20 @@ export function ThemeRowMenu({
   item,
   onPlay,
   onOpen,
+  triggerIconSize,
+  triggerColor,
 }: {
   item: ThemeSummary;
   onPlay?: () => void;
   onOpen?: () => void;
+  /**
+   * Trigger glyph overrides for row variants whose mock measures
+   * the ⋮ differently (Season browse: 20pt in the mauve secondary,
+   * per season.html). Defaults keep the shared 15pt muted cut every
+   * other row ships.
+   */
+  triggerIconSize?: number;
+  triggerColor?: string;
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -260,7 +270,11 @@ export function ThemeRowMenu({
         accessibilityLabel={`More actions for ${item.songTitle}`}
         style={({ pressed }) => [styles.tile, pressed && styles.pressed]}
       >
-        <MoreVertical size={15} color={theme.muted} strokeWidth={2} />
+        <MoreVertical
+          size={triggerIconSize ?? 15}
+          color={triggerColor ?? theme.muted}
+          strokeWidth={2}
+        />
       </Pressable>
 
       <Modal

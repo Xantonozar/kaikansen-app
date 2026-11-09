@@ -10,11 +10,11 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ChevronLeft } from 'lucide-react-native';
+import { ArrowLeft } from 'lucide-react-native';
 import type { ArtistDetailResponse } from '@kaikansen/contracts';
 import { fetchArtistDetail } from '../../../src/api';
 import { useFavorites } from '../../../src/favoritesStore';
-import { Avatar } from '../../../src/components/Avatar';
+import { pickDefaultArtist } from '../../../src/defaultArtists';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import {
   queueItemsFromSummaries,
@@ -32,9 +32,18 @@ import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
 /**
- * Artist detail (DESIGN.md §6.9) — artist header (image, name, theme
- * count) and every theme carrying the artist, most-played first.
- * Data: GET /artists/:slug (the web's artist page read, ported).
+ * Artist detail (DESIGN.md §6.9) — rebuilt to the Artist Detail
+ * mock (artist-detail.html): a lone white back disc, a white
+ * header card (centred 80pt artist image, name, theme-count
+ * subline), then "Themes by <name>" / POPULAR and the artist's
+ * themes as mock-cut rows. Data: GET /artists/:slug (the web's
+ * artist page read, ported).
+ *
+ * Image fallback (owner order 2026-11-10): a real catalogue image
+ * wins; when imageUrl is null, an .svg (undrawable in RN), or the
+ * remote load fails, the hero shows the artist's deterministic
+ * bundled chibi musician (src/defaultArtists.ts, FNV-1a of the
+ * slug % 20) instead of the initial-letter disc the mock draws.
  */
 export default function ArtistDetailScreen() {
   const theme = useTheme();
@@ -47,11 +56,13 @@ export default function ArtistDetailScreen() {
     undefined,
   );
   const [error, setError] = useState<string | null>(null);
+  const [imageError, setImageError] = useState(false);
 
   useEffect(() => {
     let live = true;
     setData(undefined);
     setError(null);
+    setImageError(false);
     if (!slug) {
       setData(null);
       return;
@@ -105,11 +116,10 @@ export default function ArtistDetailScreen() {
           hitSlop={6}
           accessibilityRole="button"
           accessibilityLabel="Back"
-          style={styles.backTile}
+          style={styles.backDisc}
         >
-          <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
+          <ArrowLeft size={20} color={theme.accent} strokeWidth={2} />
         </Pressable>
-        <Text style={styles.headerTitle}>Artist</Text>
       </View>
 
       {error ? (
@@ -135,13 +145,21 @@ export default function ArtistDetailScreen() {
         >
           <View style={styles.column}>
             <View style={styles.hero}>
-              {data.artist.imageUrl ? (
+              {data.artist.imageUrl &&
+              !data.artist.imageUrl.toLowerCase().includes('.svg') &&
+              !imageError ? (
                 <Image
                   source={{ uri: data.artist.imageUrl }}
                   style={styles.artistImage}
+                  onError={() => setImageError(true)}
+                  accessibilityLabel={`${data.artist.name}'s image`}
                 />
               ) : (
-                <Avatar url={null} name={data.artist.name} size={72} disableDefaultAvatar />
+                <Image
+                  source={pickDefaultArtist(data.artist.slug)}
+                  style={styles.artistImage}
+                  accessibilityLabel={`${data.artist.name}'s image`}
+                />
               )}
               <Text style={styles.name}>{data.artist.name}</Text>
               {/* The design's subline is plain text ("24 themes ·
@@ -166,6 +184,7 @@ export default function ArtistDetailScreen() {
               <ThemeRow
                 key={item.slug}
                 item={item}
+                artist
                 metaText={item.animeTitle}
                 onPress={() => openTheme(item.slug)}
                 onPlay={() => playTheme(item.slug, themes)}
@@ -193,23 +212,24 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.background,
     },
     header: {
+      // artist-detail.html: a lone back disc, py-1 with mb-2.
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
       paddingHorizontal: spacing.screenEdge,
-      paddingVertical: spacing.sm,
+      paddingVertical: spacing.xs,
+      marginBottom: spacing.sm,
     },
-    backTile: {
-      width: 38,
-      height: 38,
+    backDisc: {
+      // artist-detail.html: w-9 h-9 (36) white disc, hairline
+      // border, arrow in the deep mauve.
+      width: 36,
+      height: 36,
       borderRadius: radii.pill,
       backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
       alignItems: 'center',
       justifyContent: 'center',
-    },
-    headerTitle: {
-      ...typeStyles.heading,
-      color: theme.text,
     },
     content: {
       paddingHorizontal: spacing.screenEdge,
@@ -221,48 +241,67 @@ const createStyles = (theme: Theme) =>
       alignSelf: 'center',
     },
     hero: {
+      // artist-detail.html: the header is a white card —
+      // rounded-3xl (24), p-6 (24), hairline border, centred.
       alignItems: 'center',
-      gap: spacing.xs,
-      paddingTop: spacing.md,
-      paddingBottom: spacing.sm,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.card,
+      padding: 24,
     },
     artistImage: {
-      width: 72,
-      height: 72,
+      // artist-detail.html: w-20 h-20 (80) circle.
+      width: 80,
+      height: 80,
       borderRadius: radii.pill,
       backgroundColor: theme.surface,
     },
     name: {
-      ...typeStyles.display,
-      fontSize: 24,
+      // artist-detail.html: headline-md (22/30), bold, mt-3 (12).
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 22,
+      lineHeight: 30,
+      letterSpacing: -0.3,
       color: theme.text,
-      marginTop: spacing.sm,
+      marginTop: spacing.md,
       textAlign: 'center',
     },
     subline: {
-      ...typeStyles.bodySmall,
-      color: theme.muted,
+      // artist-detail.html: label-md (13/18) medium in the mauve
+      // (#8E5B7B = theme.secondary), mt-1 (4).
+      fontFamily: fontFamilies.caption,
+      fontSize: 13,
+      lineHeight: 18,
+      color: theme.secondary,
       textAlign: 'center',
       marginTop: spacing.xs,
     },
     headingRow: {
+      // artist-detail.html: px-1 (4), mt-6 (24), mb-3 (12).
       flexDirection: 'row',
       alignItems: 'baseline',
       justifyContent: 'space-between',
-      marginTop: spacing.xl,
+      paddingHorizontal: spacing.xs,
+      marginTop: 24,
       marginBottom: spacing.md,
     },
     sectionHeading: {
-      ...typeStyles.heading,
-      fontFamily: 'Inter_600SemiBold',
+      // artist-detail.html: title-sm (17/24) bold, tracking-tight.
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 17,
+      lineHeight: 24,
+      letterSpacing: -0.2,
       color: theme.text,
       flexShrink: 1,
     },
     popularCaption: {
-      ...typeStyles.caption,
+      // artist-detail.html: label-sm (11) semibold, letterspaced,
+      // in the mauve (#8E5B7B = theme.secondary).
       fontFamily: fontFamilies.bodyStrong,
-      letterSpacing: 1.2,
-      color: theme.muted,
+      fontSize: 11,
+      letterSpacing: 0.5,
+      color: theme.secondary,
     },
     center: {
       flex: 1,

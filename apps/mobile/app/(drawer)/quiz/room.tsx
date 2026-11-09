@@ -18,16 +18,20 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
+  ArrowRight,
+  AudioWaveform,
   Check,
   ChevronLeft,
   Crown,
   Hourglass,
   LogOut,
+  Music,
   Play,
   Share2,
-  Swords,
   Trophy,
-  Users,
+  Volume2,
+  VolumeX,
+  X,
 } from 'lucide-react-native';
 import type {
   PlayerAnsweredEvent,
@@ -54,8 +58,12 @@ import {
   subscribeQuizSocketStatus,
   type QuizSocketStatus,
 } from '../../../src/quizSocket';
+import { Avatar } from '../../../src/components/Avatar';
 import { CountdownRing } from '../../../src/components/CountdownRing';
-import { QuizMedia } from '../../../src/components/QuizMedia';
+import {
+  QuizAudioOnly,
+  type QuizAudioState,
+} from '../../../src/components/QuizMedia';
 import { quizAudioCandidate } from '../../../src/playback';
 import { QuizOptions } from '../../../src/components/QuizOptions';
 import {
@@ -79,6 +87,23 @@ const POOL_LABEL: Record<QuizPoolMode, string> = {
   watched: 'Watched pool',
   common: 'Common pool',
 };
+/** Waiting-lobby summary chips use the design's title case
+ * ("Guess the Anime"); GUESS_LABEL above keeps the in-game
+ * sentence case the other phases already ship. */
+const CHIP_GUESS_LABEL: Record<RoomGuessType, string> = {
+  anime: 'Guess the Anime',
+  song: 'Guess the Song',
+  artist: 'Guess the Artist',
+};
+
+/** The question prompt per guess type — the solo question
+ * screen's QUESTION_PROMPT wording, mapped onto the room's
+ * guess-type vocabulary (solo's 'title' is the room's 'song'). */
+const QUESTION_PROMPT: Record<RoomGuessType, string> = {
+  anime: 'Which anime is this theme from?',
+  song: 'What is the name of this song?',
+  artist: 'Who performs this theme?',
+};
 
 /**
  * Room screen (Slice M4) — lobby, game and results for one
@@ -86,16 +111,30 @@ const POOL_LABEL: Record<QuizPoolMode, string> = {
  * `room:subscribe` as the resync primitive (mount, reconnect, and
  * any event that doesn't carry full state). The phases:
  *
- * - waiting: code + Invite (share sheet), the settings chip
- *   summary, player list with rank sublines and HOST/Ready pills,
- *   the host's settings editor (room:update-settings), Ready
- *   toggle, host Start (duels auto-start on both-ready — server
- *   behaviour, the round-started broadcast just arrives);
- * - playing: the players strip (answered badges + waiting line),
- *   the round's media + options with a countdown ring derived
- *   from the server's startedAt (the server owns the round
- *   timer), lock-in on answer, who's-answered from
- *   room:player-answered, and the Live standings card;
+ * - waiting: the Quiz Room Lobby design — ✕/Leave header, the
+ *   centred code card with Invite (share sheet), the settings
+ *   chip summary, player cards with rank sublines and
+ *   HOST/Ready/Not-ready pills, and the footer whose single
+ *   button is the guest's Ready toggle or, once the host has
+ *   readied (the server requires the host ready too), the
+ *   host's Start (duels auto-start on both-ready — server
+ *   behaviour, the round-started broadcast just arrives).
+ *   Room settings are chosen on the Create Room screen; the
+ *   Slice 6 in-lobby settings editor no longer ships here
+ *   (room:update-settings itself is untouched server-side);
+ * - playing: the Quiz Room in-game design — ✕ / Room-code /
+ *   Round top row, the players strip card (answered badges +
+ *   waiting caption), the big countdown ring derived from the
+ *   server's startedAt (the server owns the round timer) over
+ *   the hidden audio (QuizAudioOnly — audio-only per the
+ *   owner's ruling; no media card), the per-type question, the
+ *   answer cards with lock-in on answer, and the Live
+ *   standings card (top 3 + the viewer's own row when they sit
+ *   outside it). The design's hint line under the question
+ *   ("Opening Theme 1 • Released 1995") is NOT drawn: the
+ *   round-started payload carries no theme type, sequence or
+ *   year, and nothing else in the round state identifies the
+ *   theme — inventing it is not an option;
  * - reveal: room:round-ended — correct answer, everyone's results,
  *   running scoreboard; the host (or anyone in a hostless public
  *   room) advances with room:next;
@@ -134,6 +173,17 @@ export default function QuizRoomScreen() {
   const [fatal, setFatal] = useState<string | null>(null);
   const [closedNote, setClosedNote] = useState<string | null>(null);
   const [mediaMissing, setMediaMissing] = useState(false);
+  /** Playback state of the round's hidden audio (QuizAudioOnly
+   * reports it) — drives the question phase's ring glyph and
+   * "Playing…" pill text, the solo screen's pattern. */
+  const [roomAudio, setRoomAudio] = useState<QuizAudioState>({
+    phase: 'buffering',
+    muted: false,
+    toggleMute: () => undefined,
+  });
+  const handleRoomAudioState = useCallback((state: QuizAudioState) => {
+    setRoomAudio(state);
+  }, []);
   /**
    * Waiting-roster rank standings for the design's "Chunin ·
    * 1,270 RP" player sublines (Slice 6) — GET /rank/players,
@@ -602,39 +652,52 @@ export default function QuizRoomScreen() {
     );
   };
 
-  const settingsChip = (
-    active: boolean,
-    label: string,
-    onPress: () => void,
-  ) => (
-    <Pressable
-      key={label}
-      onPress={onPress}
-      disabled={busy === 'settings'}
-      accessibilityRole="button"
-      accessibilityState={{ selected: active, disabled: busy === 'settings' }}
-      style={({ pressed }) => [
-        styles.chip,
-        active && styles.chipActive,
-        pressed && styles.pressed,
-      ]}
-    >
-      <Text style={[styles.chipText, active && styles.chipTextActive]}>
-        {label}
-      </Text>
-    </Pressable>
-  );
-
-  const updateSetting = (patch: Record<string, unknown>) => {
-    void runAction(
-      'settings',
-      'room:update-settings',
-      { roomId, settings: patch },
-      (ack) => {
-        if (ack.settings) {
-          setRoom((r) => (r ? { ...r, settings: ack.settings! } : r));
-        }
-      },
+  /**
+   * Waiting-lobby player card (Quiz Room design): the shared
+   * Avatar at the mock's 40px, username, the rank subline from
+   * the GET /rank/players standings (absent until they land —
+   * never invented), and the HOST / Ready / Not-ready pill.
+   * Separate from playerRow above, which the reveal scoreboard
+   * still uses unchanged.
+   */
+  const waitingPlayerRow = (player: QuizRoomPlayer) => {
+    const host = room?.hostId === player.userId;
+    const standing = playerRanks[player.userId];
+    return (
+      <View key={player.userId} style={styles.waitPlayerCard}>
+        <Avatar
+          url={player.avatar}
+          name={player.username}
+          size={40}
+          seed={player.userId}
+        />
+        <View style={styles.playerMain}>
+          <Text style={styles.waitPlayerName} numberOfLines={1}>
+            {player.username}
+          </Text>
+          {standing ? (
+            <Text style={styles.waitPlayerSub}>
+              {standing.tier.charAt(0).toUpperCase() +
+                standing.tier.slice(1)}{' '}
+              · {standing.rp.toLocaleString()} RP
+            </Text>
+          ) : null}
+        </View>
+        {host ? (
+          <View style={styles.waitHostPill}>
+            <Text style={styles.waitHostPillText}>HOST</Text>
+          </View>
+        ) : player.ready ? (
+          <View style={styles.waitReadyPill}>
+            <Check size={15} color={theme.success} strokeWidth={2.5} />
+            <Text style={styles.waitReadyPillText}>Ready</Text>
+          </View>
+        ) : (
+          <View style={styles.waitNotReadyPill}>
+            <Text style={styles.waitNotReadyPillText}>Not ready</Text>
+          </View>
+        )}
+      </View>
     );
   };
 
@@ -729,10 +792,140 @@ export default function QuizRoomScreen() {
 
   const myRank = myId ? ranks[myId] : undefined;
 
+  /**
+   * Waiting-lobby header (Quiz Room design): plain ✕ at the
+   * left, centred "Room", and a "Leave" text action at the
+   * right. Both controls run the existing explicit leave —
+   * identical semantics, the design simply draws both. The
+   * shared header above still serves every other phase and
+   * the loading/fatal/closed states.
+   */
+  const waitingHeader = (
+    <View style={styles.waitHeader}>
+      <View style={styles.waitHeaderSide}>
+        <Pressable
+          onPress={leaveExplicitly}
+          accessibilityRole="button"
+          accessibilityLabel="Leave room"
+          style={({ pressed }) => [
+            styles.waitCloseHit,
+            pressed && styles.pressed,
+          ]}
+        >
+          <X size={22} color={theme.accent} strokeWidth={2} />
+        </Pressable>
+      </View>
+      <Text style={styles.waitHeaderTitle}>Room</Text>
+      <View style={[styles.waitHeaderSide, styles.waitHeaderSideEnd]}>
+        <Pressable
+          onPress={leaveExplicitly}
+          accessibilityRole="button"
+          accessibilityLabel="Leave room"
+          style={({ pressed }) => [
+            styles.waitLeaveHit,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Text style={styles.waitLeaveText}>Leave</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+
+  /**
+   * In-game top row (Quiz Room in-game design): a plain ✕ in a
+   * white disc — the leave control, running the existing
+   * explicit leave — the centred room pill (its dot follows
+   * the real connection state), and the round pill. The shared
+   * header still serves the reveal/ended phases and the
+   * loading/fatal/closed states.
+   */
+  const playingHeader = (
+    <View style={styles.playHeader}>
+      <Pressable
+        onPress={leaveExplicitly}
+        accessibilityRole="button"
+        accessibilityLabel="Leave room"
+        style={({ pressed }) => [
+          styles.playCloseDisc,
+          pressed && styles.pressed,
+        ]}
+      >
+        <X size={18} color={theme.accent} strokeWidth={2} />
+      </Pressable>
+      <View style={styles.playRoomPill}>
+        <View
+          style={[
+            styles.playRoomDot,
+            connStatus !== 'connected' && styles.playRoomDotOff,
+          ]}
+        />
+        <Text style={styles.playRoomText}>Room {room.roomCode}</Text>
+      </View>
+      <View style={styles.playRoundPill}>
+        <Music size={14} color={theme.secondary} strokeWidth={2} />
+        <Text style={styles.playRoundText}>
+          Round {liveRound?.round ?? room.currentRound}/
+          {room.settings.roundCount}
+        </Text>
+      </View>
+    </View>
+  );
+
+  // The standings card shows the mock's top 3; a viewer ranked
+  // below that keeps their own row appended (highlighted), so
+  // nobody loses sight of their own score mid-game.
+  const topStandings = standings.slice(0, 3);
+  const myStandingIndex = standings.findIndex((p) => p.userId === myId);
+  const myStandingRow =
+    myStandingIndex >= 3 ? standings[myStandingIndex] : null;
+
+  // The strip caption names whoever has not locked in yet.
+  const pendingPlayers = room.players.filter(
+    (p) => !answeredUsers.has(p.userId),
+  );
+
+  // The Playing pill reports the hidden audio's real phase;
+  // its playing text follows the room's guess type (the solo
+  // screen's sentence pattern).
+  const playingPillText = mediaMissing
+    ? 'Rejoined mid-round — no media'
+    : roomAudio.phase === 'failed'
+      ? 'This theme could not be played'
+      : roomAudio.phase === 'empty'
+        ? 'No playable media for this theme'
+        : roomAudio.phase === 'buffering'
+          ? 'Loading the theme…'
+          : `Playing... ${GUESS_LABEL[room.settings.guessType].toLowerCase()}!`;
+
+  // Players-header state line (Quiz Room design), derived from
+  // the real roster: not full / full but not all ready / full
+  // and everyone ready.
+  const playersStateLine =
+    room.players.length < room.settings.maxPlayers
+      ? 'Waiting for more players…'
+      : room.players.every((p) => p.ready)
+        ? "Everyone's ready!"
+        : 'Room full — waiting on Ready';
+
+  // Footer primary action (waiting phase). The design draws ONE
+  // full-width button: the host's "Start Game". Server parity
+  // requires the host to be ready before start (startGame checks
+  // every player, host included), so an unreadied host's button
+  // is their Ready toggle and it becomes Start once they ready;
+  // a guest's button is their Ready toggle throughout.
+  const showStart = isHost && (me?.ready ?? false);
+  const footerBusyLabel =
+    busy === 'start' ? 'Starting…' : busy === 'ready' ? 'Working…' : null;
+
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.column}>
-        {header}
+        {phase === 'waiting'
+          ? waitingHeader
+          : phase === 'playing'
+            ? playingHeader
+            : header}
         {connStatus !== 'connected' && (
           <View style={styles.connBanner}>
             <Text style={styles.connBannerText}>
@@ -751,329 +944,325 @@ export default function QuizRoomScreen() {
           {actionError && <Text style={styles.errorText}>{actionError}</Text>}
 
           {phase === 'waiting' && (
-            <>
-              <View style={styles.card}>
-                <View style={styles.codeRow}>
-                  <View>
-                    <Text style={styles.fieldLabel}>Room code</Text>
-                    <Text style={styles.codeText}>{room.roomCode}</Text>
-                  </View>
-                  <Pressable
-                    onPress={onInvite}
-                    accessibilityRole="button"
-                    accessibilityLabel="Invite friends"
-                    style={({ pressed }) => [
-                      styles.copyButton,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <Share2 size={16} color={theme.text} strokeWidth={2} />
-                    <Text style={styles.copyText}>Invite friends</Text>
-                  </Pressable>
-                </View>
-                {/* The design renders the room settings as a wrap
-                    of lavender chips, not a text line (Slice 6). */}
-                <View style={styles.summaryChips}>
-                  {[
-                    room.roomType === 'duel' ? 'Duel' : 'Party',
-                    GUESS_LABEL[room.settings.guessType],
-                    POOL_LABEL[room.settings.poolMode],
-                    `${room.settings.roundCount} rounds`,
-                    `${room.settings.timeLimitSeconds}s`,
-                    `${room.players.length}/${room.settings.maxPlayers} players`,
-                  ].map((label) => (
-                    <View key={label} style={styles.summaryChip}>
-                      <Text style={styles.summaryChipText}>{label}</Text>
-                    </View>
-                  ))}
-                </View>
-                {isHost ? (
-                  <View style={styles.settingsBlock}>
-                    <Text style={styles.fieldLabel}>Rounds</Text>
-                    <View style={styles.chipRow}>
-                      {[5, 10, 15, 20].map((n) =>
-                        settingsChip(room.settings.roundCount === n, `${n}`, () =>
-                          updateSetting({ roundCount: n }),
-                        ),
-                      )}
-                    </View>
-                    <Text style={styles.fieldLabel}>Seconds per round</Text>
-                    <View style={styles.chipRow}>
-                      {[15, 20, 30, 45, 60].map((n) =>
-                        settingsChip(
-                          room.settings.timeLimitSeconds === n,
-                          `${n}`,
-                          () => updateSetting({ timeLimitSeconds: n }),
-                        ),
-                      )}
-                    </View>
-                    <Text style={styles.fieldLabel}>Guess the</Text>
-                    <View style={styles.chipRow}>
-                      {(['anime', 'song', 'artist'] as RoomGuessType[]).map(
-                        (g) =>
-                          settingsChip(
-                            room.settings.guessType === g,
-                            g === 'anime'
-                              ? 'Anime'
-                              : g === 'song'
-                                ? 'Song'
-                                : 'Artist',
-                            () => updateSetting({ guessType: g }),
-                          ),
-                      )}
-                    </View>
-                    <Text style={styles.fieldLabel}>Theme pool</Text>
-                    <View style={styles.chipRow}>
-                      {(['random', 'watched', 'common'] as QuizPoolMode[]).map(
-                        (p) =>
-                          settingsChip(
-                            room.settings.poolMode === p,
-                            p === 'random'
-                              ? 'Random'
-                              : p === 'watched'
-                                ? 'Watched'
-                                : 'Common',
-                            () => updateSetting({ poolMode: p }),
-                          ),
-                      )}
-                    </View>
-                    {room.roomType === 'party' && (
-                      <>
-                        <Text style={styles.fieldLabel}>Max players</Text>
-                        <View style={styles.chipRow}>
-                          {[4, 6, 8].map((n) =>
-                            settingsChip(
-                              room.settings.maxPlayers === n,
-                              `${n}`,
-                              () => updateSetting({ maxPlayers: n }),
-                            ),
-                          )}
-                        </View>
-                      </>
-                    )}
-                  </View>
-                ) : (
-                  <Text style={styles.hint}>
-                    Only the host can change the settings.
-                  </Text>
-                )}
-              </View>
-
-              <View style={styles.card}>
-                <Text style={styles.fieldLabel}>
-                  Players ({room.players.length}/{room.settings.maxPlayers})
+            <View style={styles.waitWrap}>
+              {/* Room code card (Quiz Room design): centred label,
+                  the code in the large display face, and the
+                  Invite pill — the OS share sheet carrying the
+                  code (onInvite); there is no in-app invite
+                  system to wire it to. */}
+              <View style={styles.codeCard}>
+                <Text style={styles.codeLabel}>ROOM CODE</Text>
+                <Text style={styles.codeValue} selectable>
+                  {room.roomCode}
                 </Text>
-                {room.players.map((p) => playerRow(p, false))}
-                {room.players.length < room.settings.maxPlayers && (
-                  <Text style={styles.hint}>Waiting for more players…</Text>
-                )}
-              </View>
-
-              <Pressable
-                onPress={() =>
-                  void runAction('ready', 'room:ready', { roomId }, (ack) => {
-                    if (ack.room) setRoom(ack.room);
-                  })
-                }
-                disabled={busy !== null}
-                accessibilityRole="button"
-                accessibilityLabel={me?.ready ? 'Cancel ready' : 'Ready up'}
-                accessibilityState={{ busy: busy === 'ready' }}
-                style={({ pressed }) => [
-                  me?.ready ? styles.ghostButton : styles.primaryButton,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Check
-                  size={17}
-                  color={me?.ready ? theme.text : theme.onAccent}
-                  strokeWidth={2}
-                />
-                <Text
-                  style={
-                    me?.ready
-                      ? styles.ghostButtonText
-                      : styles.primaryButtonText
-                  }
-                >
-                  {busy === 'ready'
-                    ? 'Working…'
-                    : me?.ready
-                      ? 'Ready — tap to cancel'
-                      : 'Ready up'}
-                </Text>
-              </Pressable>
-              {isHost && room.roomType === 'party' && (
                 <Pressable
-                  onPress={() =>
-                    void runAction('start', 'room:start', { roomId }, (ack) => {
-                      if (ack.room) setRoom(ack.room);
-                    })
-                  }
-                  disabled={busy !== null || startHint !== null}
+                  onPress={onInvite}
                   accessibilityRole="button"
-                  accessibilityLabel="Start game"
-                  accessibilityState={{
-                    disabled: busy !== null || startHint !== null,
-                  }}
+                  accessibilityLabel="Invite friends"
                   style={({ pressed }) => [
-                    styles.primaryButton,
-                    (busy !== null || startHint !== null) &&
-                      styles.buttonDisabled,
+                    styles.inviteButton,
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Play size={17} color={theme.onAccent} strokeWidth={2} />
-                  <Text style={styles.primaryButtonText}>
-                    {busy === 'start' ? 'Starting…' : 'Start game'}
-                  </Text>
+                  <Share2 size={17} color={theme.accent} strokeWidth={2} />
+                  <Text style={styles.inviteText}>Invite friends</Text>
                 </Pressable>
-              )}
-              {startHint && <Text style={styles.hint}>{startHint}</Text>}
-              {room.roomType === 'duel' && !isHost && (
-                <Text style={styles.hint}>
-                  Duels start automatically when both players are ready.
+              </View>
+              {/* Settings summary chips — the room's real
+                  configuration, centred and wrapping. */}
+              <View style={styles.chipsRow}>
+                {[
+                  room.roomType === 'duel' ? 'Duel' : 'Party',
+                  CHIP_GUESS_LABEL[room.settings.guessType],
+                  POOL_LABEL[room.settings.poolMode],
+                  `${room.settings.roundCount} rounds`,
+                  `${room.settings.timeLimitSeconds}s`,
+                ].map((label) => (
+                  <View key={label} style={styles.outlineChip}>
+                    <Text style={styles.outlineChipText}>{label}</Text>
+                  </View>
+                ))}
+              </View>
+              <View style={styles.playersHead}>
+                <Text style={styles.playersTitle}>
+                  Players ({room.players.length}/{room.settings.maxPlayers})
                 </Text>
-              )}
-            </>
+                <Text style={styles.playersState}>{playersStateLine}</Text>
+              </View>
+              <View style={styles.playerCards}>
+                {room.players.map((p) => waitingPlayerRow(p))}
+              </View>
+            </View>
           )}
 
           {phase === 'playing' && liveRound && (
             <>
-              {/* The design's in-game players strip (Slice 6):
-                  avatar + answered badge + name across the top,
-                  then the waiting line for whoever hasn't locked
-                  in yet. */}
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.stripRow}
-              >
-                {room.players.map((p) => {
-                  const answered = answeredUsers.has(p.userId);
-                  return (
-                    <View key={p.userId} style={styles.stripItem}>
-                      <View>
-                        {p.avatar ? (
-                          <Image
-                            source={{ uri: p.avatar }}
-                            style={styles.stripAvatar}
+              {/* Hidden audio only (owner ruling): the clip
+                  plays behind no surface at all — the ring and
+                  the Playing pill below report its state. */}
+              <QuizAudioOnly
+                candidates={
+                  roundAudioCandidate ? [roundAudioCandidate] : []
+                }
+                mediaKey={`${roomId}:${liveRound.round}`}
+                onStateChange={handleRoomAudioState}
+              />
+              {/* Players strip card (Quiz Room in-game design):
+                  Avatar + answered badge + name per player, with
+                  the waiting caption inside the card. The strip
+                  scrolls sideways when the roster outgrows the
+                  card (a party seats up to 8); at the mock's
+                  four players it spreads across the card. */}
+              <View style={styles.stripCard}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.stripRowInner}
+                >
+                  {room.players.map((p) => {
+                    const answered = answeredUsers.has(p.userId);
+                    const isMePlayer = p.userId === myId;
+                    return (
+                      <View key={p.userId} style={styles.stripItem}>
+                        <View>
+                          <Avatar
+                            url={p.avatar}
+                            name={p.username}
+                            size={40}
+                            seed={p.userId}
                           />
-                        ) : (
                           <View
                             style={[
-                              styles.stripAvatar,
-                              styles.avatarFallback,
+                              styles.stripBadge,
+                              answered && styles.stripBadgeOn,
                             ]}
                           >
-                            <Text style={styles.avatarInitial}>
-                              {p.username.charAt(0).toUpperCase()}
-                            </Text>
+                            {answered ? (
+                              <Check
+                                size={11}
+                                color={theme.success}
+                                strokeWidth={3}
+                              />
+                            ) : (
+                              <Hourglass
+                                size={11}
+                                color={theme.secondary}
+                                strokeWidth={2.5}
+                              />
+                            )}
                           </View>
-                        )}
-                        <View
-                          style={[
-                            styles.stripBadge,
-                            answered && styles.stripBadgeOn,
-                          ]}
-                        >
-                          {answered ? (
-                            <Check
-                              size={10}
-                              color={theme.onAccent}
-                              strokeWidth={3}
-                            />
-                          ) : (
-                            <Hourglass
-                              size={9}
-                              color={theme.muted}
-                              strokeWidth={2.5}
-                            />
-                          )}
                         </View>
+                        <Text
+                          style={[
+                            styles.stripName,
+                            isMePlayer && styles.stripNameMe,
+                            !answered &&
+                              !isMePlayer &&
+                              styles.stripNamePending,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {p.username}
+                          {isMePlayer ? ' (You)' : ''}
+                        </Text>
                       </View>
-                      <Text style={styles.stripName} numberOfLines={1}>
-                        {p.username}
-                        {p.userId === myId ? ' (You)' : ''}
-                      </Text>
-                    </View>
-                  );
-                })}
-              </ScrollView>
-              {room.players.some((p) => !answeredUsers.has(p.userId)) && (
-                <Text style={styles.waitingLine}>
-                  Waiting for{' '}
-                  {room.players
-                    .filter((p) => !answeredUsers.has(p.userId))
-                    .map((p) => p.username)
-                    .join(', ')}
-                  …
-                </Text>
-              )}
-              <View style={styles.roundHead}>
-                <Text style={styles.roundTitle}>
-                  Round {liveRound.round} of {room.settings.roundCount}
-                </Text>
-                <CountdownRing
-                  deadlineMs={deadlineMs}
-                  totalSeconds={liveRound.timeLimitSeconds}
-                />
+                    );
+                  })}
+                </ScrollView>
+                <View style={styles.stripCaption}>
+                  <View style={styles.stripCaptionDot} />
+                  <Text style={styles.stripCaptionText}>
+                    {pendingPlayers.length > 0
+                      ? `Waiting for ${pendingPlayers
+                          .map((p) => p.username)
+                          .join(', ')}...`
+                      : 'Everyone has answered'}
+                  </Text>
+                </View>
               </View>
-              {mediaMissing ? (
+              {mediaMissing && (
                 <View style={styles.mediaMissingCard}>
                   <Text style={styles.mediaMissingText}>
                     You rejoined mid-round — this round's media isn't
                     available, but you can still answer.
                   </Text>
                 </View>
-              ) : (
-                <QuizMedia
-                  audioOnly
-                  candidates={
-                    roundAudioCandidate ? [roundAudioCandidate] : []
-                  }
-                  coverImage={null}
-                  mediaKey={`${roomId}:${liveRound.round}`}
-                />
               )}
-              <Text style={styles.guessLabel}>
-                {GUESS_LABEL[room.settings.guessType]}
-                {myAnswer !== null ? ' — answer locked in' : ''}
+              {/* Countdown ring + Playing pill: the ring shows
+                  the round's real remaining time (the server's
+                  startedAt + limit, as before); the pill reports
+                  the hidden audio's phase. The mute toggle sits
+                  at the ring's lower-right — the solo screen's
+                  placement; the mock draws none, but muting the
+                  clip is an existing capability this phase
+                  keeps (flagged in the slice report). */}
+              <View style={styles.ringBlock}>
+                <View style={styles.ringWrap}>
+                  <CountdownRing
+                    variant="room"
+                    deadlineMs={deadlineMs}
+                    totalSeconds={liveRound.timeLimitSeconds}
+                    size={112}
+                    glyph={
+                      roomAudio.phase === 'buffering' ? (
+                        <ActivityIndicator color={theme.accent} />
+                      ) : (
+                        <AudioWaveform
+                          size={15}
+                          color={theme.secondary}
+                          strokeWidth={2}
+                        />
+                      )
+                    }
+                    caption="seconds"
+                  />
+                  {roomAudio.phase !== 'failed' &&
+                    roomAudio.phase !== 'empty' && (
+                      <Pressable
+                        onPress={roomAudio.toggleMute}
+                        hitSlop={6}
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          roomAudio.muted
+                            ? 'Unmute theme'
+                            : 'Mute theme'
+                        }
+                        style={styles.ringMute}
+                      >
+                        {roomAudio.muted ? (
+                          <VolumeX
+                            size={17}
+                            color={theme.text}
+                            strokeWidth={2}
+                          />
+                        ) : (
+                          <Volume2
+                            size={17}
+                            color={theme.text}
+                            strokeWidth={2}
+                          />
+                        )}
+                      </Pressable>
+                    )}
+                </View>
+                <View style={styles.playingPill}>
+                  <View style={styles.waveBars}>
+                    <View style={[styles.waveBar, styles.waveBarA]} />
+                    <View style={[styles.waveBar, styles.waveBarB]} />
+                    <View style={[styles.waveBar, styles.waveBarC]} />
+                  </View>
+                  <Text style={styles.playingPillText}>
+                    {playingPillText}
+                  </Text>
+                </View>
+              </View>
+              {/* The question. The design's hint line under it
+                  (theme type • release year) is omitted: the
+                  round payload carries neither (see the header
+                  comment) — flagged, never invented. */}
+              <Text style={styles.questionText}>
+                {QUESTION_PROMPT[room.settings.guessType]}
               </Text>
               <QuizOptions
+                variant="room"
                 options={liveRound.theme.options}
                 onSelect={onAnswer}
                 disabled={myAnswer !== null}
                 selected={myAnswer}
               />
-              {myResult && (
-                <Text
-                  style={[
-                    styles.myResult,
-                    !myResult.correct && styles.myResultWrong,
-                  ]}
-                >
-                  {myResult.correct
-                    ? `Correct · +${myResult.gained} pts`
-                    : 'Not the one — scores land at round end'}
-                </Text>
-              )}
-              {/* The design's Live standings card (Slice 6) —
-                  running points, ranked, with the YOU marker. */}
-              <View style={styles.card}>
-                <Text style={styles.fieldLabel}>Live standings</Text>
-                {standings.map((p, i) => (
-                  <View key={p.userId} style={styles.standingRow}>
-                    <Text style={styles.standingPlace}>{i + 1}</Text>
-                    <Text style={styles.standingName} numberOfLines={1}>
-                      {p.username}
+              {/* The mock's submitted state carries no result
+                  line — myResult still arrives on
+                  room:player-answered and the reveal phase
+                  reports it in full; the standings below land
+                  the points at round end, as before. */}
+              {/* Live standings (Quiz Room in-game design):
+                  match points only — no RP suffix (RP is
+                  rank, awarded at game end). The sync label
+                  follows the real socket status: it only
+                  claims "Sync active" while connected. */}
+              <View style={styles.liveCard}>
+                <View style={styles.liveHead}>
+                  <Text style={styles.liveTitle}>Live standings</Text>
+                  <View style={styles.liveSync}>
+                    <View
+                      style={[
+                        styles.liveSyncDot,
+                        connStatus !== 'connected' &&
+                          styles.liveSyncDotOff,
+                      ]}
+                    />
+                    <Text
+                      style={[
+                        styles.liveSyncText,
+                        connStatus !== 'connected' &&
+                          styles.liveSyncTextOff,
+                      ]}
+                    >
+                      {connStatus === 'connected'
+                        ? 'Sync active'
+                        : 'Reconnecting…'}
                     </Text>
-                    {p.userId === myId && (
-                      <Text style={styles.youTag}>YOU</Text>
-                    )}
-                    <Text style={styles.standingScore}>{p.totalScore}</Text>
                   </View>
-                ))}
+                </View>
+                <View style={styles.liveRows}>
+                  {[
+                    ...topStandings.map((p, i) => ({
+                      p,
+                      place: i + 1,
+                    })),
+                    ...(myStandingRow
+                      ? [{ p: myStandingRow, place: myStandingIndex + 1 }]
+                      : []),
+                  ].map(({ p, place }) => {
+                    const isMeRow = p.userId === myId;
+                    return (
+                      <View
+                        key={p.userId}
+                        style={[
+                          styles.liveRow,
+                          isMeRow && styles.liveRowMe,
+                        ]}
+                      >
+                        <View style={styles.liveRowLeft}>
+                          <Text
+                            style={[
+                              styles.livePlace,
+                              isMeRow && styles.livePlaceMe,
+                            ]}
+                          >
+                            {place}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.liveName,
+                              place !== 1 &&
+                                !isMeRow &&
+                                styles.liveNameMuted,
+                              isMeRow && styles.liveNameMe,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {p.username}
+                          </Text>
+                          {isMeRow && (
+                            <View style={styles.liveYouPill}>
+                              <Text style={styles.liveYouText}>YOU</Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text
+                          style={[
+                            styles.liveScore,
+                            (place === 1 || isMeRow) &&
+                              styles.liveScoreAccent,
+                          ]}
+                        >
+                          {p.totalScore.toLocaleString()}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
               </View>
             </>
           )}
@@ -1273,7 +1462,14 @@ export default function QuizRoomScreen() {
             </>
           )}
 
-          {phase !== 'ended' && (
+          {/* The waiting phase leaves through its header (✕ /
+              Leave) and footer instead, and the playing phase
+              through its top-row ✕ — neither design draws a
+              bottom leave row. The reveal phase keeps this
+              leave row. */}
+          {phase !== 'ended' &&
+            phase !== 'waiting' &&
+            phase !== 'playing' && (
             <Pressable
               onPress={leaveExplicitly}
               accessibilityRole="button"
@@ -1287,25 +1483,67 @@ export default function QuizRoomScreen() {
               <Text style={styles.leaveText}>Leave room</Text>
             </Pressable>
           )}
-          {room.roomType === 'duel' && phase === 'waiting' && (
-            <View style={styles.duelNote}>
-              <Swords size={13} color={theme.muted} strokeWidth={2} />
-              <Text style={styles.hint}>
-                Share the code — your opponent joins with it.
-              </Text>
-            </View>
-          )}
-          {room.players.length > 0 && phase === 'waiting' && (
-            <View style={styles.duelNote}>
-              <Users size={13} color={theme.muted} strokeWidth={2} />
-              <Text style={styles.hint}>
-                {room.matchmaking === 'public'
-                  ? 'Public room — anyone can land here.'
-                  : 'Invite room — code only.'}
-              </Text>
-            </View>
-          )}
         </ScrollView>
+        {phase === 'waiting' && (
+          <View style={styles.waitFooter}>
+            <Text style={styles.waitFooterLine}>
+              Only the host can start. Everyone else taps Ready.
+            </Text>
+            {showStart ? (
+              <Pressable
+                onPress={() =>
+                  void runAction('start', 'room:start', { roomId }, (ack) => {
+                    if (ack.room) setRoom(ack.room);
+                  })
+                }
+                disabled={busy !== null || startHint !== null}
+                accessibilityRole="button"
+                accessibilityLabel="Start game"
+                accessibilityState={{
+                  disabled: busy !== null || startHint !== null,
+                }}
+                style={({ pressed }) => [
+                  styles.waitPrimary,
+                  (busy !== null || startHint !== null) &&
+                    styles.buttonDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.waitPrimaryText}>
+                  {footerBusyLabel ?? 'Start Game'}
+                </Text>
+                <ArrowRight size={20} color={theme.onAccent} strokeWidth={2} />
+              </Pressable>
+            ) : (
+              <Pressable
+                onPress={() =>
+                  void runAction('ready', 'room:ready', { roomId }, (ack) => {
+                    if (ack.room) setRoom(ack.room);
+                  })
+                }
+                disabled={busy !== null}
+                accessibilityRole="button"
+                accessibilityLabel={me?.ready ? 'Cancel ready' : 'Ready up'}
+                accessibilityState={{ busy: busy === 'ready' }}
+                style={({ pressed }) => [
+                  styles.waitPrimary,
+                  pressed && styles.pressed,
+                ]}
+              >
+                {me?.ready && !footerBusyLabel ? (
+                  <Check size={18} color={theme.onAccent} strokeWidth={2.5} />
+                ) : null}
+                <Text style={styles.waitPrimaryText}>
+                  {footerBusyLabel ??
+                    (me?.ready ? 'Ready — tap to cancel' : 'Ready up')}
+                </Text>
+              </Pressable>
+            )}
+            {startHint && (
+              <Text style={styles.waitFooterHint}>{startHint}</Text>
+            )}
+          </View>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -1491,68 +1729,73 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.caption,
       color: theme.muted,
     },
-    stripRow: {
-      gap: spacing.md,
-      paddingVertical: spacing.xs,
+    /* Playing phase (Quiz Room in-game design) — 16px card
+     * radius, 40px strip avatars with 16px status badges, the
+     * 112px ring, and the compact standings rows. */
+    stripCard: {
+      backgroundColor: theme.surface,
+      borderRadius: radii.md,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 10,
+      gap: 6,
+    },
+    stripRowInner: {
+      flexGrow: 1,
+      justifyContent: 'space-around',
+      gap: spacing.sm,
+      paddingHorizontal: spacing.xs,
     },
     stripItem: {
       alignItems: 'center',
       gap: spacing.xs,
-      width: 56,
-    },
-    stripAvatar: {
-      width: 44,
-      height: 44,
-      borderRadius: 22,
-      backgroundColor: theme.raised,
+      width: 64,
     },
     stripBadge: {
       position: 'absolute',
       right: -2,
       bottom: -2,
-      width: 18,
-      height: 18,
-      borderRadius: 9,
-      backgroundColor: theme.surface,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.border,
+      width: 16,
+      height: 16,
+      borderRadius: 8,
+      backgroundColor: theme.raised,
+      borderWidth: 1,
+      borderColor: theme.surface,
       alignItems: 'center',
       justifyContent: 'center',
     },
     stripBadgeOn: {
-      backgroundColor: theme.success,
-      borderColor: theme.success,
+      backgroundColor: theme.successContainer,
     },
     stripName: {
-      ...typeStyles.caption,
-      color: theme.text,
+      fontFamily: fontFamilies.sectionLabel,
+      fontSize: 10,
+      color: theme.muted,
       textAlign: 'center',
     },
-    waitingLine: {
-      ...typeStyles.bodySmall,
-      color: theme.muted,
-      marginBottom: spacing.sm,
+    stripNameMe: {
+      color: theme.accent,
     },
-    standingRow: {
+    stripNamePending: {
+      color: theme.secondary,
+    },
+    stripCaption: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
-      paddingVertical: spacing.xs + 2,
+      justifyContent: 'center',
+      gap: 6,
+      paddingTop: 2,
     },
-    standingPlace: {
-      ...typeStyles.mono,
-      color: theme.muted,
-      width: 18,
+    stripCaptionDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: theme.secondary,
     },
-    standingName: {
-      flex: 1,
-      fontFamily: fontFamilies.bodyStrong,
-      fontSize: 14,
-      color: theme.text,
-    },
-    standingScore: {
-      ...typeStyles.mono,
-      color: theme.text,
+    stripCaptionText: {
+      ...typeStyles.caption,
+      color: theme.secondary,
     },
     settingsBlock: {
       gap: spacing.sm,
@@ -1691,15 +1934,6 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
       gap: spacing.xs + 2,
     },
-    roundHead: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-    },
-    roundTitle: {
-      ...typeStyles.sectionLabel,
-      color: theme.text,
-    },
     mediaMissingCard: {
       backgroundColor: withOpacity(theme.secondary, 0.1),
       borderRadius: radii.md,
@@ -1709,19 +1943,6 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.bodySmall,
       color: theme.text,
       textAlign: 'center',
-    },
-    guessLabel: {
-      ...typeStyles.caption,
-      color: theme.muted,
-      textAlign: 'center',
-    },
-    myResult: {
-      fontFamily: fontFamilies.bodyStrong, fontSize: 14,
-      color: theme.accent,
-      textAlign: 'center',
-    },
-    myResultWrong: {
-      color: theme.secondary,
     },
     correctAnswer: {
       ...typeStyles.heading,
@@ -1788,6 +2009,457 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.bodySmall,
       color: theme.secondary,
       textAlign: 'center',
+    },
+    /* Waiting lobby (Quiz Room design) — this screen's HTML
+     * measures a 20px canvas edge (the other phases keep the
+     * shared 16px content edge), 16px code-card radius, 12px
+     * player-card radius, and full-pill footer button. */
+    waitHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: spacing.xl,
+      paddingTop: spacing.md,
+      paddingBottom: spacing.sm,
+    },
+    waitHeaderSide: {
+      width: 64,
+      alignItems: 'flex-start',
+    },
+    waitHeaderSideEnd: {
+      alignItems: 'flex-end',
+    },
+    waitCloseHit: {
+      width: 36,
+      height: 36,
+      borderRadius: radii.pill,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    waitHeaderTitle: {
+      flex: 1,
+      textAlign: 'center',
+      fontFamily: fontFamilies.display,
+      fontSize: 17,
+      color: theme.text,
+    },
+    waitLeaveHit: {
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 6,
+    },
+    waitLeaveText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 13,
+      color: theme.secondary,
+    },
+    waitWrap: {
+      gap: spacing.md,
+      paddingHorizontal: spacing.xs,
+    },
+    codeCard: {
+      backgroundColor: theme.surface,
+      borderRadius: radii.md,
+      padding: spacing.xl,
+      alignItems: 'center',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+    },
+    codeLabel: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 11,
+      letterSpacing: 1.1,
+      color: theme.secondary,
+      marginBottom: spacing.xs,
+    },
+    codeValue: {
+      fontFamily: fontFamilies.display,
+      fontSize: 36,
+      letterSpacing: 3.6,
+      color: theme.text,
+      marginVertical: spacing.xs,
+    },
+    inviteButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.sm,
+      marginTop: 14,
+    },
+    inviteText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 12,
+      color: theme.accent,
+    },
+    chipsRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      justifyContent: 'center',
+      gap: 6,
+      paddingVertical: spacing.xs,
+      marginBottom: spacing.xs,
+    },
+    outlineChip: {
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.pill,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+    },
+    outlineChipText: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 11,
+      color: theme.accent,
+    },
+    playersHead: {
+      flexDirection: 'row',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.xs,
+      marginBottom: -2,
+    },
+    playersTitle: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 16,
+      color: theme.text,
+    },
+    playersState: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 11,
+      color: theme.secondary,
+    },
+    playerCards: {
+      gap: 10,
+    },
+    waitPlayerCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: theme.surface,
+      borderRadius: radii.base,
+      padding: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+    },
+    waitPlayerName: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 13,
+      color: theme.text,
+    },
+    waitPlayerSub: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 11,
+      color: theme.secondary,
+      marginTop: 2,
+    },
+    waitHostPill: {
+      backgroundColor: theme.accent,
+      borderRadius: radii.pill,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+    },
+    waitHostPillText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 11,
+      letterSpacing: 0.3,
+      color: theme.onAccent,
+    },
+    waitReadyPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      backgroundColor: theme.successContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+    },
+    waitReadyPillText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 11,
+      color: theme.success,
+    },
+    waitNotReadyPill: {
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+    },
+    waitNotReadyPillText: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 11,
+      color: theme.secondary,
+    },
+    waitFooter: {
+      paddingHorizontal: spacing.xl,
+      paddingTop: spacing.md,
+      paddingBottom: spacing.xl,
+      backgroundColor: theme.background,
+    },
+    waitFooterLine: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 11,
+      color: theme.secondary,
+      textAlign: 'center',
+      marginBottom: 10,
+    },
+    waitPrimary: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: spacing.sm,
+      backgroundColor: theme.accent,
+      borderRadius: radii.pill,
+      paddingVertical: 14,
+      paddingHorizontal: spacing.lg,
+    },
+    waitPrimaryText: {
+      fontFamily: fontFamilies.display,
+      fontSize: 16,
+      color: theme.onAccent,
+    },
+    waitFooterHint: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 11,
+      color: theme.muted,
+      textAlign: 'center',
+      marginTop: spacing.sm,
+    },
+    /* In-game top row (Quiz Room in-game design). */
+    playHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.screenEdge,
+      paddingTop: spacing.md,
+      paddingBottom: spacing.sm,
+    },
+    playCloseDisc: {
+      width: 32,
+      height: 32,
+      borderRadius: 16,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    playRoomPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: theme.raised,
+      borderWidth: 1,
+      borderColor: withOpacity(theme.accent, 0.15),
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 4,
+    },
+    playRoomDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: theme.success,
+    },
+    playRoomDotOff: {
+      backgroundColor: theme.muted,
+    },
+    playRoomText: {
+      ...typeStyles.mono,
+      fontSize: 11,
+      letterSpacing: 0.5,
+      color: theme.accent,
+    },
+    playRoundPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.xs,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 4,
+    },
+    playRoundText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 11,
+      color: theme.accent,
+    },
+    /* Ring + Playing pill block. */
+    ringBlock: {
+      alignItems: 'center',
+      paddingVertical: spacing.xs,
+    },
+    ringWrap: {
+      position: 'relative',
+    },
+    ringMute: {
+      position: 'absolute',
+      right: 2,
+      bottom: 2,
+      width: 36,
+      height: 36,
+      borderRadius: radii.pill,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    playingPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: withOpacity(theme.surface, 0.7),
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 4,
+      marginTop: spacing.sm,
+    },
+    waveBars: {
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      gap: 2,
+      height: 12,
+    },
+    waveBar: {
+      width: 2,
+      borderRadius: 1,
+      backgroundColor: theme.accent,
+    },
+    waveBarA: {
+      height: 5,
+    },
+    waveBarB: {
+      height: 11,
+    },
+    waveBarC: {
+      height: 7,
+    },
+    playingPillText: {
+      ...typeStyles.caption,
+      color: theme.text,
+    },
+    questionText: {
+      fontFamily: fontFamilies.display,
+      fontSize: 22,
+      lineHeight: 30,
+      letterSpacing: -0.3,
+      color: theme.text,
+      textAlign: 'center',
+      paddingHorizontal: spacing.sm,
+    },
+    /* Live standings card (Quiz Room in-game design). */
+    liveCard: {
+      backgroundColor: theme.surface,
+      borderRadius: radii.md,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      padding: 10,
+    },
+    liveHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.xs,
+      marginBottom: 6,
+    },
+    liveTitle: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 10,
+      letterSpacing: 1.5,
+      textTransform: 'uppercase',
+      color: theme.secondary,
+    },
+    liveSync: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.xs,
+    },
+    liveSyncDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: theme.success,
+    },
+    liveSyncDotOff: {
+      backgroundColor: theme.muted,
+    },
+    liveSyncText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 10,
+      color: theme.success,
+    },
+    liveSyncTextOff: {
+      color: theme.muted,
+    },
+    liveRows: {
+      gap: spacing.xs,
+    },
+    liveRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.sm,
+      paddingVertical: spacing.xs,
+      borderRadius: radii.sm,
+    },
+    liveRowMe: {
+      backgroundColor: theme.accentContainer,
+      borderWidth: 1,
+      borderColor: withOpacity(theme.accent, 0.15),
+    },
+    liveRowLeft: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      flex: 1,
+    },
+    livePlace: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 11,
+      color: theme.secondary,
+      width: 16,
+      textAlign: 'center',
+    },
+    livePlaceMe: {
+      color: theme.accent,
+    },
+    liveName: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 13,
+      color: theme.text,
+      flexShrink: 1,
+    },
+    liveNameMuted: {
+      color: theme.muted,
+    },
+    liveNameMe: {
+      fontFamily: fontFamilies.bodyStrong,
+    },
+    liveYouPill: {
+      backgroundColor: theme.accent,
+      borderRadius: radii.pill,
+      paddingHorizontal: 6,
+      paddingVertical: 1,
+    },
+    liveYouText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 9,
+      letterSpacing: 0.3,
+      color: theme.onAccent,
+    },
+    liveScore: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 11,
+      color: theme.muted,
+    },
+    liveScoreAccent: {
+      color: theme.accent,
     },
     pressed: {
       opacity: 0.85,

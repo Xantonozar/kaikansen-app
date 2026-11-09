@@ -8,6 +8,12 @@ import {
   ThemeCache,
   ThemeCacheSchema,
 } from '../themes/theme-cache.schema';
+import { Follow, FollowSchema } from '../social/follow.schema';
+import {
+  Notification,
+  NotificationSchema,
+} from '../social/notification.schema';
+import { FollowerActivityService } from '../social/follower-activity.service';
 import { Comment, CommentSchema } from './comment.schema';
 import { CommentsController } from './comments.controller';
 import { CommentsService } from './comments.service';
@@ -29,6 +35,12 @@ import { CommentsService } from './comments.service';
  * stateless, so a second instance verifies tokens identically.
  * AnilistClient is included because AuthService optionally depends
  * on it.
+ *
+ * Follow + Notification are registered here so posting a comment
+ * can fan follower-activity notifications out through
+ * FollowerActivityService (SocialModule owns the models' home
+ * registration; re-registration is the established pattern — see
+ * above).
  */
 @Module({})
 export class CommentsModule {
@@ -41,6 +53,8 @@ export class CommentsModule {
               { name: Comment.name, schema: CommentSchema },
               { name: ThemeCache.name, schema: ThemeCacheSchema },
               { name: User.name, schema: UserSchema },
+              { name: Follow.name, schema: FollowSchema },
+              { name: Notification.name, schema: NotificationSchema },
             ]),
           ]
         : [],
@@ -50,6 +64,7 @@ export class CommentsModule {
         AuthService,
         AccessTokenGuard,
         AnilistClient,
+        FollowerActivityService,
       ],
     };
   }

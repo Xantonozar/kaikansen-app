@@ -272,12 +272,17 @@ export class ThemesService {
       .limit(SEASON_PAGE_SIZE)
       .lean()
       .exec()) as ThemeDoc[];
+    // The season's real size across all pages (the web serves no
+    // count; the app's "N themes this season" line needs the true
+    // total, not the loaded page's length).
+    const total = (await model.countDocuments(filter).exec()) as number;
     return {
       season,
       year,
       themes: docs.map(toThemeSummary),
       page,
       hasMore: docs.length === SEASON_PAGE_SIZE,
+      total,
     };
   }
 

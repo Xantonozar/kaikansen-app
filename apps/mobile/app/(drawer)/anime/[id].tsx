@@ -11,10 +11,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ChevronLeft, ExternalLink } from 'lucide-react-native';
+import { ArrowLeft, ExternalLink } from 'lucide-react-native';
 import type { AnimeDetailResponse, ThemeSummary } from '@kaikansen/contracts';
 import { fetchAnimeDetail } from '../../../src/api';
-import { useFavorites } from '../../../src/favoritesStore';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import {
   queueItemsFromSummaries,
@@ -31,29 +30,33 @@ import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
 /**
- * Anime detail (DESIGN.md §6.8) — layout-fidelity Slice 6 rebuilt
- * the header to the design's composition (measured in
- * anime-detail.html): a full-bleed 224dp banner (bannerImage,
- * falling back to the large cover — the web page's own chain minus
- * its picsum placeholder), a floating translucent back disc, and a
- * white info card overlapping the banner by 16dp carrying the
- * title, the meta line ("26 episodes · FALL 1995") and the genre
- * chips; then the anime's themes grouped Openings / Endings and a
- * "View on AniList" row.
+ * Anime detail (DESIGN.md §6.8) — rebuilt to the Anime Detail
+ * design (measured in anime-detail.html): a full-bleed 224dp
+ * banner (bannerImage, falling back to the large cover —
+ * cover-fit in the banner area — the web page's own chain minus
+ * its picsum placeholder), a floating translucent back disc, and
+ * a white info card overlapping the banner by 16dp carrying the
+ * title, the meta line and the genre chips; then the anime's
+ * themes grouped Openings / Endings (ThemeRow's `anime` variant)
+ * and a centred "View on AniList" link.
  *
  * Data: GET /anime/:id (the web's anime page read, ported to the
- * API for this screen). The design's meta line has NO format
- * ("TV ·") prefix — ozar declined the anime-format backfill
- * (2026-11-09), and format is stored nowhere in the catalogue.
- * The card also omits the pre-fidelity build's score chip, studio
- * line and romaji subtitle: not in the design (the data stays in
- * the payload, undrawn) — flagged in the Slice 6 report.
+ * API for this screen). Every meta-line part renders ONLY from a
+ * real payload field: "<n> episodes" from totalEpisodes, the
+ * "SEASON YEAR" part from season/seasonYear. The mock's line
+ * LEADS with a format ("TV ·") — format is ABSENT from the
+ * payload and stored nowhere in the catalogue, and ozar declined
+ * the anime-format backfill (2026-11-09), so the format part is
+ * omitted rather than guessed (flagged in the design-fix report;
+ * no backfill was built). Genre chips come from the payload's
+ * genres (row omitted when empty); "View on AniList" renders
+ * only when the payload carries an anilistId. The payload's
+ * score/studio/romaji fields stay undrawn: not in the design.
  */
 export default function AnimeDetailScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
-  const favorites = useFavorites();
   const { id } = useLocalSearchParams<{ id: string }>();
   const animeId = Number.parseInt(id ?? '', 10);
 
@@ -117,11 +120,9 @@ export default function AnimeDetailScreen() {
       <ThemeRow
         key={item.slug}
         item={item}
+        anime
         onPress={() => openTheme(item.slug)}
         onPlay={() => playTheme(item.slug)}
-        saved={favorites.isFavorite(item.slug)}
-        savePending={favorites.isPending(item.slug)}
-        onToggleSave={() => void favorites.toggle(item.slug)}
       />
     ));
 
@@ -150,7 +151,7 @@ export default function AnimeDetailScreen() {
         accessibilityLabel="Back"
         style={styles.backFloat}
       >
-        <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
+        <ArrowLeft size={20} color={theme.text} strokeWidth={2} />
       </Pressable>
 
       {error ? (
@@ -206,7 +207,7 @@ export default function AnimeDetailScreen() {
                 .sort((a, b) => a.sequence - b.sequence);
               if (rows.length === 0) return null;
               return (
-                <View key={type}>
+                <View key={type} style={styles.section}>
                   <Text style={styles.sectionHeading}>
                     {type === 'OP' ? 'Openings' : 'Endings'}
                   </Text>
@@ -235,7 +236,7 @@ export default function AnimeDetailScreen() {
                 ]}
               >
                 <Text style={styles.anilistText}>View on AniList</Text>
-                <ExternalLink size={16} color={theme.muted} strokeWidth={2} />
+                <ExternalLink size={14} color={theme.accent} strokeWidth={2} />
               </Pressable>
             )}
           </View>
@@ -252,19 +253,20 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.background,
     },
     backFloat: {
-      // The mock's floating back disc: translucent white over the
-      // banner (white/80 — the same fixed-colour precedent as the
-      // scrims; token `surface` at 80% renders identically in the
-      // light theme and follows the dark theme's surface).
+      // The mock's floating back disc (anime-detail.html: top-4
+      // left-4, w-9 h-9, white/80): translucent white over the
+      // banner (the same fixed-colour precedent as the scrims;
+      // token `surface` at 80% renders identically in the light
+      // theme and follows the dark theme's surface).
       position: 'absolute',
-      top: spacing.sm,
+      top: spacing.lg,
       left: spacing.screenEdge,
       zIndex: 2,
-      width: 40,
-      height: 40,
+      width: 36,
+      height: 36,
       borderRadius: radii.pill,
       backgroundColor: theme.surface,
-      opacity: 0.9,
+      opacity: 0.8,
       alignItems: 'center',
       justifyContent: 'center',
     },
@@ -295,66 +297,80 @@ const createStyles = (theme: Theme) =>
       marginTop: -spacing.lg,
     },
     title: {
+      // anime-detail.html: text-xl bold, leading-snug (1.375).
       ...typeStyles.display,
       fontSize: 20,
-      lineHeight: 25,
+      lineHeight: 28,
       color: theme.text,
     },
     metaLine: {
-      // Mock: 12px medium mauve, wide tracking, uppercase —
-      // "26 episodes · FALL 1995".
+      // anime-detail.html: 12px medium mauve, tracking-wide
+      // (0.025em ≈ 0.3), NO case transform — the stored season
+      // is already uppercase ("FALL 1995") and "episodes" stays
+      // lowercase, exactly as the HTML's text reads.
       fontSize: 12,
       fontFamily: 'Inter_500Medium',
-      letterSpacing: 0.6,
-      textTransform: 'uppercase',
+      letterSpacing: 0.3,
       color: theme.secondary,
-      marginTop: spacing.xs + 2,
+      marginTop: spacing.sm,
     },
     genreRow: {
+      // anime-detail.html: gap-1.5 (6), mt-0.5 (2) on top of the
+      // card's gap-2 (8) — 10 below the meta line.
       flexDirection: 'row',
       flexWrap: 'wrap',
-      gap: spacing.sm,
-      marginTop: spacing.md,
+      gap: 6,
+      marginTop: 10,
     },
     genreChip: {
+      // anime-detail.html: px-2.5 (10) py-0.5 (2), chip bg
+      // #F1E9F1 — the accentContainer token is the theme's
+      // measured lavenderChip (Season slice precedent).
       backgroundColor: theme.accentContainer,
       borderRadius: radii.pill,
-      paddingHorizontal: spacing.sm + 2,
+      paddingHorizontal: 10,
       paddingVertical: 2,
     },
     genreText: {
+      // anime-detail.html: 11px semibold in the deep mauve.
       fontSize: 11,
       fontFamily: fontFamilies.bodyStrong,
-      color: theme.secondary,
+      color: theme.accent,
     },
     anilistRow: {
+      // anime-detail.html: a centred text link, no card —
+      // py-2 (8), gap-1 (4), in the content column's gap-4 (16)
+      // flow below the last section.
       flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'space-between',
-      backgroundColor: theme.surface,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.border,
-      borderRadius: radii.card,
-      paddingHorizontal: spacing.lg,
-      paddingVertical: spacing.md,
-      marginTop: spacing.xl,
+      justifyContent: 'center',
+      gap: spacing.xs,
+      paddingVertical: spacing.sm,
+      marginTop: spacing.lg,
     },
     anilistText: {
-      ...typeStyles.body,
+      // anime-detail.html: 12px bold in the deep mauve.
+      fontSize: 12,
       fontFamily: fontFamilies.bodyStrong,
-      color: theme.text,
+      color: theme.accent,
     },
     pressed: {
       opacity: 0.85,
     },
+    section: {
+      // anime-detail.html: sections sit in the column's gap-4
+      // (16) flow with pt-1 (4) of their own.
+      marginTop: spacing.lg,
+      paddingTop: spacing.xs,
+    },
     sectionHeading: {
-      // Mock section headings are 15px bold.
-      ...typeStyles.body,
-      fontSize: 15,
+      // anime-detail.html: 14px bold, px-1 (4) inset, gap-2 (8)
+      // above the section's first row card.
+      fontSize: 14,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.text,
-      marginTop: spacing.xl,
-      marginBottom: spacing.md,
+      paddingHorizontal: spacing.xs,
+      marginBottom: spacing.sm,
     },
     center: {
       flex: 1,

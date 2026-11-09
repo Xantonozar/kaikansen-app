@@ -15,9 +15,13 @@ import { HydratedDocument, Schema as MongooseSchema, Types } from 'mongoose';
  *
  * Of the six enum types, the web only ever CREATES 'follow' rows
  * (from the Follow post-save hook, ported into SocialService).
- * The other five are dead vocabulary on the web — no route, hook
- * or script creates them — so this API creates none of them
- * either; it only serves rows that exist.
+ * This API creates three more, as an OWNER-APPROVED divergence
+ * (decided 2026-11-10): 'theme_rated', 'theme_favorited' and
+ * 'comment' fan out to the ACTOR'S FOLLOWERS from the rating /
+ * favourite / comment write paths — see
+ * FollowerActivityService. 'rating_like' and 'playlist_like'
+ * remain uncreated everywhere: the actions they name exist
+ * nowhere in the product.
  */
 
 export type NotificationDocument = HydratedDocument<Notification>;

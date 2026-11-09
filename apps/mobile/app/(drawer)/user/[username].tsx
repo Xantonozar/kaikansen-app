@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
+  Modal,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
@@ -10,16 +13,22 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
-  ChevronLeft,
+  ArrowLeft,
+  Check,
   ChevronRight,
+  Medal,
+  MoreVertical,
   Pencil,
-  UserCheck,
+  Share2,
+  Star,
   UserPlus,
+  X,
 } from 'lucide-react-native';
 import type {
   UserHistoryResponse,
   UserPublicProfile,
   UserRankProfile,
+  UserRatingEntry,
   UserRatingsResponse,
 } from '@kaikansen/contracts';
 import { fixtureMode } from '../../../src/api';
@@ -35,40 +44,59 @@ import {
   followUser,
   unfollowUser,
 } from '../../../src/socialApi';
+import { formatRp, tierLabel } from '../../../src/rankUtil';
 import { relativeTime } from '../../../src/time';
 import {
   fontFamilies,
   radii,
   spacing,
   typeStyles,
+  withOpacity,
   type Theme,
 } from '../../../src/theme';
 import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
-const PREVIEW_COUNT = 8;
+/** Rows in the design's "Top ratings" preview (the mock draws 3). */
+const TOP_COUNT = 3;
 
 /**
- * Public profile (Slice M5) — GET /users/:username and its satellite
- * reads: ratings, history, the rank chip (GET /rank/:userId via the
+ * Public profile — GET /users/:username and its satellite reads:
+ * ratings, history, the rank chip (GET /rank/:userId via the
  * profile's id) and the caller's follow state. Sections degrade
  * independently: a failed satellite hides or notes itself instead
  * of taking the whole screen down.
  *
- * The follower/following lists are NOT expanded here any more:
- * since layout-fidelity Slice 4 the stat blocks open the standalone
- * Network screen (§6.17), like the web's separate network page.
+ * Rebuilt against the User Profile design (owner-ordered design
+ * pass, 2026-11-10): mock kaikansen-userprofile-realimg.png +
+ * its Stitch HTML (html/userprofile.html) as dual ground truth.
+ * A bare back arrow and a ⋮ at the top; the identity block is ONE
+ * centred white card (avatar 80, name, @handle, rank chip, bio,
+ * the follow pill); the stats are their OWN card under it in the
+ * design's order — Ratings · Followers · Following — split by
+ * vertical hairlines (the follower/following blocks still open the
+ * standalone Network screen, §6.17); "Top ratings" previews the
+ * THREE highest-scored of the user's ratings (the endpoint serves
+ * the 50 most recent, newest first, so the top cut is sorted
+ * client-side by score, newest first on ties) as cover rows with a
+ * star-score pill; and the design's "See all ratings and history"
+ * link expands the full ratings list + the history list in place
+ * (there is no separate all-ratings route in the app or the web;
+ * the history read is public on the web and mirrored as-is).
  *
- * Layout-fidelity Slice 6 aligned the composition to the §6.16
- * design: the identity block is one white card (identity, bio,
- * follow/edit action, then the stats row in the design's order —
- * Ratings · Followers · Following), "Top ratings" previews the
- * first ratings, and the design's "See all ratings and history"
- * row expands the full ratings + the history list in place (there
- * is no separate all-ratings route in the app or the web). The
- * Recent activity section the pre-fidelity build carried is NOT
- * in the design and is removed — the activity read itself is
- * untouched server-side and still powers nothing here.
+ * Design notes / honest gaps:
+ * - The rank chip draws "Tier · N RP" exactly as the mock phrases
+ *   it (real tier + RP from GET /rank/:userId). The division the
+ *   rank document also carries is NOT in this chip — the mock's
+ *   format has no slot for it; divisions stay visible on the own
+ *   Profile rank card and the leaderboard.
+ * - The header ⋮ opens a small sheet whose only item is "Share
+ *   profile" (the OS share sheet — a real capability, the same one
+ *   the quiz room's Invite uses). No block/report/mute items are
+ *   drawn: no such backends exist.
+ * - On the viewer's OWN profile the pill is "Edit profile" (the
+ *   pre-rebuild behaviour); signed out it is "Log in to follow".
+ *   Neither state is drawn in the mock.
  *
  * Follow/unfollow is optimistic (state + follower count flip
  * immediately, the response reconciles, an error reverts and shows
@@ -87,8 +115,9 @@ export default function UserProfileScreen() {
   const [rank, setRank] = useState<UserRankProfile | null>(null);
   const [ratings, setRatings] = useState<UserRatingsResponse | null>(null);
   const [history, setHistory] = useState<UserHistoryResponse | null>(null);
-  /** The design's "See all ratings and history" expansion (Slice 6). */
+  /** The design's "See all ratings and history" expansion. */
   const [expanded, setExpanded] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const [isFollowing, setIsFollowing] = useState(false);
   const [followersCount, setFollowersCount] = useState(0);
@@ -108,6 +137,7 @@ export default function UserProfileScreen() {
     setRatings(null);
     setHistory(null);
     setExpanded(false);
+    setMenuOpen(false);
     setIsFollowing(false);
     setFollowError(null);
     fetchUserProfile(username)
@@ -152,9 +182,30 @@ export default function UserProfileScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
+  /**
+   * "Top" = highest score first (ties: newest first), over the
+   * endpoint's 50-most-recent window — the endpoint itself serves
+   * newest first and has no sort parameter (web parity).
+   */
+  const sortedRatings = useMemo(() => {
+    if (!ratings) return [];
+    return [...ratings.ratings].sort(
+      (a, b) =>
+        b.score - a.score || b.createdAt.localeCompare(a.createdAt),
+    );
+  }, [ratings]);
+
   const goBack = () => {
     if (router.canGoBack()) router.back();
     else router.replace('/(tabs)');
+  };
+
+  const onShareProfile = () => {
+    if (!profile) return;
+    setMenuOpen(false);
+    void Share.share({
+      message: `Check out @${profile.username} on Kaikansen!`,
+    }).catch(() => undefined);
   };
 
   const onToggleFollow = () => {
@@ -201,6 +252,7 @@ export default function UserProfileScreen() {
     label: string,
     value: number,
     tab: 'followers' | 'following' | null,
+    divider: boolean,
   ) => (
     <Pressable
       onPress={() =>
@@ -211,30 +263,90 @@ export default function UserProfileScreen() {
       disabled={!tab}
       accessibilityRole="button"
       accessibilityLabel={`${label}: ${value}`}
-      style={styles.statBlock}
+      style={[styles.statBlock, divider && styles.statBlockDivider]}
     >
       <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
     </Pressable>
   );
 
+  /**
+   * One rating row in the design's anatomy: white card, 48pt cover
+   * at radii.base, title + artist, and the star-score pill at the
+   * right. A rating whose theme left the catalogue keeps an honest
+   * fallback (the slug as its title, no cover/artist to draw).
+   */
+  const ratingRow = (entry: UserRatingEntry) => {
+    const t = entry.theme;
+    const cover = t ? (t.animeCoverImageSmall ?? t.animeCoverImage) : null;
+    const artist = t ? (t.artistName ?? t.allArtists.join(', ')) : null;
+    return (
+      <Pressable
+        key={entry.id}
+        onPress={() => openTheme(entry.themeSlug)}
+        accessibilityRole="button"
+        accessibilityLabel={`${t ? t.songTitle : entry.themeSlug}, rated ${entry.score} out of 10`}
+        style={({ pressed }) => [
+          styles.ratingRow,
+          pressed && styles.pressed,
+        ]}
+      >
+        {cover ? (
+          <Image source={{ uri: cover }} style={styles.ratingCover} />
+        ) : (
+          <View style={[styles.ratingCover, styles.ratingCoverEmpty]} />
+        )}
+        <View style={styles.ratingMain}>
+          <Text style={styles.ratingTitle} numberOfLines={1}>
+            {t ? t.songTitle : entry.themeSlug}
+          </Text>
+          {artist ? (
+            <Text style={styles.ratingArtist} numberOfLines={1}>
+              {artist}
+            </Text>
+          ) : null}
+        </View>
+        <View style={styles.scorePill}>
+          <Star
+            size={13}
+            color={theme.accent}
+            fill={theme.accent}
+            strokeWidth={2}
+          />
+          <Text style={styles.scoreText}>{entry.score}</Text>
+        </View>
+      </Pressable>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.topBar}>
         <Pressable
           onPress={goBack}
-          hitSlop={3}
           accessibilityRole="button"
           accessibilityLabel="Back"
-          style={styles.backHit}
+          style={({ pressed }) => [
+            styles.backHit,
+            pressed && styles.pressed,
+          ]}
         >
-          <View style={styles.backTile}>
-            <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-          </View>
+          <ArrowLeft size={26} color={theme.text} strokeWidth={2} />
         </Pressable>
-        <Text style={styles.title} numberOfLines={1}>
-          {profile ? `@${profile.username}` : 'Profile'}
-        </Text>
+        <View style={styles.headerSpacer} />
+        {profile && (
+          <Pressable
+            onPress={() => setMenuOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="More options"
+            style={({ pressed }) => [
+              styles.menuHit,
+              pressed && styles.pressed,
+            ]}
+          >
+            <MoreVertical size={24} color={theme.text} strokeWidth={2} />
+          </Pressable>
+        )}
       </View>
 
       {loadError ? (
@@ -247,148 +359,123 @@ export default function UserProfileScreen() {
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
-          {/* Identity card (§6.16): identity, bio, the follow/edit
-              action and the stats row in ONE white card; the stats
-              run in the design's order — Ratings · Followers ·
-              Following. (The pre-fidelity build's Joined/Listened
-              line under the bio is not in the design.) */}
+          {/* Identity card: centred avatar, name, @handle, the rank
+              chip, the bio and the follow pill — one white card. */}
           <View style={styles.identityCard}>
-            <View style={styles.identity}>
+            <View style={styles.avatarWrap}>
               <Avatar
                 url={profile.avatarUrl}
                 name={profile.displayName || profile.username}
                 seed={profile.id}
-                size={64}
+                size={80}
               />
-              <View style={styles.identityText}>
-                <Text style={styles.displayName} numberOfLines={1}>
-                  {profile.displayName || profile.username}
-                </Text>
-                <Text style={styles.handle}>@{profile.username}</Text>
-                {rank && (
-                  <View style={styles.rankChip}>
-                    <Text style={styles.rankChipText}>
-                      {rank.tier.charAt(0).toUpperCase() + rank.tier.slice(1)}
-                      {rank.division ? ` ${rank.division}` : ''} · {rank.rp} RP
-                    </Text>
-                  </View>
-                )}
-              </View>
             </View>
+            <Text style={styles.displayName} numberOfLines={1}>
+              {profile.displayName || profile.username}
+            </Text>
+            <Text style={styles.handle}>@{profile.username}</Text>
+            {rank && (
+              <View style={styles.rankChip}>
+                <Medal size={15} color={theme.accent} strokeWidth={2} />
+                <Text style={styles.rankChipText}>
+                  {tierLabel(rank.tier)} · {formatRp(rank.rp)}
+                </Text>
+              </View>
+            )}
 
             {profile.bio.length > 0 && (
               <Text style={styles.bio}>{profile.bio}</Text>
             )}
 
             {isOwn ? (
-            <Pressable
-              onPress={() => router.push('/edit-profile')}
-              accessibilityRole="button"
-              accessibilityLabel="Edit profile"
-              style={({ pressed }) => [
-                styles.actionButton,
-                styles.actionOutline,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Pencil size={16} color={theme.text} strokeWidth={2} />
-              <Text style={styles.actionOutlineText}>Edit profile</Text>
-            </Pressable>
-          ) : signedIn ? (
-            <Pressable
-              onPress={onToggleFollow}
-              disabled={followBusy}
-              accessibilityRole="button"
-              accessibilityLabel={isFollowing ? 'Unfollow' : 'Follow'}
-              accessibilityState={{ selected: isFollowing }}
-              style={({ pressed }) => [
-                styles.actionButton,
-                isFollowing ? styles.actionOutline : styles.actionAccent,
-                pressed && styles.pressed,
-                followBusy && styles.actionBusy,
-              ]}
-            >
-              {followBusy ? (
-                <ActivityIndicator
-                  size="small"
-                  color={isFollowing ? theme.text : theme.onAccent}
-                />
-              ) : isFollowing ? (
-                <>
-                  <UserCheck size={16} color={theme.text} strokeWidth={2} />
-                  <Text style={styles.actionOutlineText}>Following</Text>
-                </>
-              ) : (
-                <>
-                  <UserPlus size={16} color={theme.onAccent} strokeWidth={2} />
-                  <Text style={styles.actionAccentText}>Follow</Text>
-                </>
-              )}
-            </Pressable>
-          ) : (
-            <Pressable
-              onPress={() => router.push('/login')}
-              accessibilityRole="button"
-              accessibilityLabel="Log in to follow"
-              style={({ pressed }) => [
-                styles.actionButton,
-                styles.actionAccent,
-                pressed && styles.pressed,
-              ]}
-            >
-              <UserPlus size={16} color={theme.onAccent} strokeWidth={2} />
-              <Text style={styles.actionAccentText}>Log in to follow</Text>
-            </Pressable>
-          )}
+              <Pressable
+                onPress={() => router.push('/edit-profile')}
+                accessibilityRole="button"
+                accessibilityLabel="Edit profile"
+                style={({ pressed }) => [
+                  styles.actionPill,
+                  styles.actionPillPale,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Pencil size={18} color={theme.text} strokeWidth={2} />
+                <Text style={styles.actionPillEditText}>Edit profile</Text>
+              </Pressable>
+            ) : signedIn ? (
+              <Pressable
+                onPress={onToggleFollow}
+                disabled={followBusy}
+                accessibilityRole="button"
+                accessibilityLabel={isFollowing ? 'Unfollow' : 'Follow'}
+                accessibilityState={{ selected: isFollowing }}
+                style={({ pressed }) => [
+                  styles.actionPill,
+                  isFollowing
+                    ? styles.actionPillPale
+                    : styles.actionPillAccent,
+                  pressed && styles.pressed,
+                  followBusy && styles.actionBusy,
+                ]}
+              >
+                {followBusy ? (
+                  <ActivityIndicator
+                    size="small"
+                    color={isFollowing ? theme.accent : theme.onAccent}
+                  />
+                ) : isFollowing ? (
+                  <>
+                    <Check size={18} color={theme.accent} strokeWidth={2.5} />
+                    <Text style={styles.actionPillPaleText}>Following</Text>
+                  </>
+                ) : (
+                  <>
+                    <UserPlus size={18} color={theme.onAccent} strokeWidth={2} />
+                    <Text style={styles.actionPillAccentText}>Follow</Text>
+                  </>
+                )}
+              </Pressable>
+            ) : (
+              <Pressable
+                onPress={() => router.push('/login')}
+                accessibilityRole="button"
+                accessibilityLabel="Log in to follow"
+                style={({ pressed }) => [
+                  styles.actionPill,
+                  styles.actionPillAccent,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <UserPlus size={18} color={theme.onAccent} strokeWidth={2} />
+                <Text style={styles.actionPillAccentText}>
+                  Log in to follow
+                </Text>
+              </Pressable>
+            )}
             {followError && <Text style={styles.errorText}>{followError}</Text>}
-
-            <View style={styles.statRow}>
-              {statBlock('Ratings', profile.totalRatings, null)}
-              {statBlock('Followers', followersCount, 'followers')}
-              {statBlock('Following', profile.totalFollowing, 'following')}
-            </View>
           </View>
 
-          {ratings && ratings.ratings.length > 0 && (
+          {/* Stats card — the design's own card, hairline-divided. */}
+          <View style={styles.statsCard}>
+            {statBlock('Ratings', profile.totalRatings, null, true)}
+            {statBlock('Followers', followersCount, 'followers', true)}
+            {statBlock('Following', profile.totalFollowing, 'following', false)}
+          </View>
+
+          {ratings && sortedRatings.length > 0 && (
             <>
               <Text style={styles.sectionHeading}>Top ratings</Text>
               {(expanded
-                ? ratings.ratings
-                : ratings.ratings.slice(0, PREVIEW_COUNT)
-              ).map((entry) =>
-                entry.theme ? (
-                  <ThemeRow
-                    key={entry.id}
-                    item={entry.theme}
-                    detail={`Rated ${entry.score}/10 · ${relativeTime(entry.createdAt)}`}
-                    onPress={() => openTheme(entry.themeSlug)}
-                  />
-                ) : (
-                  <Pressable
-                    key={entry.id}
-                    onPress={() => openTheme(entry.themeSlug)}
-                    style={styles.activityRow}
-                  >
-                    <View style={styles.activityMain}>
-                      <Text style={styles.activityTitle} numberOfLines={1}>
-                        {entry.themeSlug}
-                      </Text>
-                      <Text style={styles.activityMeta}>
-                        Rated {entry.score}/10 ·{' '}
-                        {relativeTime(entry.createdAt)}
-                      </Text>
-                    </View>
-                  </Pressable>
-                ),
-              )}
+                ? sortedRatings
+                : sortedRatings.slice(0, TOP_COUNT)
+              ).map(ratingRow)}
             </>
           )}
 
-          {/* The design's "See all ratings and history" row: it
+          {/* The design's "See all ratings and history" link: it
               expands the full ratings list and reveals History in
               place (no separate route exists in app or web). */}
           {!expanded &&
-            ((ratings && ratings.ratings.length > PREVIEW_COUNT) ||
+            (sortedRatings.length > TOP_COUNT ||
               (history && history.entries.length > 0)) && (
               <Pressable
                 onPress={() => setExpanded(true)}
@@ -402,13 +489,15 @@ export default function UserProfileScreen() {
                 <Text style={styles.seeAllText}>
                   See all ratings and history
                 </Text>
-                <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
+                <ChevronRight size={16} color={theme.secondary} strokeWidth={2} />
               </Pressable>
             )}
 
           {expanded && history && history.entries.length > 0 && (
             <>
-              <Text style={styles.sectionHeading}>History</Text>
+              <Text style={[styles.sectionHeading, styles.historyHeading]}>
+                History
+              </Text>
               {history.entries.map((entry) =>
                 entry.theme ? (
                   <ThemeRow
@@ -429,6 +518,63 @@ export default function UserProfileScreen() {
           )}
         </ScrollView>
       )}
+
+      {/* Header ⋮ sheet — the Playlist detail sheet's pattern. Its
+          only item is Share profile: the one action this screen can
+          honestly offer (no block/report backends exist). */}
+      <Modal
+        visible={menuOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setMenuOpen(false)}
+      >
+        <View style={styles.menuBackdrop}>
+          <Pressable
+            style={styles.menuDismiss}
+            onPress={() => setMenuOpen(false)}
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+          />
+          <View style={styles.menuSheet}>
+            <View style={styles.menuHeader}>
+              <View style={styles.menuHeaderMain}>
+                <Text style={styles.menuTitle} numberOfLines={1}>
+                  {profile ? profile.displayName || profile.username : ''}
+                </Text>
+                <Text style={styles.menuSubtitle}>
+                  {profile ? `@${profile.username}` : ''}
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => setMenuOpen(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close menu"
+                style={({ pressed }) => [
+                  styles.menuClose,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <X size={18} color={theme.text} strokeWidth={2} />
+              </Pressable>
+            </View>
+
+            <Pressable
+              onPress={onShareProfile}
+              accessibilityRole="button"
+              accessibilityLabel="Share profile"
+              style={({ pressed }) => [
+                styles.menuRow,
+                pressed && styles.pressed,
+              ]}
+            >
+              <View style={styles.menuIcon}>
+                <Share2 size={18} color={theme.text} strokeWidth={2} />
+              </View>
+              <Text style={styles.menuLabel}>Share profile</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -447,26 +593,25 @@ const createStyles = (theme: Theme) =>
       alignSelf: 'center',
       paddingHorizontal: spacing.screenEdge,
       paddingVertical: spacing.sm,
-      gap: spacing.sm,
+      marginBottom: spacing.sm,
     },
     backHit: {
-      width: 44,
-      height: 44,
+      // The HTML's w-10 h-10 hit area, -ml-1 against the edge.
+      width: 40,
+      height: 40,
+      marginLeft: -4,
       alignItems: 'center',
       justifyContent: 'center',
     },
-    backTile: {
-      width: 38,
-      height: 38,
-      borderRadius: radii.base,
-      backgroundColor: theme.raised,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    title: {
-      ...typeStyles.heading,
-      color: theme.text,
+    headerSpacer: {
       flex: 1,
+    },
+    menuHit: {
+      width: 40,
+      height: 40,
+      marginRight: -4,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     center: {
       flex: 1,
@@ -488,134 +633,210 @@ const createStyles = (theme: Theme) =>
       paddingBottom: spacing.xxxl,
     },
     identityCard: {
-      // §6.16: the identity block is one white card.
+      // The HTML's rounded-[26px] card (no token sits at 26; the
+      // value is the screen HTML's own), p-5, centred column.
       backgroundColor: theme.surface,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.border,
-      borderRadius: radii.cardLg,
-      paddingHorizontal: spacing.lg,
-      paddingVertical: spacing.lg,
-      marginTop: spacing.sm,
-    },
-    identity: {
-      flexDirection: 'row',
+      borderRadius: 26,
+      padding: spacing.xl,
       alignItems: 'center',
-      gap: spacing.md,
+      marginBottom: spacing.md,
     },
-    identityText: {
-      flex: 1,
-      gap: 2,
-      alignItems: 'flex-start',
+    avatarWrap: {
+      marginBottom: spacing.md,
     },
     displayName: {
-      ...typeStyles.display,
+      fontFamily: fontFamilies.display,
       fontSize: 20,
+      lineHeight: 24,
       color: theme.text,
+      textAlign: 'center',
+      marginBottom: 2,
     },
     handle: {
-      ...typeStyles.bodySmall,
-      color: theme.muted,
+      fontFamily: fontFamilies.caption,
+      fontSize: 14,
+      color: theme.secondary,
+      textAlign: 'center',
+      marginBottom: spacing.sm,
     },
     rankChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
       backgroundColor: theme.accentContainer,
       borderRadius: radii.pill,
-      paddingHorizontal: spacing.sm + 2,
-      paddingVertical: 3,
-      marginTop: spacing.xs,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.xs,
+      marginBottom: spacing.md,
     },
     rankChipText: {
-      ...typeStyles.caption,
       fontFamily: fontFamilies.bodyStrong,
-      color: theme.onAccentContainer,
+      fontSize: 12,
+      color: theme.accent,
     },
     bio: {
-      ...typeStyles.body,
-      color: theme.text,
-      lineHeight: 20,
-      marginTop: spacing.md,
+      // The HTML's 13.5pt relaxed line in its soft plum (#5C4554,
+      // a Stitch approximation) — the token system's nearest
+      // honest step is the ink at reduced opacity over the card.
+      fontFamily: fontFamilies.body,
+      fontSize: 13.5,
+      lineHeight: 22,
+      color: withOpacity(theme.text, 0.82),
+      textAlign: 'center',
+      maxWidth: 320,
+      marginBottom: spacing.lg,
     },
-    statRow: {
-      // Inside the identity card now, divided by a hairline.
-      flexDirection: 'row',
-      marginTop: spacing.lg,
-      borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: theme.border,
-      paddingTop: spacing.md,
-    },
-    seeAllRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      backgroundColor: theme.surface,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.border,
-      borderRadius: radii.card,
-      paddingHorizontal: spacing.lg,
-      paddingVertical: spacing.md,
-      marginTop: spacing.md,
-    },
-    seeAllText: {
-      ...typeStyles.body,
-      fontFamily: fontFamilies.bodyStrong,
-      color: theme.text,
-    },
-    statBlock: {
-      flex: 1,
-      alignItems: 'center',
-      gap: 1,
-      paddingVertical: spacing.xs,
-    },
-    statValue: {
-      ...typeStyles.body,
-      fontFamily: fontFamilies.bodyStrong,
-      color: theme.text,
-    },
-    statLabel: {
-      ...typeStyles.caption,
-      color: theme.muted,
-    },
-    actionButton: {
+    actionPill: {
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: spacing.sm,
-      minHeight: 44,
-      borderRadius: radii.base,
-      marginTop: spacing.md,
+      gap: 6,
+      paddingHorizontal: spacing.xxl,
+      paddingVertical: spacing.sm,
+      borderRadius: radii.pill,
     },
-    actionAccent: {
+    actionPillPale: {
+      // Following / Edit profile — the HTML's #EDE2EB pale fill is
+      // the raised-disc lavender token's family step.
+      backgroundColor: theme.raised,
+    },
+    actionPillAccent: {
       backgroundColor: theme.accent,
     },
-    actionOutline: {
-      backgroundColor: theme.surface,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.border,
+    actionPillPaleText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 14,
+      color: theme.accent,
+    },
+    actionPillAccentText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 14,
+      color: theme.onAccent,
+    },
+    actionPillEditText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 14,
+      color: theme.text,
     },
     actionBusy: {
       opacity: 0.6,
-    },
-    actionAccentText: {
-      ...typeStyles.bodySmall,
-      fontFamily: fontFamilies.bodyStrong,
-      color: theme.onAccent,
-    },
-    actionOutlineText: {
-      ...typeStyles.bodySmall,
-      fontFamily: fontFamilies.bodyStrong,
-      color: theme.text,
     },
     errorText: {
       ...typeStyles.bodySmall,
       color: theme.accent,
       marginTop: spacing.sm,
       lineHeight: 18,
+      textAlign: 'center',
+    },
+    statsCard: {
+      // The HTML's rounded-[22px] stats card, py-4, hairline-split
+      // columns in the design's order.
+      flexDirection: 'row',
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: 22,
+      paddingVertical: spacing.lg,
+      paddingHorizontal: spacing.md,
+      marginBottom: spacing.xl,
+    },
+    statBlock: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    statBlockDivider: {
+      borderRightWidth: StyleSheet.hairlineWidth,
+      borderRightColor: theme.border,
+    },
+    statValue: {
+      fontFamily: fontFamilies.wordmark,
+      fontSize: 18,
+      lineHeight: 18,
+      color: theme.text,
+      marginBottom: spacing.xs,
+    },
+    statLabel: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
+      color: theme.secondary,
     },
     sectionHeading: {
-      ...typeStyles.heading,
+      fontFamily: fontFamilies.display,
       fontSize: 16,
       color: theme.text,
+      paddingHorizontal: spacing.xs,
+      marginBottom: 10,
+    },
+    historyHeading: {
       marginTop: spacing.xl,
-      marginBottom: spacing.xs,
+    },
+    ratingRow: {
+      // The HTML's rounded-[20px] rows, p-3, space-y-2 rhythm.
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: 20,
+      padding: spacing.md,
+      marginBottom: spacing.sm,
+    },
+    ratingCover: {
+      width: 48,
+      height: 48,
+      borderRadius: radii.base,
+      flexShrink: 0,
+    },
+    ratingCoverEmpty: {
+      backgroundColor: theme.raised,
+    },
+    ratingMain: {
+      flex: 1,
+      gap: 1,
+    },
+    ratingTitle: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 14,
+      color: theme.text,
+    },
+    ratingArtist: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
+      color: theme.secondary,
+    },
+    scorePill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.xs,
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: 10,
+      paddingVertical: spacing.xs,
+      flexShrink: 0,
+    },
+    scoreText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 12,
+      color: theme.accent,
+    },
+    seeAllRow: {
+      // The HTML's bare link row (no card): px-2 py-1, bold mauve.
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.xs,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: spacing.xs,
+      alignSelf: 'flex-start',
+      marginTop: spacing.xs,
+    },
+    seeAllText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 12,
+      color: theme.secondary,
     },
     note: {
       ...typeStyles.bodySmall,
@@ -623,28 +844,69 @@ const createStyles = (theme: Theme) =>
       lineHeight: 18,
       marginTop: spacing.sm,
     },
-    activityRow: {
+    /* Header ⋮ sheet — the Playlist detail sheet's pattern. */
+    menuBackdrop: {
+      flex: 1,
+      backgroundColor: withOpacity(theme.background, 0.72),
+      justifyContent: 'flex-end',
+    },
+    menuDismiss: {
+      flex: 1,
+    },
+    menuSheet: {
+      backgroundColor: theme.surface,
+      borderTopLeftRadius: radii.cardLg,
+      borderTopRightRadius: radii.cardLg,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      paddingHorizontal: spacing.screenEdge,
+      paddingTop: spacing.md,
+      paddingBottom: spacing.xl,
+    },
+    menuHeader: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
-      minHeight: 52,
-      paddingVertical: 6,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: theme.border,
+      gap: spacing.sm,
+      marginBottom: spacing.sm,
     },
-    activityMain: {
+    menuHeaderMain: {
       flex: 1,
       gap: 2,
     },
-    activityTitle: {
-      ...typeStyles.body,
-      fontSize: 13,
-      fontFamily: fontFamilies.bodyStrong,
+    menuTitle: {
+      ...typeStyles.heading,
       color: theme.text,
     },
-    activityMeta: {
+    menuSubtitle: {
       ...typeStyles.caption,
       color: theme.muted,
+    },
+    menuClose: {
+      width: 36,
+      height: 36,
+      borderRadius: radii.base,
+      backgroundColor: theme.raised,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    menuRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      paddingVertical: spacing.sm + 2,
+    },
+    menuIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: radii.base,
+      backgroundColor: theme.raised,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    menuLabel: {
+      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
     },
     pressed: {
       opacity: 0.85,

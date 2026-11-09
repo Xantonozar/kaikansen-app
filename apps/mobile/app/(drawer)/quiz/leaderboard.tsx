@@ -22,6 +22,7 @@ import {
 import { RankRow } from '../../../src/components/RankRow';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 import {
+  fontFamilies,
   radii,
   spacing,
   typeStyles,
@@ -32,20 +33,37 @@ import { useTheme } from '../../../src/theme-context';
 import { formatRp, tierLabel, tierProgress } from '../../../src/rankUtil';
 
 /**
- * Leaderboard (layout-fidelity slice) — the Lavender Dusk board
- * from the design set: back header, the ranked rows in one white
- * card (the caller's row tinted with its YOU pill), and the
- * pinned mauve "Your rank" card at the bottom.
+ * Leaderboard — rebuilt against the screen's Stitch mock/HTML:
+ * back header, the Weekly/All-time segmented control, the
+ * ranked rows full-bleed in one grouped white card (the
+ * caller's row inset-tinted with its YOU pill), and the pinned
+ * mauve "Your rank" card at the bottom. Rows tap through to
+ * the player's public profile.
  *
- * Data is GET /rank/leaderboard (the web's /api/leaderboard port:
- * top 100 by RP) plus GET /rank/me for the caller's standing.
- * The design's Weekly/All-time toggle is NOT built: neither the
- * web board nor this API carries a period parameter — the board
- * is all-time, exactly like the web's "Global Rankings" page.
+ * Data is GET /rank/leaderboard (the web's /api/leaderboard
+ * port: top 100 by RP) plus GET /rank/me for the caller's
+ * standing.
+ *
+ * ⚠️ WEEKLY IS NOT REAL — flagged for the owner. The mock
+ * selects "Weekly", but no weekly board exists anywhere in
+ * this system: GET /rank/leaderboard takes no period
+ * parameter; the shared snapshot schema's scope enum ALLOWS
+ * 'weekly'/'monthly', yet the web's cron writer and
+ * leaderboard route both hardcode scope 'global' / seasonId
+ * 'all-time', so a weekly snapshot is never written; UserRank
+ * carries no weekly RP field (its season block is the
+ * all-time season); and `rankhistories` — the only rows a
+ * weekly sum could come from — are read by nothing on the
+ * web or here. The control therefore renders as drawn but
+ * with "All time" as the active segment and "Weekly"
+ * DISABLED: all-time data is never presented under a Weekly
+ * label. Building a weekly board is a new API read + a
+ * product decision, not a restyle.
+ *
  * The pinned card needs the caller's position, which only
- * exists when they land inside the served top 100; a signed-in
- * caller outside it gets the card without a position, and a
- * signed-out caller gets no card at all.
+ * exists when they land inside the served top 100; a
+ * signed-in caller outside it gets the card without a
+ * position, and a signed-out caller gets no card at all.
  */
 export default function LeaderboardScreen() {
   const theme = useTheme();
@@ -104,7 +122,7 @@ export default function LeaderboardScreen() {
           accessibilityLabel="Back"
           style={styles.backHit}
         >
-          <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
+          <ChevronLeft size={26} color={theme.text} strokeWidth={2} />
         </Pressable>
         <Text style={styles.title}>Leaderboard</Text>
       </View>
@@ -115,6 +133,35 @@ export default function LeaderboardScreen() {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.column}>
+          {/* Segmented control, the mock's geometry — Weekly is
+              disabled because no weekly board exists (see the
+              header comment); All time is the real, active
+              segment. */}
+          <View
+            style={styles.segmentTrack}
+            accessibilityLabel="Timeframe: all time. Weekly rankings are not tracked yet."
+          >
+            <Pressable
+              disabled
+              accessibilityRole="button"
+              accessibilityState={{ disabled: true, selected: false }}
+              accessibilityLabel="Weekly — not available yet"
+              style={[styles.segment, styles.segmentDisabled]}
+            >
+              <Text style={[styles.segmentText, styles.segmentTextIdle]}>
+                Weekly
+              </Text>
+            </Pressable>
+            <View
+              style={[styles.segment, styles.segmentActive]}
+              accessibilityState={{ selected: true }}
+            >
+              <Text style={[styles.segmentText, styles.segmentTextActive]}>
+                All time
+              </Text>
+            </View>
+          </View>
+
           {entries === null && !error ? (
             <ActivityIndicator color={theme.accent} style={styles.spin} />
           ) : error ? (
@@ -134,10 +181,12 @@ export default function LeaderboardScreen() {
               {entries.map((entry, i) => (
                 <RankRow
                   key={entry.userId}
+                  variant="board"
                   position={i + 1}
                   entry={entry}
                   isYou={myRank !== null && entry.userId === myRank.userId}
                   bordered={i < entries.length - 1}
+                  onPress={() => router.push(`/user/${entry.username}`)}
                 />
               ))}
             </View>
@@ -168,7 +217,7 @@ export default function LeaderboardScreen() {
               </Text>
             </View>
             <View style={styles.pinDisc}>
-              <Medal size={20} color={theme.onAccent} strokeWidth={2} />
+              <Medal size={22} color={theme.onAccent} strokeWidth={2} />
             </View>
           </View>
         </View>
@@ -186,28 +235,34 @@ const createStyles = (theme: Theme) =>
     header: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
-      paddingHorizontal: spacing.screenEdge,
-      paddingVertical: spacing.sm,
+      gap: spacing.sm,
+      // This screen's HTML canvas is px-5 (20px), not the
+      // shared 16px edge — the header, content and pin wrap
+      // all carry the 20px inset (Room-waiting precedent).
+      paddingHorizontal: spacing.xl,
+      paddingTop: spacing.sm,
+      paddingBottom: spacing.lg,
     },
     backHit: {
-      // Bare arrow (design polish pass): the mock's back is an
-      // untiled chevron; the 44px box is only the hit area.
-      width: 44,
-      height: 44,
+      // The HTML's p-1 / -ml-1 bare arrow: a 36px hit area
+      // nudged 4px left, 26px chevron.
+      width: 36,
+      height: 36,
+      marginLeft: -4,
       alignItems: 'center',
       justifyContent: 'center',
     },
     title: {
-      ...typeStyles.display,
+      fontFamily: fontFamilies.display,
+      fontSize: 24,
+      letterSpacing: -0.5,
       color: theme.text,
     },
     scroll: {
       flex: 1,
     },
     content: {
-      padding: spacing.screenEdge,
-      paddingTop: spacing.sm,
+      paddingHorizontal: spacing.xl,
       paddingBottom: spacing.xxxl,
     },
     column: {
@@ -215,10 +270,48 @@ const createStyles = (theme: Theme) =>
       maxWidth: CONTENT_MAX_WIDTH,
       alignSelf: 'center',
     },
+    segmentTrack: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      // The HTML's pale track (#EFE8EE): the raised token is
+      // the closest measured Lavender Dusk tone.
+      backgroundColor: theme.raised,
+      borderRadius: radii.pill,
+      padding: 4,
+      marginBottom: spacing.lg,
+    },
+    segment: {
+      flex: 1,
+      paddingVertical: 6,
+      paddingHorizontal: spacing.lg,
+      borderRadius: radii.pill,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    segmentActive: {
+      backgroundColor: theme.accent,
+    },
+    segmentDisabled: {
+      opacity: 0.55,
+    },
+    segmentText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 12,
+    },
+    segmentTextIdle: {
+      color: theme.secondary,
+    },
+    segmentTextActive: {
+      color: theme.onAccent,
+    },
     card: {
       backgroundColor: theme.surface,
       borderRadius: radii.cardLg,
-      padding: spacing.sm,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      // Rows are full-bleed (their own px-4) with hairlines
+      // spanning the card; the viewer's row is inset inside.
+      overflow: 'hidden',
     },
     spin: {
       paddingVertical: spacing.xxl,
@@ -248,11 +341,11 @@ const createStyles = (theme: Theme) =>
       paddingVertical: spacing.xl,
     },
     pinWrap: {
-      paddingHorizontal: spacing.screenEdge,
-      paddingBottom: spacing.lg,
+      paddingHorizontal: spacing.xl,
+      paddingBottom: spacing.xxl,
       paddingTop: spacing.sm,
       width: '100%',
-      maxWidth: CONTENT_MAX_WIDTH + spacing.screenEdge * 2,
+      maxWidth: CONTENT_MAX_WIDTH + spacing.xl * 2,
       alignSelf: 'center',
     },
     pinCard: {
@@ -260,7 +353,8 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       gap: spacing.md,
       backgroundColor: theme.accent,
-      borderRadius: radii.cardLg,
+      // The HTML's rounded-2xl (16) at p-4 (16).
+      borderRadius: radii.md,
       padding: spacing.lg,
     },
     pinMain: {
@@ -268,18 +362,24 @@ const createStyles = (theme: Theme) =>
       gap: 2,
     },
     pinTitle: {
-      ...typeStyles.heading,
+      fontFamily: fontFamilies.display,
+      fontSize: 18,
+      letterSpacing: -0.3,
       color: theme.onAccent,
     },
     pinSub: {
-      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
       color: withOpacity(theme.onAccent, 0.85),
     },
     pinDisc: {
       width: 40,
       height: 40,
       borderRadius: 20,
-      backgroundColor: withOpacity(theme.onAccent, 0.18),
+      // The HTML's white/15 disc with a white/10 rim.
+      backgroundColor: withOpacity(theme.onAccent, 0.15),
+      borderWidth: 1,
+      borderColor: withOpacity(theme.onAccent, 0.1),
       alignItems: 'center',
       justifyContent: 'center',
     },

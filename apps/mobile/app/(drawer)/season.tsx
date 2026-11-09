@@ -9,10 +9,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { ChevronLeft, Search } from 'lucide-react-native';
+import { ArrowLeft, Search } from 'lucide-react-native';
 import type { Season, SeasonResponse, ThemeSummary } from '@kaikansen/contracts';
 import { fetchHome, fetchSeason } from '../../src/api';
-import { useFavorites } from '../../src/favoritesStore';
 import { ThemeRow } from '../../src/components/ThemeRow';
 import {
   queueItemsFromSummaries,
@@ -36,27 +35,36 @@ function seasonTitleCase(season: string): string {
 }
 
 /**
- * Season browse (DESIGN.md §6.5) — Home's "View All". Layout-
- * fidelity Slice 6 rebuilt it to the design (season.html): back +
- * title-cased season title + a search icon in the header, the
- * four SEASON chips (Winter/Spring/Summer/Fall — the pre-fidelity
- * build's All/OP/ED type filter is not in the design; the
- * endpoint's type parameter stays available server-side), the
- * "N themes this season" count line, then the rows.
+ * Season browse (DESIGN.md §6.5) — Home's "View All". Rebuilt to
+ * the Season design (season.html is the measurement truth): a
+ * plain back arrow + the centred "<Season> <Year>" title + a
+ * plain search icon (no tiles), the four season chips as equal
+ * flex-1 pills, the "N themes this season" line, then ThemeRow's
+ * `season` cut of the rows. The pre-fidelity build's All/OP/ED
+ * type filter is not in the design; the endpoint's type
+ * parameter stays available server-side.
  *
- * Data: GET /season (the web's /api/themes/seasonal read, ported
- * in Slice 6) with real pagination (Load more while the server
- * says hasMore). The screen learns which season+year is being
- * served from /home first — the API's fallback-aware current
- * season — and the chips switch season WITHIN that served year:
- * the design has no year switcher, and other years are honestly
- * out of this screen's scope rather than guessed.
+ * Data: GET /season (the web's /api/themes/seasonal read) with
+ * real pagination (Load more while the server says hasMore —
+ * seasons run past one 20-theme page, so the control stays even
+ * though the mock's first screenful doesn't draw it). The count
+ * line reads the response's `total` — the season's real size
+ * across all pages, counted server-side under the same filter;
+ * it never derives from the loaded rows' length.
+ *
+ * The screen learns which season+year is being served from
+ * /home first — the API's fallback-aware current season — and
+ * the chips switch season WITHIN that served year: the design
+ * has no year switcher, and this screen has never browsed other
+ * years, so none is removed. Title, selected chip and count all
+ * describe the season actually loaded: a season with no data
+ * (FALL 2026 serves none) gets its honest empty state under its
+ * own name, never another season's rows.
  */
 export default function SeasonScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
-  const favorites = useFavorites();
   const [served, setServed] = useState<{ season: Season; year: number } | null>(
     null,
   );
@@ -145,56 +153,72 @@ export default function SeasonScreen() {
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
       <View style={styles.header}>
-        <Pressable
-          onPress={() => router.back()}
-          hitSlop={6}
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-          style={styles.backTile}
-        >
-          <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-        </Pressable>
-        <Text style={styles.title}>
-          {selected && served
-            ? `${seasonTitleCase(selected)} ${served.year}`
-            : 'Season'}
-        </Text>
-        <Pressable
-          onPress={() => router.push('/search')}
-          hitSlop={6}
-          accessibilityRole="button"
-          accessibilityLabel="Search"
-          style={styles.backTile}
-        >
-          <Search size={20} color={theme.text} strokeWidth={2} />
-        </Pressable>
-      </View>
+        <View style={styles.headerRow}>
+          <Pressable
+            onPress={() => router.back()}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
+            style={({ pressed }) => [
+              styles.headerButton,
+              styles.backButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <ArrowLeft size={24} color={theme.text} strokeWidth={2} />
+          </Pressable>
+          <Text style={styles.title}>
+            {selected && served
+              ? `${seasonTitleCase(selected)} ${served.year}`
+              : 'Season'}
+          </Text>
+          <Pressable
+            onPress={() => router.push('/search')}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel="Search"
+            style={({ pressed }) => [
+              styles.headerButton,
+              styles.searchButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Search size={22} color={theme.text} strokeWidth={2} />
+          </Pressable>
+        </View>
 
-      <View style={styles.chips}>
-        {SEASON_ORDER.map((value) => {
-          const active = selected === value;
-          return (
-            <Pressable
-              key={value}
-              onPress={() => setSelected(value)}
-              accessibilityRole="button"
-              accessibilityState={{ selected: active }}
-              accessibilityLabel={`Season: ${seasonTitleCase(value)}`}
-              style={[styles.chip, active && { backgroundColor: theme.accent }]}
-            >
-              <Text style={[styles.chipText, active && { color: theme.onAccent }]}>
-                {seasonTitleCase(value)}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
+        <View style={styles.chips}>
+          {SEASON_ORDER.map((value) => {
+            const active = selected === value;
+            return (
+              <Pressable
+                key={value}
+                onPress={() => setSelected(value)}
+                accessibilityRole="button"
+                accessibilityState={{ selected: active }}
+                accessibilityLabel={`Season: ${seasonTitleCase(value)}`}
+                style={({ pressed }) => [
+                  styles.chip,
+                  active && styles.chipActive,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                  {seasonTitleCase(value)}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
 
-      {data && (
-        <Text style={styles.countLine}>
-          {themes.length} themes this season
-        </Text>
-      )}
+        {data && (
+          <View style={styles.countWrap}>
+            <Text style={styles.countLine}>
+              {data.total} themes this season
+            </Text>
+          </View>
+        )}
+      </View>
 
       {error ? (
         <View style={styles.center}>
@@ -215,11 +239,9 @@ export default function SeasonScreen() {
               <ThemeRow
                 key={item.slug}
                 item={item}
+                season
                 onPress={() => openTheme(item.slug)}
                 onPlay={() => playTheme(item.slug, themes)}
-                saved={favorites.isFavorite(item.slug)}
-                savePending={favorites.isPending(item.slug)}
-                onToggleSave={() => void favorites.toggle(item.slug)}
               />
             ))}
             {themes.length === 0 && (
@@ -257,51 +279,90 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.background,
     },
     header: {
+      // season.html: the sticky header block is px-4 pt-4 pb-2.
+      paddingHorizontal: spacing.screenEdge,
+      paddingTop: spacing.lg,
+      paddingBottom: spacing.sm,
+    },
+    headerRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
-      paddingHorizontal: spacing.screenEdge,
-      paddingVertical: spacing.sm,
     },
-    backTile: {
-      width: 38,
-      height: 38,
+    headerButton: {
+      // season.html: bare 40x40 round hit areas, no tile behind
+      // the glyphs; the -4 margins pull them to the screen edge.
+      width: 40,
+      height: 40,
       borderRadius: radii.pill,
-      backgroundColor: theme.surface,
       alignItems: 'center',
       justifyContent: 'center',
     },
+    backButton: {
+      marginLeft: -4,
+    },
+    searchButton: {
+      marginRight: -4,
+    },
     title: {
-      ...typeStyles.display,
-      color: theme.text,
+      // season.html: text-xl (20) bold, tracking-tight, centred;
+      // the 8px right padding is the HTML's pr-2 optical offset.
       flex: 1,
+      textAlign: 'center',
+      paddingRight: spacing.sm,
+      fontFamily: fontFamilies.display,
+      fontSize: 20,
+      letterSpacing: -0.5,
+      color: theme.text,
     },
     chips: {
+      // season.html: mt-3, gap-2, a breath of vertical padding.
       flexDirection: 'row',
       gap: spacing.sm,
-      paddingHorizontal: spacing.screenEdge,
-      paddingBottom: spacing.sm,
+      marginTop: spacing.md,
+      paddingVertical: 2,
     },
     chip: {
+      // season.html: flex-1 pills, py-1.5 px-3; the idle fill is
+      // the HTML's #EDE5EC — theme.raised is the closest measured
+      // token (the Leaderboard slice's precedent for this tone).
+      flex: 1,
       alignItems: 'center',
+      justifyContent: 'center',
       paddingHorizontal: spacing.md,
-      paddingVertical: 7,
+      paddingVertical: 6,
       borderRadius: radii.pill,
-      backgroundColor: theme.accentContainer,
+      backgroundColor: theme.raised,
+    },
+    chipActive: {
+      backgroundColor: theme.accent,
     },
     chipText: {
-      ...typeStyles.caption,
+      // season.html: text-xs (12); medium idle, semibold active.
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
+      color: theme.accent,
+    },
+    chipTextActive: {
       fontFamily: fontFamilies.bodyStrong,
-      color: theme.onAccentContainer,
+      color: theme.onAccent,
+    },
+    countWrap: {
+      // season.html: the line sits pt-2 below the chips, inset a
+      // further px-1 inside the header's padding.
+      paddingTop: spacing.sm,
+      paddingLeft: spacing.xs,
     },
     countLine: {
-      ...typeStyles.bodySmall,
-      color: theme.muted,
-      paddingHorizontal: spacing.screenEdge,
-      paddingBottom: spacing.md,
+      // season.html: 12px medium in the mauve, tracking-wide.
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
+      letterSpacing: 0.3,
+      color: theme.secondary,
     },
     content: {
+      // season.html: the list is px-4 (the screen edge) pt-2.
       paddingHorizontal: spacing.screenEdge,
+      paddingTop: spacing.sm,
       paddingBottom: spacing.xxxl,
     },
     column: {

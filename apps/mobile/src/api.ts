@@ -324,7 +324,7 @@ export async function fetchSeason(
       .filter((t) => t.animeSeason === season && t.animeSeasonYear === year)
       .sort((a, b) => a.sequence - b.sequence || b.avgRating - a.avgRating)
       .map(toSummary);
-    return { season, year, themes, page: 1, hasMore: false };
+    return { season, year, themes, page: 1, hasMore: false, total: themes.length };
   }
   return getJson<SeasonResponse>(
     `/season?season=${season}&year=${year}&page=${page}`,

@@ -18,6 +18,7 @@ import {
   ThemeCache,
   type ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
+import { FollowerActivityService } from '../social/follower-activity.service';
 import { Comment, type CommentDocument } from './comment.schema';
 
 /** The web schema's cap (lib/models/index.ts Comment). */
@@ -61,10 +62,11 @@ function iso(value: Date | string | null | undefined): string {
  *   the web, and no hooks or counters (no comment total is kept on
  *   the theme or the user). This API therefore has exactly the same
  *   surface — nothing was added and there are no counters to
- *   maintain. (The web's Notification type enum lists a 'comment'
- *   type and its notifications page renders one, but no code path
- *   ever creates such a notification — dead vocabulary, not
- *   behaviour; not ported.)
+ *   maintain. (The web creates no 'comment' notification — the
+ *   enum type is dead vocabulary there. This API DOES create
+ *   them, as an owner-approved divergence: posting a comment
+ *   notifies the commenter's followers — see
+ *   FollowerActivityService and createComment below.)
  * - List: public, newest first (createdAt desc), hard-capped at
  *   the 100 most recent — the web takes no pagination parameters.
  *   Each comment's author is the web populate's projection
@@ -103,6 +105,15 @@ export class CommentsService {
     @Optional()
     @InjectModel(User.name)
     private readonly userModel?: Model<UserDocument>,
+    /**
+     * The follower-activity notification fan-out (owner-approved
+     * divergence — see FollowerActivityService). Optional so
+     * model-only constructions (unit specs) keep working: without
+     * it, comments simply notify nobody, which is also the
+     * website's behaviour.
+     */
+    @Optional()
+    private readonly followerActivity?: FollowerActivityService,
   ) {}
 
   private requireModels(): CommentModels {
@@ -254,6 +265,16 @@ export class CommentsService {
       themeId: theme._id,
       themeSlug: slug,
       content,
+    });
+    // Owner-approved divergence (the web creates no such
+    // notification): a new comment notifies the commenter's
+    // followers. The fan-out never throws, so the comment stands
+    // even if the notification write fails.
+    await this.followerActivity?.notifyFollowers({
+      actorId: userId,
+      type: 'comment',
+      entityId: theme._id,
+      entityMeta: { themeTitle: theme.songTitle },
     });
     const authorsById = await this.resolveAuthors(models, [
       created.userId,

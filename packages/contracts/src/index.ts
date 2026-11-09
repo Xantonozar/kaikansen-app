@@ -119,7 +119,9 @@ export interface HomeResponse {
  * The web's own semantics: filter on animeSeason/animeSeasonYear,
  * optional OP/ED type filter, sort sequence asc then avgRating
  * desc, 20 per page. `hasMore` mirrors the web's meta (a full page
- * was served).
+ * was served). `total` is this backend's own addition (the web
+ * serves no count): every theme the filter holds across all pages,
+ * so the app can label the season with its real size.
  */
 export interface SeasonResponse {
   season: Season;
@@ -127,6 +129,7 @@ export interface SeasonResponse {
   themes: ThemeSummary[];
   page: number;
   hasMore: boolean;
+  total: number;
 }
 
 /**

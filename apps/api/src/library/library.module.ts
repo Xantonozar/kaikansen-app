@@ -10,6 +10,12 @@ import {
 } from '../themes/theme-cache.schema';
 import { AnilistLibraryClient } from './anilist-library.client';
 import { Favorite, FavoriteSchema } from './favorite.schema';
+import { Follow, FollowSchema } from '../social/follow.schema';
+import {
+  Notification,
+  NotificationSchema,
+} from '../social/notification.schema';
+import { FollowerActivityService } from '../social/follower-activity.service';
 import { HistoryCheckController } from './history-check.controller';
 import { LibraryController } from './library.controller';
 import { LibraryService } from './library.service';
@@ -36,6 +42,12 @@ import { WatchHistory, WatchHistorySchema } from './watch-history.schema';
  * completed-ids fetch — a different client from the auth one) and
  * HistoryCheckController (the optional-auth history check, kept off
  * LibraryController's class-level guard).
+ *
+ * Follow + Notification are registered here so the rating and
+ * favourite writes can fan follower-activity notifications out
+ * through FollowerActivityService (SocialModule owns the models'
+ * home registration; re-registration is the established pattern —
+ * see above).
  */
 @Module({})
 export class LibraryModule {
@@ -50,6 +62,8 @@ export class LibraryModule {
               { name: Favorite.name, schema: FavoriteSchema },
               { name: Rating.name, schema: RatingSchema },
               { name: WatchHistory.name, schema: WatchHistorySchema },
+              { name: Follow.name, schema: FollowSchema },
+              { name: Notification.name, schema: NotificationSchema },
             ]),
           ]
         : [],
@@ -60,6 +74,7 @@ export class LibraryModule {
         AccessTokenGuard,
         AnilistClient,
         AnilistLibraryClient,
+        FollowerActivityService,
       ],
     };
   }

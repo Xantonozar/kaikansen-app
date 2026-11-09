@@ -68,6 +68,46 @@ import { ThemeRowMenu } from './ThemeRowMenu';
  * cluster is duration · remove? · heart · ⋮, and playing a row
  * lives in the ⋮ menu's Play and the header's Play All). Every
  * other consumer keeps the defaults above.
+ *
+ * A fourth opt-in, `season` (Season browse rows, measured from
+ * season.html), restyles the row to that screen's cut: radii.md
+ * card at 10px padding with a 10px bottom margin, a 50pt thumb at
+ * radii.base, the OP/ED chip moved up beside the title (a small
+ * 4px-radius lavender tag reading just OP or ED — no sequence —
+ * in the accent for both types), the artist alone under it in the
+ * mauve secondary at 12pt, and a cluster of only the play disc
+ * (36pt, 20pt glyph) and the ⋮ (whose trigger glyph the menu
+ * draws at 20pt in the secondary for this variant). Saving lives
+ * in the ⋮ menu here — the mock draws no heart. One deliberate
+ * deviation from this component's law #9: season.html truncates
+ * its titles to one line beside the chip, so this variant does
+ * too; the flag is recorded in the Season slice report.
+ *
+ * A fifth opt-in, `anime` (Anime detail rows, measured from
+ * anime-detail.html), is the same family cut at that screen's
+ * measurements: radii.md card at 12px padding with an 8px bottom
+ * margin, a 48pt thumb at radii.base, the OP/ED tag beside the
+ * title carrying the REAL type + sequence ("OP 1" — the screen's
+ * HTML draws the OP tag numbered; where a stored sequence is 0
+ * the tag falls back to the bare type), the artist alone under
+ * it in the mauve secondary at 12pt, and a cluster of only the
+ * play disc (36pt, 18pt glyph) and the ⋮ (18pt in the secondary
+ * for this variant). Saving lives in the ⋮ menu — the mock draws
+ * no heart. anime-detail.html truncates its titles to one line
+ * beside the tag, so this variant shares the `season` variant's
+ * recorded law-#9 deviation.
+ *
+ * A sixth opt-in, `artist` (Artist detail rows, measured from
+ * artist-detail.html), is the same family at that screen's cut:
+ * radii.md card at 14px padding with a 12px bottom margin, a 48pt
+ * thumb at radii.base, the title 14pt bold on one line (the HTML
+ * truncates — the same recorded law-#9 deviation) with the ANIME
+ * title alone beneath it at 12pt medium in the secondary (the
+ * screen passes it as `metaText`), and the right cluster in the
+ * HTML's order — the bare OP/ED tag (11pt semibold accent on the
+ * lavender chip, 6px radius, NO sequence), the play disc (36pt,
+ * 20pt glyph), then the ⋮ (19pt in the secondary). Saving lives
+ * in the ⋮ menu — the mock draws no heart.
  */
 export function ThemeRow({
   item,
@@ -84,6 +124,9 @@ export function ThemeRow({
   typeChip = true,
   compact = false,
   playlist = false,
+  season = false,
+  anime = false,
+  artist = false,
 }: {
   item: ThemeSummary;
   onPress?: () => void;
@@ -106,11 +149,17 @@ export function ThemeRow({
   compact?: boolean;
   /** The Playlist detail rows' mock anatomy (see header). */
   playlist?: boolean;
+  /** The Season browse rows' mock anatomy (see header). */
+  season?: boolean;
+  /** The Anime detail rows' mock anatomy (see header). */
+  anime?: boolean;
+  /** The Artist detail rows' mock anatomy (see header). */
+  artist?: boolean;
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const cover = item.animeCoverImageSmall ?? item.animeCoverImage;
-  const artist = item.artistName ?? item.allArtists.join(', ');
+  const artistText = item.artistName ?? item.allArtists.join(', ');
 
   const playButton = (
     <Pressable
@@ -125,7 +174,7 @@ export function ThemeRow({
       ]}
     >
       <Play
-        size={compact ? 17 : 15}
+        size={artist || season ? 20 : anime ? 18 : compact ? 17 : 15}
         color={theme.accent}
         fill={theme.accent}
         strokeWidth={2}
@@ -166,6 +215,9 @@ export function ThemeRow({
         styles.row,
         compact && styles.rowCompact,
         playlist && styles.rowPlaylist,
+        season && styles.rowSeason,
+        anime && styles.rowAnime,
+        artist && styles.rowArtist,
         pressed && styles.pressed,
       ]}
     >
@@ -176,6 +228,9 @@ export function ThemeRow({
             styles.thumb,
             compact && styles.thumbCompact,
             playlist && styles.thumbPlaylist,
+            season && styles.thumbSeason,
+            anime && styles.thumbAnime,
+            artist && styles.thumbArtist,
           ]}
         />
       ) : (
@@ -184,33 +239,94 @@ export function ThemeRow({
             styles.thumb,
             compact && styles.thumbCompact,
             playlist && styles.thumbPlaylist,
+            season && styles.thumbSeason,
+            anime && styles.thumbAnime,
+            artist && styles.thumbArtist,
             styles.placeholder,
           ]}
         />
       )}
       <View style={styles.main}>
-        {/* Design law #9: long titles wrap (2 lines), never
-            ellipsis-truncate next to the row's chips/tiles. */}
-        <Text style={styles.song} numberOfLines={2}>
-          {item.songTitle}
-        </Text>
-        <View style={styles.metaRow}>
-          <Text style={styles.meta} numberOfLines={1}>
-            {metaText ?? artist}
-          </Text>
-          {typeChip && !playlist && (
-            <View style={styles.typeChip}>
-              <Text
-                style={[
-                  styles.type,
-                  { color: item.type === 'ED' ? theme.tertiary : theme.accent },
-                ]}
-              >
-                {item.type} {item.sequence}
+        {artist ? (
+          <>
+            {/* Artist detail anatomy (artist-detail.html): the
+                song title on one line, the ANIME title alone
+                beneath (passed as metaText) — the OP/ED tag lives
+                in the right cluster on this screen, not here. The
+                title/meta measurements are the season variant's. */}
+            <Text style={styles.songSeason} numberOfLines={1}>
+              {item.songTitle}
+            </Text>
+            <Text style={styles.metaSeason} numberOfLines={1}>
+              {metaText ?? artistText}
+            </Text>
+          </>
+        ) : anime ? (
+          <>
+            {/* Anime detail anatomy (anime-detail.html): the OP/ED
+                tag beside the title carries the real sequence, the
+                artist alone beneath. */}
+            <View style={styles.titleLineAnime}>
+              <Text style={styles.songAnime} numberOfLines={1}>
+                {item.songTitle}
               </Text>
+              <View style={styles.typeChipAnime}>
+                <Text style={styles.typeAnime}>
+                  {item.sequence > 0
+                    ? `${item.type} ${item.sequence}`
+                    : item.type}
+                </Text>
+              </View>
             </View>
-          )}
-        </View>
+            <Text style={styles.metaAnime} numberOfLines={1}>
+              {metaText ?? artistText}
+            </Text>
+          </>
+        ) : season ? (
+          <>
+            {/* Season browse anatomy (season.html): the OP/ED tag
+                sits beside the title, the artist alone beneath. */}
+            <View style={styles.titleLineSeason}>
+              <Text style={styles.songSeason} numberOfLines={1}>
+                {item.songTitle}
+              </Text>
+              <View style={styles.typeChipSeason}>
+                <Text style={styles.typeSeason}>{item.type}</Text>
+              </View>
+            </View>
+            <Text style={styles.metaSeason} numberOfLines={1}>
+              {metaText ?? artistText}
+            </Text>
+          </>
+        ) : (
+          <>
+            {/* Design law #9: long titles wrap (2 lines), never
+                ellipsis-truncate next to the row's chips/tiles. */}
+            <Text style={styles.song} numberOfLines={2}>
+              {item.songTitle}
+            </Text>
+            <View style={styles.metaRow}>
+              <Text style={styles.meta} numberOfLines={1}>
+                {metaText ?? artistText}
+              </Text>
+              {typeChip && !playlist && (
+                <View style={styles.typeChip}>
+                  <Text
+                    style={[
+                      styles.type,
+                      {
+                        color:
+                          item.type === 'ED' ? theme.tertiary : theme.accent,
+                      },
+                    ]}
+                  >
+                    {item.type} {item.sequence}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </>
+        )}
         {detail ? (
           <Text style={styles.detail} numberOfLines={1}>
             {detail}
@@ -218,10 +334,10 @@ export function ThemeRow({
         ) : null}
       </View>
       <View style={styles.tiles}>
-        {durationText ? (
+        {durationText && !season && !anime && !artist ? (
           <Text style={styles.duration}>{durationText}</Text>
         ) : null}
-        {onRemove && (
+        {onRemove && !season && !anime && !artist && (
           <Pressable
             onPress={onRemove}
             hitSlop={7}
@@ -235,7 +351,20 @@ export function ThemeRow({
             <X size={15} color={theme.muted} strokeWidth={2} />
           </Pressable>
         )}
-        {playlist ? (
+        {artist ? (
+          // Artist detail cluster (artist-detail.html): the bare
+          // OP/ED tag, then the play disc, then the ⋮.
+          <>
+            <View style={styles.typeChipArtist}>
+              <Text style={styles.typeArtist}>{item.type}</Text>
+            </View>
+            {playButton}
+          </>
+        ) : season || anime ? (
+          // Season browse / Anime detail cluster (season.html /
+          // anime-detail.html): play disc + ⋮ only.
+          playButton
+        ) : playlist ? (
           heartButton
         ) : compact ? (
           <>
@@ -249,7 +378,13 @@ export function ThemeRow({
           </>
         )}
         {menu && (
-          <ThemeRowMenu item={item} onPlay={onPlay} onOpen={onPress} />
+          <ThemeRowMenu
+            item={item}
+            onPlay={onPlay}
+            onOpen={onPress}
+            triggerIconSize={artist ? 19 : anime ? 18 : season ? 20 : undefined}
+            triggerColor={artist || anime || season ? theme.secondary : undefined}
+          />
         )}
       </View>
     </Pressable>
@@ -301,6 +436,129 @@ const createStyles = (theme: Theme) =>
     width: 46,
     height: 46,
     borderRadius: radii.base,
+  },
+  rowSeason: {
+    // Season mock rows (season.html): p-2.5 (10) padding,
+    // rounded-2xl (16) card corners, space-y-2.5 (10) between rows.
+    padding: 10,
+    borderRadius: radii.md,
+    marginBottom: 10,
+  },
+  thumbSeason: {
+    // Season mock thumb: 50x50, rounded-xl (12).
+    width: 50,
+    height: 50,
+    borderRadius: radii.base,
+  },
+  titleLineSeason: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  songSeason: {
+    // season.html: text-sm bold, tracking-tight.
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 14,
+    letterSpacing: -0.2,
+    color: theme.text,
+    flexShrink: 1,
+  },
+  typeChipSeason: {
+    backgroundColor: theme.accentContainer,
+    // season.html rounds the tag at 4px — off the radii scale, a
+    // literal citing the screen's HTML (prior slices' pattern).
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  typeSeason: {
+    // season.html: 10px bold, accent for OP and ED alike.
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 10,
+    color: theme.accent,
+  },
+  metaSeason: {
+    // season.html: the artist at 12px medium in the mauve.
+    fontFamily: fontFamilies.caption,
+    fontSize: 12,
+    color: theme.secondary,
+  },
+  rowAnime: {
+    // Anime detail mock rows (anime-detail.html): p-3 (12)
+    // padding, rounded-2xl (16) card corners, gap-2 (8) between
+    // the section's rows.
+    padding: 12,
+    borderRadius: radii.md,
+    marginBottom: 8,
+  },
+  thumbAnime: {
+    // Anime detail mock thumb: w-12 h-12 (48), rounded-xl (12).
+    width: 48,
+    height: 48,
+    borderRadius: radii.base,
+  },
+  titleLineAnime: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  songAnime: {
+    // anime-detail.html: text-sm bold, tracking-tight.
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 14,
+    letterSpacing: -0.2,
+    color: theme.text,
+    flexShrink: 1,
+  },
+  typeChipAnime: {
+    backgroundColor: theme.accentContainer,
+    // anime-detail.html rounds the tag at 4px (rounded) — off the
+    // radii scale, a literal citing the screen's HTML.
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  typeAnime: {
+    // anime-detail.html: 10px bold in the deep mauve, for OP and
+    // ED alike.
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 10,
+    color: theme.accent,
+  },
+  metaAnime: {
+    // anime-detail.html: the artist at 12px medium in the mauve.
+    fontFamily: fontFamilies.caption,
+    fontSize: 12,
+    color: theme.secondary,
+  },
+  rowArtist: {
+    // Artist detail mock rows (artist-detail.html): p-3.5 (14)
+    // padding, rounded-2xl (16) card corners, space-y-3 (12)
+    // between rows.
+    padding: 14,
+    borderRadius: radii.md,
+    marginBottom: 12,
+  },
+  thumbArtist: {
+    // Artist detail mock thumb: w-12 h-12 (48), rounded-xl (12).
+    width: 48,
+    height: 48,
+    borderRadius: radii.base,
+  },
+  typeChipArtist: {
+    backgroundColor: theme.accentContainer,
+    // artist-detail.html rounds the tag at 6px (rounded-md) — off
+    // the radii scale, a literal citing the screen's HTML.
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  typeArtist: {
+    // artist-detail.html: 11px semibold in the deep mauve, bare
+    // OP or ED (no sequence on this screen).
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 11,
+    color: theme.accent,
   },
   playDiscCompact: {
     // Detail + Library mocks both draw the disc at ≈86-88px @2x.

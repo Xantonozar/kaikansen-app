@@ -1009,6 +1009,85 @@ function makeServiceWithClient(client?: {
   return { models, service };
 }
 
+describe('LibraryService — follower activity notifications', () => {
+  /** A service whose notifier is a recording stub. */
+  function makeNotifyingService() {
+    const models = makeModels();
+    const notifyFollowers = jest.fn(async () => {});
+    const service = new LibraryService(
+      models.themeModel as never,
+      models.userModel as never,
+      models.favoriteModel as never,
+      models.ratingModel as never,
+      models.historyModel as never,
+      undefined,
+      { notifyFollowers } as never,
+    );
+    return { models, service, notifyFollowers };
+  }
+
+  it('fans a new rating out to the rater’s followers with title + score', async () => {
+    const { service, notifyFollowers } = makeNotifyingService();
+    await service.setRating('user-1', 'test_anime-op1-1', {
+      score: 9,
+      mode: 'watch',
+    });
+    expect(notifyFollowers).toHaveBeenCalledTimes(1);
+    expect(notifyFollowers).toHaveBeenCalledWith({
+      actorId: 'user-1',
+      type: 'theme_rated',
+      entityId: 'theme-1',
+      entityMeta: { themeTitle: 'Test Song', score: 9 },
+    });
+  });
+
+  it('fans a rating UPDATE out too (the unread dedupe is the notifier’s job)', async () => {
+    const { service, notifyFollowers } = makeNotifyingService();
+    await service.setRating('user-1', 'test_anime-op1-1', {
+      score: 9,
+      mode: 'watch',
+    });
+    await service.setRating('user-1', 'test_anime-op1-1', {
+      score: 10,
+      mode: 'watch',
+    });
+    expect(notifyFollowers).toHaveBeenCalledTimes(2);
+    expect(notifyFollowers).toHaveBeenLastCalledWith({
+      actorId: 'user-1',
+      type: 'theme_rated',
+      entityId: 'theme-1',
+      entityMeta: { themeTitle: 'Test Song', score: 10 },
+    });
+  });
+
+  it('fans a favourite out only when the save actually creates the row', async () => {
+    const { service, notifyFollowers } = makeNotifyingService();
+    await service.addFavorite('user-1', { slug: 'test_anime-op1-1' });
+    expect(notifyFollowers).toHaveBeenCalledTimes(1);
+    expect(notifyFollowers).toHaveBeenCalledWith({
+      actorId: 'user-1',
+      type: 'theme_favorited',
+      entityId: 'theme-1',
+      entityMeta: { themeTitle: 'Test Song' },
+    });
+
+    // Idempotent re-save: no second row, no second fan-out.
+    await service.addFavorite('user-1', { slug: 'test_anime-op1-1' });
+    expect(notifyFollowers).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fan out when the favourite create loses the unique-index race', async () => {
+    const { models, service, notifyFollowers } = makeNotifyingService();
+    models.favoriteModel.failNextCreateWithDuplicate = true;
+    const state = await service.addFavorite('user-1', {
+      slug: 'test_anime-op1-1',
+    });
+    expect(state.isFavorite).toBe(true);
+    // The racing request owns the fan-out; this one stays silent.
+    expect(notifyFollowers).not.toHaveBeenCalled();
+  });
+});
+
 describe('LibraryService.listLibraryThemes', () => {
   it('404s when the caller’s document is gone (the web’s 404)', async () => {
     const { service } = makeServiceWithClient();

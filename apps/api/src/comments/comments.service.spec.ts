@@ -347,3 +347,44 @@ describe('CommentsService — posting', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 });
+
+describe('CommentsService — follower activity notifications', () => {
+  it('fans a posted comment out to the commenter’s followers', async () => {
+    const models = makeModels();
+    const notifyFollowers = jest.fn(async () => {});
+    const service = new CommentsService(
+      models.commentModel as never,
+      models.themeModel as never,
+      models.userModel as never,
+      { notifyFollowers } as never,
+    );
+
+    const created = await service.createComment(USER_1, 'anime_a-op1-1', {
+      content: 'Great OP!',
+    });
+    expect(created.content).toBe('Great OP!');
+    expect(notifyFollowers).toHaveBeenCalledTimes(1);
+    expect(notifyFollowers).toHaveBeenCalledWith({
+      actorId: USER_1,
+      type: 'comment',
+      entityId: THEME_A,
+      entityMeta: { themeTitle: 'Song A' },
+    });
+  });
+
+  it('does not fan out a rejected comment', async () => {
+    const models = makeModels();
+    const notifyFollowers = jest.fn(async () => {});
+    const service = new CommentsService(
+      models.commentModel as never,
+      models.themeModel as never,
+      models.userModel as never,
+      { notifyFollowers } as never,
+    );
+
+    await expect(
+      service.createComment(USER_1, 'anime_a-op1-1', { content: '  ' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(notifyFollowers).not.toHaveBeenCalled();
+  });
+});

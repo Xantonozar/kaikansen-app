@@ -175,8 +175,11 @@ interface SocialModels {
  *   operations live in followUser/unfollowUser below (this API
  *   registers no Mongoose hooks — see user.schema.ts).
  * - Notifications: of the six enum types, ONLY 'follow' is ever
- *   created anywhere in web code. The read + mark-read routes are
- *   ported in full; no other type is created here either.
+ *   created anywhere in web code, and it is the only type THIS
+ *   service creates. The read + mark-read routes are ported in
+ *   full. (API-wide, three more types exist as an owner-approved
+ *   follower-activity divergence — FollowerActivityService,
+ *   written from the library/comment paths.)
  * - Feed: /social on the web is the friends-activity feed (recent
  *   watches + ratings by followed users) over the network lists —
  *   there is no other feed. Ported with its composition rules.

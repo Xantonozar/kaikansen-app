@@ -17,6 +17,9 @@ import { AnilistLibraryClient } from './../src/library/anilist-library.client';
 import { Favorite } from './../src/library/favorite.schema';
 import { Rating } from './../src/library/rating.schema';
 import { WatchHistory } from './../src/library/watch-history.schema';
+import { Follow } from './../src/social/follow.schema';
+import { Notification } from './../src/social/notification.schema';
+import { FollowerActivityService } from './../src/social/follower-activity.service';
 
 /**
  * Suite 1 — the real AppModule with NO MONGODB_URI: the app boots, the
@@ -434,7 +437,61 @@ function makeFakeModels() {
       ]),
   };
 
-  return { userModel, themeModel, favoriteModel, ratingModel, historyModel };
+  // user-2 follows user-1 — the seed Suite 3's notification
+  // fan-out resolves recipients from (Suite 2's service is built
+  // without a notifier, so the rows sit unused there).
+  const follows: Record<string, unknown>[] = [
+    { followerId: 'user-2', followeeId: 'user-1' },
+  ];
+  const notifications: Record<string, unknown>[] = [];
+
+  const rowMatches = (
+    doc: Record<string, unknown>,
+    filter: Record<string, unknown>,
+  ) =>
+    Object.entries(filter).every(([key, condition]) => {
+      if (
+        condition !== null &&
+        typeof condition === 'object' &&
+        '$in' in (condition as Record<string, unknown>)
+      ) {
+        const list = (condition as { $in: unknown[] }).$in;
+        return list.some((v) => String(v) === String(doc[key]));
+      }
+      return String(doc[key]) === String(condition);
+    });
+
+  const followModel = {
+    docs: follows,
+    find: (filter: Record<string, unknown>) =>
+      chain(follows.filter((f) => rowMatches(f, filter))),
+  };
+
+  const notificationModel = {
+    docs: notifications,
+    find: (filter: Record<string, unknown>) =>
+      chain(notifications.filter((n) => rowMatches(n, filter))),
+    insertMany: jest.fn(async (docs: Record<string, unknown>[]) => {
+      const inserted = docs.map((d) => ({
+        _id: `notif-${++seq}`,
+        createdAt: new Date((clock += 1000)),
+        updatedAt: new Date(clock),
+        ...d,
+      }));
+      notifications.push(...inserted);
+      return inserted;
+    }),
+  };
+
+  return {
+    userModel,
+    themeModel,
+    favoriteModel,
+    ratingModel,
+    historyModel,
+    followModel,
+    notificationModel,
+  };
 }
 
 const E2E_SECRET = ['e2e', 'library', 'access', 'secret'].join('-');
@@ -788,5 +845,210 @@ process.env.JWT_SECRET = E2E_SECRET;
       .expect(200);
     expect(second.body).toEqual(first.body);
     expect(anilistEntriesFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Suite 3 — the follower-activity fan-out over real HTTP: the
+ * library controller wired like Suite 2, PLUS the
+ * FollowerActivityService over fake Follow/Notification models.
+ * user-2 follows user-1 in the seed, so user-1's ratings and
+ * favourites must land in user-2's notifications — and nobody
+ * else's.
+ */
+describe('Library follower notifications with mocked models (e2e)', () => {
+  let app: INestApplication;
+  const models = makeFakeModels();
+
+  const anilistClientStub = {
+    fetchLibraryMediaIds: jest.fn(async () => null),
+    fetchLibraryEntries: jest.fn(async () => null),
+  };
+
+  const tokenFor = (userId: string, tokenType = 'access') =>
+    jwt.sign(
+      {
+        userId,
+        username: userId,
+        email: `${userId}@example.com`,
+        tokenType,
+      },
+      E2E_SECRET,
+      { expiresIn: '15m' },
+    );
+  const asUser1 = () => ({
+    Authorization: `Bearer ${tokenFor('user-1')}`,
+  });
+  const asUser2 = () => ({
+    Authorization: `Bearer ${tokenFor('user-2')}`,
+  });
+
+  const rowsOf = (type: string) =>
+    models.notificationModel.docs.filter((n) => n.type === type);
+
+  beforeAll(async () => {
+    process.env.JWT_SECRET = E2E_SECRET;
+    process.env.JWT_REFRESH_SECRET = E2E_REFRESH_SECRET;
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [ConfigModule.forRoot({ isGlobal: true })],
+      controllers: [LibraryController],
+      providers: [
+        LibraryService,
+        AuthService,
+        AccessTokenGuard,
+        AnilistClient,
+        { provide: AnilistLibraryClient, useValue: anilistClientStub },
+        FollowerActivityService,
+        { provide: getModelToken(User.name), useValue: models.userModel },
+        {
+          provide: getModelToken(ThemeCache.name),
+          useValue: models.themeModel,
+        },
+        {
+          provide: getModelToken(Favorite.name),
+          useValue: models.favoriteModel,
+        },
+        { provide: getModelToken(Rating.name), useValue: models.ratingModel },
+        {
+          provide: getModelToken(WatchHistory.name),
+          useValue: models.historyModel,
+        },
+        {
+          provide: getModelToken(Follow.name),
+          useValue: models.followModel,
+        },
+        {
+          provide: getModelToken(Notification.name),
+          useValue: models.notificationModel,
+        },
+      ],
+    }).compile();
+    app = moduleFixture.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    delete process.env.JWT_SECRET;
+    delete process.env.JWT_REFRESH_SECRET;
+  });
+
+  it('notifies the rater’s followers on rating, with title + score meta', async () => {
+    const res = await request(app.getHttpServer())
+      .put('/themes/test_anime-op1-1/rating')
+      .set(asUser1())
+      .send({ score: 9, mode: 'watch' })
+      .expect(200);
+    expect(res.body.myScore).toBe(9);
+
+    expect(rowsOf('theme_rated')).toHaveLength(1);
+    expect(rowsOf('theme_rated')[0]).toMatchObject({
+      recipientId: 'user-2',
+      actorId: 'user-1',
+      type: 'theme_rated',
+      entityId: 'theme-1',
+      read: false,
+    });
+    expect(rowsOf('theme_rated')[0].entityMeta).toEqual({
+      themeTitle: 'Test Song',
+      score: 9,
+    });
+    // The actor is never their own recipient.
+    expect(
+      models.notificationModel.docs.some(
+        (n) => n.recipientId === 'user-1',
+      ),
+    ).toBe(false);
+  });
+
+  it('dedupes a re-rate while unread, then notifies again once read', async () => {
+    const http = request(app.getHttpServer());
+    await http
+      .put('/themes/test_anime-op1-1/rating')
+      .set(asUser1())
+      .send({ score: 10, mode: 'watch' })
+      .expect(200);
+    expect(rowsOf('theme_rated')).toHaveLength(1);
+
+    rowsOf('theme_rated')[0].read = true;
+    await http
+      .put('/themes/test_anime-op1-1/rating')
+      .set(asUser1())
+      .send({ score: 8, mode: 'watch' })
+      .expect(200);
+    expect(rowsOf('theme_rated')).toHaveLength(2);
+    expect(rowsOf('theme_rated')[1].entityMeta).toEqual({
+      themeTitle: 'Test Song',
+      score: 8,
+    });
+  });
+
+  it('notifies followers on favourite — once, despite idempotent re-saves', async () => {
+    const http = request(app.getHttpServer());
+    await http
+      .post('/library/favorites')
+      .set(asUser1())
+      .send({ slug: 'test_anime-op1-1' })
+      .expect(200);
+    expect(rowsOf('theme_favorited')).toHaveLength(1);
+    expect(rowsOf('theme_favorited')[0]).toMatchObject({
+      recipientId: 'user-2',
+      actorId: 'user-1',
+      type: 'theme_favorited',
+      entityId: 'theme-1',
+      read: false,
+    });
+    expect(rowsOf('theme_favorited')[0].entityMeta).toEqual({
+      themeTitle: 'Test Song',
+    });
+
+    await http
+      .post('/library/favorites')
+      .set(asUser1())
+      .send({ slug: 'test_anime-op1-1' })
+      .expect(200);
+    expect(rowsOf('theme_favorited')).toHaveLength(1);
+  });
+
+  it('writes nothing when the actor has no followers', async () => {
+    const http = request(app.getHttpServer());
+    const before = models.notificationModel.docs.length;
+    await http
+      .put('/themes/test_anime-op1-1/rating')
+      .set(asUser2())
+      .send({ score: 6, mode: 'watch' })
+      .expect(200);
+    await http
+      .post('/library/favorites')
+      .set(asUser2())
+      .send({ slug: 'test_anime-op1-1' })
+      .expect(200);
+    expect(models.notificationModel.docs).toHaveLength(before);
+  });
+
+  it('still answers 200 when the notification insert blows up', async () => {
+    // Read the outstanding rows first, so the fan-out is NOT
+    // dedupe-skipped and actually reaches the failing insert.
+    for (const row of rowsOf('theme_rated')) {
+      row.read = true;
+    }
+    const original = models.notificationModel.insertMany;
+    models.notificationModel.insertMany = jest.fn(
+      async (_docs: Record<string, unknown>[]) => {
+        throw new Error('db down');
+      },
+    );
+    try {
+      const res = await request(app.getHttpServer())
+        .put('/themes/test_anime-op1-1/rating')
+        .set(asUser1())
+        .send({ score: 7, mode: 'watch' })
+        .expect(200);
+      expect(res.body.myScore).toBe(7);
+    } finally {
+      models.notificationModel.insertMany = original;
+    }
+    // The failed insert added no unread row.
+    expect(rowsOf('theme_rated').filter((n) => !n.read)).toHaveLength(0);
   });
 });

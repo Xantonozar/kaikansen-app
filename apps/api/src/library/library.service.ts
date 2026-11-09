@@ -35,6 +35,7 @@ import {
 } from './anilist-library.client';
 import { Favorite, type FavoriteDocument } from './favorite.schema';
 import { Rating, type RatingDocument } from './rating.schema';
+import { FollowerActivityService } from '../social/follower-activity.service';
 import {
   WatchHistory,
   type WatchHistoryDocument,
@@ -98,6 +99,15 @@ export class LibraryService {
      */
     @Optional()
     private readonly anilistLibrary?: AnilistLibraryClient,
+    /**
+     * The follower-activity notification fan-out (owner-approved
+     * divergence — see FollowerActivityService). Optional so
+     * model-only constructions (unit specs) keep working: without
+     * it, ratings and favourites simply notify nobody, which is
+     * also the website's behaviour.
+     */
+    @Optional()
+    private readonly followerActivity?: FollowerActivityService,
   ) {}
 
   private requireModels(): LibraryModels {
@@ -172,6 +182,7 @@ export class LibraryService {
     const existing = await models.favorites
       .findOne({ userId, themeId: theme._id })
       .exec();
+    let created = false;
     if (!existing) {
       try {
         await models.favorites.create({
@@ -179,13 +190,27 @@ export class LibraryService {
           themeId: theme._id,
           themeSlug: theme.slug,
         });
+        created = true;
       } catch (err) {
         // Lost a race against the unique (userId, themeId) index: the
         // row exists now, which is the state the caller asked for.
+        // The racing request created it, so IT runs the notification
+        // fan-out below — this one must not double-notify.
         if ((err as { code?: number }).code !== 11000) {
           throw err;
         }
       }
+    }
+    if (created) {
+      // Owner-approved divergence (the web creates no such
+      // notification): a NEW save notifies the saver's followers.
+      // Re-saves are no-ops above, so they never reach this.
+      await this.followerActivity?.notifyFollowers({
+        actorId: userId,
+        type: 'theme_favorited',
+        entityId: theme._id,
+        entityMeta: { themeTitle: theme.songTitle },
+      });
     }
     return { slug: theme.slug, isFavorite: true };
   }
@@ -928,6 +953,20 @@ export class LibraryService {
       .findOne({ userId, themeId: theme._id })
       .lean()
       .exec();
+    // Owner-approved divergence (the web creates no such
+    // notification): rating a theme notifies the rater's followers,
+    // carrying the final stored score. Create and update both land
+    // here; the fan-out's unread-dedupe keeps re-rates from
+    // stacking duplicates (see FollowerActivityService).
+    await this.followerActivity?.notifyFollowers({
+      actorId: userId,
+      type: 'theme_rated',
+      entityId: theme._id,
+      entityMeta: {
+        themeTitle: theme.songTitle,
+        score: stored ? stored.score : score,
+      },
+    });
     return {
       slug: theme.slug,
       myScore: stored ? stored.score : score,
