@@ -4,6 +4,7 @@ import { AccessTokenGuard } from './access-token.guard';
 import { AnilistClient } from './anilist.client';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { MailerService } from './mailer.service';
 import { User, UserSchema } from './user.schema';
 
 /**
@@ -24,7 +25,9 @@ export class AuthModule {
       // AnilistClient is registered unconditionally (it holds no config);
       // AuthService answers 503 from the AniList endpoints when the
       // ANILIST_* env trio is unset, exactly as it does model-less.
-      providers: [AuthService, AccessTokenGuard, AnilistClient],
+      // MailerService likewise: it reads BREVO_API_KEY / MAIL_FROM from
+      // the environment and fails closed (skips sending) when unset.
+      providers: [AuthService, AccessTokenGuard, AnilistClient, MailerService],
     };
   }
 }

@@ -34,6 +34,13 @@ import { HydratedDocument } from 'mongoose';
  * NOTE: `anilist.accessToken` is stored in
  * PLAINTEXT, exactly as the web stores it — mirrored deliberately;
  * hardening that storage is OPEN item O-05 (specs/DECISIONS.md).
+ *
+ * TWO additive fields are NOT the web's: `passwordReset` and
+ * `tokenVersion` exist only for this API's password-reset flow
+ * (the web has no reset capability at all). They follow the same
+ * additive pattern as the AniList sub-document: the web's models
+ * neither read nor write them, and its delta saves leave them
+ * untouched.
  */
 
 export type UserDocument = HydratedDocument<User>;
@@ -62,6 +69,30 @@ export class AnilistLink {
 }
 
 export const AnilistLinkSchema = SchemaFactory.createForClass(AnilistLink);
+
+/**
+ * The `passwordReset` sub-document — pending reset state for the
+ * code-based password-reset flow. Only the HASH of the 6-digit
+ * code is ever stored (bcrypt, like the password itself — a bare
+ * fast hash of a 6-digit code would be brute-forced instantly if
+ * the database leaked), with its expiry and the count of failed
+ * verification attempts. The sub-document is cleared when the
+ * code is used, when the attempt cap burns it, when it expires,
+ * and whenever a fresh code replaces it.
+ */
+@Schema({ _id: false })
+export class PasswordReset {
+  @Prop({ type: String })
+  codeHash?: string;
+
+  @Prop({ type: Date })
+  expiresAt?: Date;
+
+  @Prop({ type: Number, default: 0 })
+  attempts?: number;
+}
+
+export const PasswordResetSchema = SchemaFactory.createForClass(PasswordReset);
 
 @Schema({ collection: 'users', timestamps: true, autoIndex: false })
 export class User {
@@ -106,6 +137,25 @@ export class User {
 
   @Prop({ type: AnilistLinkSchema, default: undefined })
   anilist?: AnilistLink;
+
+  /**
+   * Pending password-reset state (see PasswordReset above).
+   * `select: false` like passwordHash: only the reset flow loads
+   * it, and only explicitly.
+   */
+  @Prop({ type: PasswordResetSchema, default: undefined, select: false })
+  passwordReset?: PasswordReset;
+
+  /**
+   * Session generation counter for refresh-token revocation: the
+   * value is minted into every token pair, and a password reset
+   * increments it, so POST /auth/refresh rejects every refresh
+   * token issued before the reset (AuthService.refresh compares
+   * the claim against this field). Access tokens are unaffected —
+   * they stay stateless and expire within 15 minutes.
+   */
+  @Prop({ type: Number, default: 0 })
+  tokenVersion: number;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

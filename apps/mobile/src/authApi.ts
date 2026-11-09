@@ -4,9 +4,13 @@ import type {
   AnilistUrlResponse,
   AuthResponse,
   AuthTokens,
+  ForgotPasswordRequest,
+  ForgotPasswordResponse,
   LoginRequest,
   RefreshRequest,
   RegisterRequest,
+  ResetPasswordRequest,
+  ResetPasswordResponse,
   UserProfile,
 } from '@kaikansen/contracts';
 import { apiBaseUrl } from './api';
@@ -68,6 +72,34 @@ export function loginAccount(body: LoginRequest): Promise<AuthResponse> {
 export function refreshTokens(refreshToken: string): Promise<AuthTokens> {
   const body: RefreshRequest = { refreshToken };
   return postJson<AuthTokens>('/auth/refresh', body);
+}
+
+/* ------------------------------------------------------------------ */
+/* Password reset (code-based — a new API capability)                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Starts a password reset. The API answers the same generic 200
+ * whether or not the account exists, so a resolution here only
+ * means "the request was accepted" — never that an email went to
+ * a real account. Only call in live mode: demo mode has no API and
+ * cannot send email (the screen says so instead of calling this).
+ */
+export function requestPasswordReset(
+  body: ForgotPasswordRequest,
+): Promise<ForgotPasswordResponse> {
+  return postJson<ForgotPasswordResponse>('/auth/forgot-password', body);
+}
+
+/**
+ * Completes a password reset with the emailed 6-digit code.
+ * Rejects with an ApiError (400) carrying the API's generic
+ * invalid/expired-code message on any code failure.
+ */
+export function resetPasswordWithCode(
+  body: ResetPasswordRequest,
+): Promise<ResetPasswordResponse> {
+  return postJson<ResetPasswordResponse>('/auth/reset-password', body);
 }
 
 export async function fetchMe(accessToken: string): Promise<UserProfile> {

@@ -13,7 +13,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import type { Model } from 'mongoose';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
-import { randomUUID } from 'crypto';
+import { randomInt, randomUUID } from 'crypto';
 import type {
   AnilistCallbackRequest,
   AnilistLinkRequest,
@@ -21,9 +21,13 @@ import type {
   AnilistUrlResponse,
   AuthResponse,
   AuthTokens,
+  ForgotPasswordRequest,
+  ForgotPasswordResponse,
   LoginRequest,
   RefreshRequest,
   RegisterRequest,
+  ResetPasswordRequest,
+  ResetPasswordResponse,
   UpdateProfileRequest,
   UserProfile,
 } from '@kaikansen/contracts';
@@ -32,6 +36,7 @@ import {
   type AnilistConfig,
   type AnilistViewer,
 } from './anilist.client';
+import { MailerService } from './mailer.service';
 import { User, type UserDocument } from './user.schema';
 
 /**
@@ -48,6 +53,20 @@ const BCRYPT_COST = 12;
 /** Token lifetimes — parity with the web (audit §3). */
 const ACCESS_TTL = '15m';
 const REFRESH_TTL = '7d';
+
+/** Password-reset code lifetime: 15 minutes from issue. */
+const RESET_CODE_TTL_MS = 15 * 60 * 1000;
+
+/** Failed verifications tolerated before a reset code is burned. */
+const RESET_CODE_MAX_ATTEMPTS = 5;
+
+/**
+ * The synthetic email shape AniList-created accounts are stored
+ * under (see issueAnilistSession). Such accounts have no password
+ * to reset — they are also caught by the sentinel-hash check; this
+ * pattern is the belt to that check's braces.
+ */
+const SYNTHETIC_ANILIST_EMAIL = /^anilist_\d+@kaikansen\.io$/;
 
 /** DiceBear avatar pool assigned at registration — the web's own list. */
 const REGISTRATION_AVATARS = [
@@ -71,6 +90,14 @@ export interface TokenPayload {
    * never verify here anyway.)
    */
   tokenType: 'access' | 'refresh';
+  /**
+   * The user's session generation at mint time (User.tokenVersion).
+   * Only the refresh path reads it: a password reset increments the
+   * stored counter, which is what revokes refresh tokens issued
+   * before the reset. Tokens minted before this claim existed read
+   * as version 0.
+   */
+  tokenVersion: number;
 }
 
 /**
@@ -83,11 +110,16 @@ export interface TokenPayload {
  *  1. The refresh token travels in the JSON body both ways (the web
  *     reads it only from an httpOnly cookie) — SECURITY_PRIVACY.md SEC-03.
  *  2. Refresh ROTATES: a fresh access+refresh pair is issued (the web
- *     re-issues only an access token). Rotation here is stateless —
- *     there is no server-side session store, no reuse detection and no
- *     revocation; a stolen refresh token still works until it is
- *     presented or expires. Session policy beyond this is OPEN item
- *     O-10 (specs/DECISIONS.md) — undecided, not silently settled here.
+ *     re-issues only an access token). Rotation is stateless — there
+ *     is no server-side session store and no reuse detection — with
+ *     ONE revocation hook: refresh compares the token's tokenVersion
+ *     claim against the user record, and a password reset bumps the
+ *     stored version, revoking every refresh token issued before it.
+ *     Access tokens are never checked against the database (their
+ *     15-minute TTL bounds them). A stolen refresh token otherwise
+ *     still works until it is presented or expires. Session policy
+ *     beyond this is OPEN item O-10 (specs/DECISIONS.md) — undecided,
+ *     not silently settled here.
  *
  * The model is OPTIONAL like the themes model: booted without
  * MONGODB_URI, every method answers 503 while /health keeps working.
@@ -101,6 +133,8 @@ export class AuthService {
     private readonly config?: ConfigService,
     @Optional()
     private readonly anilist?: AnilistClient,
+    @Optional()
+    private readonly mailer?: MailerService,
   ) {}
 
   private requireModel(): Model<UserDocument> {
@@ -225,6 +259,7 @@ export class AuthService {
       userId: user._id.toString(),
       username: user.username,
       email: user.email,
+      tokenVersion: user.tokenVersion ?? 0,
     });
     return { ...tokens, user: this.toProfile(user) };
   }
@@ -261,13 +296,14 @@ export class AuthService {
       userId: user._id.toString(),
       username: user.username,
       email: user.email,
+      tokenVersion: user.tokenVersion ?? 0,
     });
     return { ...tokens, user: this.toProfile(user) };
   }
 
   /** POST /auth/refresh — body-carried refresh token, rotated pair out. */
   async refresh(dto: RefreshRequest): Promise<AuthTokens> {
-    this.requireModel();
+    const model = this.requireModel();
     const refreshToken = dto?.refreshToken;
     if (!refreshToken) {
       // The web's message for a missing refresh credential.
@@ -285,14 +321,176 @@ export class AuthService {
     if (payload.tokenType !== 'refresh') {
       throw new UnauthorizedException('Invalid refresh token');
     }
+    // REVOCATION CHECK: the token's session generation must still be
+    // the user's current one. A password reset increments the stored
+    // tokenVersion, so every refresh token minted before the reset
+    // dies here (a deleted account's tokens die with it). Tokens
+    // minted before the claim existed read as version 0.
+    const user = await model.findById(payload.userId).exec();
+    if (!user || (payload.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
     // ROTATE (deviation 2, above): mint a whole new pair from the
-    // verified claims. Stateless — the old refresh token is not tracked
-    // or revoked; see the class comment and OPEN item O-10.
+    // verified claims, stamped with the user's current generation.
     return this.signPair({
       userId: payload.userId,
       username: payload.username,
       email: payload.email,
+      tokenVersion: user.tokenVersion ?? 0,
     });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Password reset — a NEW capability (the web has none: its login   */
+  /* form links to a /forgot-password page that does not exist, and   */
+  /* no email pipeline exists anywhere in the web codebase). The      */
+  /* flow is code-based because the product is app-only: a 6-digit    */
+  /* code is emailed (Brevo — see MailerService), stored only as a    */
+  /* bcrypt hash on the user document, valid 15 minutes, single-use,  */
+  /* burned after 5 failed verifications.                             */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * POST /auth/forgot-password — ALWAYS answers the same generic
+   * 200, whether or not the address belongs to an account: nothing
+   * in the response (or its timing-critical path) may reveal
+   * existence. A code is issued ONLY when a real password account
+   * exists for the address — never for AniList-created accounts
+   * (sentinel password hash; synthetic `anilist_<id>@kaikansen.io`
+   * email) — and issuing a code replaces any previous one. When the
+   * mailer is unconfigured the send is skipped (logged, without the
+   * code) and the answer is still the generic 200.
+   *
+   * The address is trimmed + lowercased before lookup: accounts are
+   * stored lowercased (registration), and this flow — unlike login,
+   * whose as-provided lookup is a mirrored web quirk — has no web
+   * behaviour to mirror.
+   */
+  async forgotPassword(
+    dto: ForgotPasswordRequest,
+  ): Promise<ForgotPasswordResponse> {
+    const model = this.requireModel();
+    const email = (dto?.email ?? '').trim().toLowerCase();
+    if (email) {
+      const user = await model
+        .findOne({ email })
+        .select('+passwordHash')
+        .exec();
+      if (
+        user &&
+        user.passwordHash !== OAUTH_PASSWORD_SENTINEL &&
+        !SYNTHETIC_ANILIST_EMAIL.test(email)
+      ) {
+        const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
+        // bcrypt-hashed like a password (cost 12): the code space is
+        // only a million, so a fast hash would fall instantly to an
+        // offline brute force if the database ever leaked.
+        const codeHash = await bcrypt.hash(code, BCRYPT_COST);
+        await model
+          .findByIdAndUpdate(user._id, {
+            $set: {
+              passwordReset: {
+                codeHash,
+                expiresAt: new Date(Date.now() + RESET_CODE_TTL_MS),
+                attempts: 0,
+              },
+            },
+          })
+          .exec();
+        // A skipped/failed send changes nothing about the response.
+        await this.mailer?.sendPasswordResetCode(email, code);
+      }
+    }
+    return { ok: true };
+  }
+
+  /**
+   * POST /auth/reset-password — verifies the emailed code and sets
+   * the new password with the register flow's hashing (bcrypt,
+   * cost 12) and its only password rule (presence — the web's
+   * register imposes no length or composition rule). EVERY code
+   * failure — unknown account, no pending code, expired code,
+   * wrong code, burned code — answers the same generic 400, so the
+   * endpoint leaks nothing about which check failed.
+   *
+   * On success the code is burned (single-use) and the user's
+   * tokenVersion is incremented in the same write, revoking every
+   * refresh token issued before the reset.
+   */
+  async resetPassword(
+    dto: ResetPasswordRequest,
+  ): Promise<ResetPasswordResponse> {
+    const model = this.requireModel();
+    const email = (dto?.email ?? '').trim().toLowerCase();
+    const code = (dto?.code ?? '').trim();
+    const newPassword = dto?.newPassword;
+    if (!email || !code || !newPassword) {
+      throw new BadRequestException('Email, code and new password required');
+    }
+    const reject = (): never => {
+      throw new BadRequestException('Invalid or expired reset code');
+    };
+
+    const user = await model
+      .findOne({ email })
+      .select('+passwordReset')
+      .exec();
+    const pending = user?.passwordReset;
+    if (!user || !pending?.codeHash || !pending?.expiresAt) {
+      reject();
+    }
+    // The guards above narrow both to defined values.
+    const account = user as UserDocument;
+    const stored = pending as {
+      codeHash: string;
+      expiresAt: Date;
+      attempts?: number;
+    };
+
+    if (stored.expiresAt.getTime() <= Date.now()) {
+      // Expired codes are cleared, not left to linger.
+      await model
+        .findByIdAndUpdate(account._id, { $unset: { passwordReset: '' } })
+        .exec();
+      reject();
+    }
+
+    const matches = await bcrypt.compare(code, stored.codeHash);
+    if (!matches) {
+      const attempts = (stored.attempts ?? 0) + 1;
+      if (attempts >= RESET_CODE_MAX_ATTEMPTS) {
+        // Attempt cap reached — the code is burned; even the correct
+        // code no longer works and a fresh one must be requested.
+        await model
+          .findByIdAndUpdate(account._id, { $unset: { passwordReset: '' } })
+          .exec();
+      } else {
+        await model
+          .findByIdAndUpdate(account._id, {
+            $set: {
+              passwordReset: {
+                codeHash: stored.codeHash,
+                expiresAt: stored.expiresAt,
+                attempts,
+              },
+            },
+          })
+          .exec();
+      }
+      reject();
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
+    await model
+      .findByIdAndUpdate(account._id, {
+        $set: {
+          passwordHash,
+          tokenVersion: (account.tokenVersion ?? 0) + 1,
+        },
+        $unset: { passwordReset: '' },
+      })
+      .exec();
+    return { reset: true };
   }
 
   /** GET /auth/me — profile for the bearer token's user. */
@@ -598,6 +796,7 @@ export class AuthService {
       userId: user._id.toString(),
       username: user.username,
       email: user.email,
+      tokenVersion: user.tokenVersion ?? 0,
     });
     return { ...tokens, user: this.toProfile(user) };
   }

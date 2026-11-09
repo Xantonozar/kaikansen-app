@@ -18,9 +18,13 @@ import type {
   AnilistUrlResponse,
   AuthResponse,
   AuthTokens,
+  ForgotPasswordRequest,
+  ForgotPasswordResponse,
   LoginRequest,
   RefreshRequest,
   RegisterRequest,
+  ResetPasswordRequest,
+  ResetPasswordResponse,
   UpdateProfileRequest,
   UserProfile,
 } from '@kaikansen/contracts';
@@ -61,6 +65,30 @@ export class AuthController {
   })
   refresh(@Body() body: RefreshRequest): Promise<AuthTokens> {
     return this.auth.refresh(body);
+  }
+
+  @Post('forgot-password')
+  @HttpCode(200)
+  @ApiOkResponse({
+    description:
+      'Starts a password reset. ALWAYS 200 with the same generic body, whether or not the account exists — a 6-digit code (15-minute expiry) is emailed only when a password account exists for the address. AniList-only accounts never receive a code. (New capability: the web has no password reset at all.)',
+  })
+  forgotPassword(
+    @Body() body: ForgotPasswordRequest,
+  ): Promise<ForgotPasswordResponse> {
+    return this.auth.forgotPassword(body);
+  }
+
+  @Post('reset-password')
+  @HttpCode(200)
+  @ApiOkResponse({
+    description:
+      'Completes a password reset: verifies the emailed code (stored hashed; max 5 attempts; single-use), sets the new password, and revokes every refresh token issued before the reset. Any code failure answers the same generic 400.',
+  })
+  resetPassword(
+    @Body() body: ResetPasswordRequest,
+  ): Promise<ResetPasswordResponse> {
+    return this.auth.resetPassword(body);
   }
 
   @Get('me')

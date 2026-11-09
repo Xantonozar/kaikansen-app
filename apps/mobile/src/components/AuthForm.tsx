@@ -12,7 +12,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   AtSign,
   ChevronLeft,
@@ -44,12 +44,14 @@ const GLYPH = require('../../assets/splash-icon.png');
  * the cross-link to the sibling screen. Inputs follow §7 — surface
  * fill, radius base, muted placeholder, accent border on focus.
  *
- * NO Forgot password link: the design draws one, but the web has
- * NO password-reset capability at all — its LoginForm links to a
- * /forgot-password page that does not exist, there is no API
- * route and no email pipeline anywhere in the web codebase
- * (verified in kaisen-src, Slice 6). A dead link is not drawn;
- * flagged for ozar's decision in the Slice 6 report.
+ * The "Forgot password?" link (login only, right-aligned under
+ * the password field — the position the Login mock draws) was
+ * deliberately NOT drawn while the web had no password-reset
+ * capability at all (Slice 6 finding). ozar then decided to build
+ * the capability (2026-11-09): the API now has code-based
+ * forgot/reset endpoints with Brevo email, so the link is drawn
+ * and routes to /forgot-password. A `?notice=` param (set by the
+ * reset flow on success) renders as a confirmation line here.
  *
  * Compact/icon-led chrome (approved mockup v1): a tile back button,
  * a leading glyph inside each field, pill-shaped actions, and the
@@ -68,6 +70,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
+  const { notice } = useLocalSearchParams<{ notice?: string }>();
   const { login, register, loginWithAnilist, demoMode } = useAuth();
 
   const [username, setUsername] = useState('');
@@ -198,6 +201,11 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
               : 'Join Kaikansen to save themes and play quizzes.'}
           </Text>
 
+          {/* Post-reset confirmation, handed back by /forgot-password. */}
+          {isLogin && notice ? (
+            <Text style={styles.successNote}>{notice}</Text>
+          ) : null}
+
           {!isLogin && (
             <>
               {field(
@@ -289,6 +297,18 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
                 <Eye size={18} color={theme.muted} strokeWidth={2} />
               )}
             </Pressable>,
+          )}
+
+          {/* The Login mock's Forgot password link: right-aligned,
+              small, mauve — under the password field, above Log in. */}
+          {isLogin && (
+            <Pressable
+              onPress={() => router.push('/forgot-password')}
+              style={styles.forgotHit}
+              accessibilityRole="button"
+            >
+              <Text style={styles.forgotText}>Forgot password?</Text>
+            </Pressable>
           )}
 
           {error !== null && <Text style={styles.error}>{error}</Text>}
@@ -436,6 +456,24 @@ const createStyles = (theme: Theme) =>
       height: 32,
       alignItems: 'center',
       justifyContent: 'center',
+    },
+    forgotHit: {
+      alignSelf: 'flex-end',
+      marginTop: spacing.xs,
+      paddingVertical: spacing.xs,
+      paddingHorizontal: 2,
+    },
+    forgotText: {
+      ...typeStyles.bodySmall,
+      fontFamily: 'Inter_500Medium',
+      color: theme.accent,
+    },
+    successNote: {
+      ...typeStyles.bodySmall,
+      fontFamily: 'Inter_500Medium',
+      color: theme.success,
+      textAlign: 'center',
+      marginBottom: spacing.lg,
     },
     orRow: {
       flexDirection: 'row',

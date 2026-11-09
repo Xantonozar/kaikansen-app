@@ -262,6 +262,45 @@ export interface RefreshRequest {
 /** Response body of POST /auth/refresh: a ROTATED pair (both tokens are new). */
 export type RefreshResponse = AuthTokens;
 
+/* ------------------------------------------------------------------ */
+/* Password reset (code-based)                                         */
+/*                                                                     */
+/* A NEW capability: the web has no password reset at all (its login   */
+/* form links to a /forgot-password page that does not exist, and      */
+/* there is no email infrastructure anywhere in the web codebase).     */
+/* The flow is code-based because the product is app-only — an         */
+/* emailed LINK would need a hosted web page that does not exist.      */
+/* ------------------------------------------------------------------ */
+
+/** Request body of POST /auth/forgot-password. */
+export interface ForgotPasswordRequest {
+  email: string;
+}
+
+/**
+ * Response body of POST /auth/forgot-password — returned IDENTICALLY
+ * whether or not the email belongs to an account, and whether or
+ * not an email was actually sent. The endpoint never reveals
+ * account existence; a code is only issued (and emailed) when a
+ * password account actually exists for the address.
+ */
+export interface ForgotPasswordResponse {
+  ok: true;
+}
+
+/** Request body of POST /auth/reset-password. */
+export interface ResetPasswordRequest {
+  email: string;
+  /** The 6-digit code from the reset email (15-minute expiry, single-use). */
+  code: string;
+  newPassword: string;
+}
+
+/** Response body of POST /auth/reset-password. */
+export interface ResetPasswordResponse {
+  reset: true;
+}
+
 /**
  * Request body of PATCH /auth/me — the web's profile edit (its
  * PATCH /api/users/me zod schema, ported): a PARTIAL update in which
