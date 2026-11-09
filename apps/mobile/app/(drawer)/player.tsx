@@ -302,6 +302,7 @@ export default function PlayerScreen() {
               style={styles.video}
               contentFit="contain"
               nativeControls={false}
+              surfaceType="textureView"
             />
           ) : (
             <>

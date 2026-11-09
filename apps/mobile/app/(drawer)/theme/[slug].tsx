@@ -766,12 +766,19 @@ export default function ThemeDetailScreen() {
             <View style={styles.artWrap}>
               {playMode === 'watch' ? (
                 <View style={styles.heroPlayer}>
+                  {/* textureView, not the default surfaceView:
+                      this hero mounts conditionally (on the Watch
+                      tap) inside a ScrollView, where a SurfaceView
+                      can attach after playback starts and stay
+                      black; a TextureView composites like a normal
+                      view and reliably shows the frames. */}
                   <VideoView
                     ref={videoRef}
                     player={playback.player}
                     style={styles.heroVideo}
                     contentFit="contain"
                     nativeControls={false}
+                    surfaceType="textureView"
                   />
                   {playback.buffering && (
                     <View style={styles.heroCenter}>

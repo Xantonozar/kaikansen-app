@@ -44,6 +44,38 @@ export function resolvePlaybackUrl(
   return best?.url ?? entry.videoUrl ?? detail.videoUrl;
 }
 
+/**
+ * The watch-mode fallback chain for the player, in order: the
+ * entry's video sources by resolution descending, the entry's
+ * stored `videoUrl`, then the theme-level `videoUrl` — plausible
+ * URLs only, de-duplicated. Watch used to hand the player exactly
+ * ONE source (the highest resolution): when that single file
+ * failed on a device — an encode its decoder rejects, a CDN
+ * refusal — playback died on a black surface with no second
+ * chance. The chain gives the player the lower-resolution encodes
+ * of the same entry to fall back to, the same way listen mode
+ * already steps through its candidates. Downloads do NOT use this
+ * chain — a video download resolves through resolvePlaybackUrl
+ * and takes the single best source.
+ */
+export function resolveWatchCandidates(
+  detail: ThemeDetail,
+  entry: ThemeEntry | null,
+): string[] {
+  const raw: (string | null)[] = entry
+    ? [
+        ...[...entry.videoSources]
+          .sort((a, b) => b.resolution - a.resolution)
+          .map((source) => source.url),
+        entry.videoUrl,
+        detail.videoUrl,
+      ]
+    : [detail.videoUrl];
+  return raw.filter((url, i, all): url is string => {
+    return isPlausibleUrl(url) && all.indexOf(url) === i;
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /* Derived .ogg audio (mirror of the API's themes/audio-url.ts)        */
 /* ------------------------------------------------------------------ */
