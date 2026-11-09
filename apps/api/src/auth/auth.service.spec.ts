@@ -188,9 +188,64 @@ describe('AuthService', () => {
       expect(err).toBeInstanceOf(BadRequestException);
       expect((err as BadRequestException).message).toBe('All fields required');
     });
+
+    it('Bug 5: wrong-typed fields answer 400, never a 500 TypeError', async () => {
+      const cases: Record<string, unknown>[] = [
+        { username: 12345, email: 'a@example.com', password: 'pw-fake' },
+        { username: 'typed', email: ['a@example.com'], password: 'pw-fake' },
+        { username: 'typed', email: 'a@example.com', password: 999 },
+        {
+          username: 'typed',
+          email: 'a@example.com',
+          password: 'pw-fake',
+          displayName: 42,
+        },
+      ];
+      for (const dto of cases) {
+        const { model, service } = makeService();
+        const err = await service
+          .register(dto as never)
+          .catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(BadRequestException);
+        expect((err as BadRequestException).getStatus()).toBe(400);
+        expect(model.users).toHaveLength(0);
+      }
+    });
+
+    it('Bug 5: a valid registration is unaffected by the type guard', async () => {
+      const { model, service } = makeService();
+      const res = await service.register({
+        username: 'typed',
+        email: 'typed@example.com',
+        password: 'pw-fake',
+        displayName: 'Typed User',
+      });
+      expect(model.users).toHaveLength(1);
+      expect(res.user.username).toBe('typed');
+      expect(res.user.displayName).toBe('Typed User');
+    });
   });
 
   describe('login', () => {
+    it('Bug 5 (login mirror): wrong-typed fields answer 400, never a 500 TypeError', async () => {
+      const cases: Record<string, unknown>[] = [
+        { email: 12345, password: 'pw-fake' },
+        { email: 'a@example.com', password: 999 },
+        { email: ['a@example.com'], password: 'pw-fake' },
+      ];
+      for (const dto of cases) {
+        const { service } = makeService();
+        const err = await service
+          .login(dto as never)
+          .catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(BadRequestException);
+        expect((err as BadRequestException).getStatus()).toBe(400);
+        expect((err as BadRequestException).message).toBe(
+          'Email and password required',
+        );
+      }
+    });
+
     async function seeded() {
       const ctx = makeService();
       const passwordHash = await bcrypt.hash('correct-fake-password', 12);

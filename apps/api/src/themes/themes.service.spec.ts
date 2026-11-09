@@ -565,10 +565,12 @@ describe('ThemesService.search', () => {
     ]);
     expect(wordClause.$or[0].animeTitle.source).toBe('test');
 
-    // Web order and page size; the count runs on the same effective filter.
+    // Web order and page size, plus the Bug 6 `_id` tiebreaker;
+    // the count runs on the same effective filter.
     expect(stage2Queries[0].sort).toHaveBeenCalledWith({
       totalWatches: -1,
       avgRating: -1,
+      _id: 1,
     });
     expect(stage2Queries[0].skip).toHaveBeenCalledWith(0);
     expect(stage2Queries[0].limit).toHaveBeenCalledWith(20);
@@ -584,6 +586,76 @@ describe('ThemesService.search', () => {
       themeSeqFilter: null,
     });
     expect(res.results.map((r) => r.slug)).toEqual(['narrowed-hit']);
+  });
+
+  it('Bug 6: pages partition cleanly on a tie-heavy dataset (unique sort tiebreaker)', async () => {
+    // 45 themes ALL tied at 0 watches / 0 rating — the production
+    // shape for broad queries — stored in reverse _id order so
+    // physical order disagrees with the tiebreaker order.
+    const docs = Array.from({ length: 45 }, (_, i) => {
+      const n = 44 - i;
+      return makeDoc({
+        _id: `tie-${String(n).padStart(2, '0')}`,
+        slug: `tie-theme-${n}`,
+        animeTitle: 'The Tie Anime',
+        totalWatches: 0,
+        avgRating: 0,
+      });
+    });
+
+    // A faithful query stand-in: actually applies the sort spec,
+    // skip and limit the service asks for, like Mongo would.
+    const applyingQuery = (rows: Record<string, unknown>[]) => {
+      let result = [...rows];
+      const q: Record<string, unknown> = {};
+      q.sort = (spec: Record<string, number>) => {
+        const keys = Object.entries(spec);
+        result.sort((a, b) => {
+          for (const [key, dir] of keys) {
+            const av = a[key] as never;
+            const bv = b[key] as never;
+            if (av < bv) return -dir;
+            if (av > bv) return dir;
+          }
+          return 0;
+        });
+        return q;
+      };
+      q.skip = (n: number) => {
+        result = result.slice(n);
+        return q;
+      };
+      q.limit = (n: number) => {
+        result = result.slice(0, n);
+        return q;
+      };
+      q.select = () => q;
+      q.lean = () => q;
+      q.exec = async () => result;
+      return q;
+    };
+
+    let findCalls = 0;
+    const find = jest.fn(() => {
+      findCalls += 1;
+      // Call 1 of each search is stage-1 narrowing: no candidates,
+      // so stage 2 runs over the whole dataset.
+      return findCalls % 2 === 1 ? queryOf([]) : applyingQuery(docs);
+    });
+    const countDocuments = jest.fn(() => queryOf(docs.length));
+    const service = serviceWith({ find, countDocuments });
+
+    const page1 = await service.search('the', 1);
+    const page2 = await service.search('the', 2);
+
+    expect(page1.results).toHaveLength(20);
+    expect(page2.results).toHaveLength(20);
+    const slugs1 = new Set(page1.results.map((r) => r.slug));
+    const overlap = page2.results.filter((r) => slugs1.has(r.slug));
+    expect(overlap).toEqual([]);
+    expect(
+      new Set([...slugs1, ...page2.results.map((r) => r.slug)]).size,
+    ).toBe(40);
   });
 
   it('stage 2 runs unrestricted when stage 1 finds no candidates', async () => {
@@ -1066,12 +1138,27 @@ describe('ThemesService.getRelatedAnime', () => {
     expect(findOne).toHaveBeenCalledWith({ anilistId: 999 });
   });
 
-  it('parses the id the web way: parseInt (a non-numeric id matches nothing)', async () => {
+  it('parses the id the web way: parseInt (42x reads as 42)', async () => {
+    const findOne = jest.fn(() => queryOf(makeAnimeDoc({ series: [] })));
+    const service = serviceWithAnime({ findOne });
+
+    await service.getRelatedAnime('42x');
+    expect(findOne).toHaveBeenCalledWith({ anilistId: 42 });
+  });
+
+  it('Bug 4: a non-numeric id answers 404 without querying (NaN CastErrors through Mongoose)', async () => {
     const findOne = jest.fn(() => queryOf(null));
     const service = serviceWithAnime({ findOne });
 
-    await service.getRelatedAnime('not-a-number').catch(() => undefined);
-    expect(findOne).toHaveBeenCalledWith({ anilistId: NaN });
+    const error = await service
+      .getRelatedAnime('not-a-number')
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NotFoundException);
+    expect((error as NotFoundException).getResponse()).toMatchObject({
+      statusCode: 404,
+      message: 'Anime not found',
+    });
+    expect(findOne).not.toHaveBeenCalled();
   });
 
   it('answers an empty list when the anime has no series recorded', async () => {
@@ -1144,6 +1231,20 @@ describe('ThemesService.getAnimeDetail', () => {
       statusCode: 404,
       message: 'Anime not found',
     });
+  });
+
+  it('Bug 4: a non-numeric id answers 404 without querying either model', async () => {
+    const find = jest.fn(() => queryOf([]));
+    const findOne = jest.fn(() => queryOf(null));
+    const service = serviceWithBoth({ find }, { findOne });
+    const error = await service.getAnimeDetail('abc').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NotFoundException);
+    expect((error as NotFoundException).getResponse()).toMatchObject({
+      statusCode: 404,
+      message: 'Anime not found',
+    });
+    expect(find).not.toHaveBeenCalled();
+    expect(findOne).not.toHaveBeenCalled();
   });
 
   it('serves the projected cache header plus the mapped themes', async () => {

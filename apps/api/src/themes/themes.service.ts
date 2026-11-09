@@ -400,7 +400,15 @@ export class ThemesService {
     const [docs, total] = await Promise.all([
       model
         .find(effectiveFilter)
-        .sort({ totalWatches: -1, avgRating: -1 })
+        // Bug 6 (multi-user matrix 2026-11-09): the web's two-key
+        // sort leaves hundreds of rows tied at 0 watches / 0
+        // rating, and MongoDB's order among ties is unspecified —
+        // skip/limit pages overlapped (page 2 repeated 10–12 of
+        // page 1's 20). `_id: 1` is a unique final tiebreaker, so
+        // pages partition cleanly; the primary ordering is
+        // unchanged. (The web has the same flaw; this is the one
+        // deliberate deviation, in the direction of correctness.)
+        .sort({ totalWatches: -1, avgRating: -1, _id: 1 })
         .skip(skip)
         .limit(limit)
         .lean()
@@ -607,10 +615,19 @@ export class ThemesService {
    * An anime with no series recorded answers an empty list, not
    * a 404. The web serves raw documents; this API projects them
    * (see anime.mapper.ts).
+   *
+   * Bug 4 (multi-user matrix 2026-11-09): through Mongoose a NaN
+   * value does NOT match nothing — casting it to the Number path
+   * throws a CastError, so a non-numeric id 500ed instead of
+   * 404ing. Guarded explicitly below; parseInt's '42x' → 42
+   * behaviour is unchanged.
    */
   async getRelatedAnime(idParam: string): Promise<RelatedAnimeResponse> {
     const model = this.requireAnimeModel();
     const animeId = Number.parseInt(idParam, 10);
+    if (Number.isNaN(animeId)) {
+      throw new NotFoundException('Anime not found');
+    }
 
     const anime = (await model
       .findOne({ anilistId: animeId })
@@ -648,12 +665,17 @@ export class ThemesService {
    * synthesized from the first theme, field for field as the web
    * page synthesizes it. The web parses the id with parseInt ('42x'
    * reads as 42, non-numeric becomes NaN and matches nothing);
-   * mirrored.
+   * mirrored — except that through Mongoose a NaN cast throws
+   * instead of matching nothing, so NaN is answered 404 explicitly
+   * (Bug 4, multi-user matrix 2026-11-09).
    */
   async getAnimeDetail(idParam: string): Promise<AnimeDetailResponse> {
     const themeModel = this.requireModel();
     const animeModel = this.requireAnimeModel();
     const animeId = Number.parseInt(idParam, 10);
+    if (Number.isNaN(animeId)) {
+      throw new NotFoundException('Anime not found');
+    }
 
     const [animeDoc, themeDocs] = await Promise.all([
       animeModel.findOne({ anilistId: animeId }).lean().exec(),

@@ -134,8 +134,8 @@ const at = (seconds: number) => new Date(T0 + seconds * 1000);
 function makeFakeModels() {
   const ranks: Record<string, unknown>[] = [
     {
-      _id: 'rank-alice-id',
-      userId: 'alice-id',
+      _id: 'rank-507f1f77bcf86cd7994390a1',
+      userId: '507f1f77bcf86cd7994390a1',
       rp: 900,
       tier: 'genin',
       division: 3,
@@ -162,8 +162,8 @@ function makeFakeModels() {
       updatedAt: at(10),
     },
     {
-      _id: 'rank-bob-id',
-      userId: 'bob-id',
+      _id: 'rank-507f1f77bcf86cd7994390a2',
+      userId: '507f1f77bcf86cd7994390a2',
       rp: 100,
       tier: 'academy',
       division: null,
@@ -192,12 +192,12 @@ function makeFakeModels() {
   ];
   const users: Record<string, unknown>[] = [
     {
-      _id: 'alice-id',
+      _id: '507f1f77bcf86cd7994390a1',
       username: 'alice',
       displayName: 'Alice A',
       avatarUrl: 'https://example.com/alice.png',
     },
-    { _id: 'bob-id', username: 'bob', displayName: 'Bob B', avatarUrl: null },
+    { _id: '507f1f77bcf86cd7994390a2', username: 'bob', displayName: 'Bob B', avatarUrl: null },
   ];
   const snapshots: Record<string, unknown>[] = [];
 
@@ -305,10 +305,10 @@ describe('Rank with mocked models (e2e)', () => {
 
   it('serves an existing rank publicly, in the projected shape', async () => {
     const http = request(app.getHttpServer());
-    const res = await http.get('/rank/alice-id').expect(200);
+    const res = await http.get('/rank/507f1f77bcf86cd7994390a1').expect(200);
     expect(res.body).toEqual({
-      id: 'rank-alice-id',
-      userId: 'alice-id',
+      id: 'rank-507f1f77bcf86cd7994390a1',
+      userId: '507f1f77bcf86cd7994390a1',
       rp: 900,
       tier: 'genin',
       division: 3,
@@ -351,8 +351,8 @@ describe('Rank with mocked models (e2e)', () => {
     // only if its user existed — it does not, so the board is unchanged.
     const board = await http.get('/rank/leaderboard').expect(200);
     expect(board.body.leaderboard.map((e: { userId: string }) => e.userId)).toEqual([
-      'alice-id',
-      'bob-id',
+      '507f1f77bcf86cd7994390a1',
+      '507f1f77bcf86cd7994390a2',
     ]);
   });
 
@@ -361,9 +361,9 @@ describe('Rank with mocked models (e2e)', () => {
     await http.get('/rank/me').expect(401);
     const res = await http
       .get('/rank/me')
-      .set('Authorization', `Bearer ${tokenFor('bob-id')}`)
+      .set('Authorization', `Bearer ${tokenFor('507f1f77bcf86cd7994390a2')}`)
       .expect(200);
-    expect(res.body.userId).toBe('bob-id');
+    expect(res.body.userId).toBe('507f1f77bcf86cd7994390a2');
     expect(res.body.rp).toBe(100);
   });
 
@@ -372,7 +372,7 @@ describe('Rank with mocked models (e2e)', () => {
     const res = await http.get('/rank/leaderboard').expect(200);
     expect(res.body.meta).toEqual({ source: 'live', computedAt: null });
     expect(res.body.leaderboard[0]).toEqual({
-      userId: 'alice-id',
+      userId: '507f1f77bcf86cd7994390a1',
       username: 'alice',
       displayName: 'Alice A',
       avatarUrl: 'https://example.com/alice.png',
@@ -394,7 +394,7 @@ describe('Rank with mocked models (e2e)', () => {
       entries: [
         {
           rank: 1,
-          userId: 'alice-id',
+          userId: '507f1f77bcf86cd7994390a1',
           username: 'alice',
           avatar: 'https://example.com/alice.png',
           tier: 'genin',
@@ -411,7 +411,7 @@ describe('Rank with mocked models (e2e)', () => {
     expect(res.body.meta.computedAt).not.toBeNull();
     expect(res.body.leaderboard).toEqual([
       {
-        userId: 'alice-id',
+        userId: '507f1f77bcf86cd7994390a1',
         username: 'alice',
         displayName: 'alice',
         avatarUrl: 'https://example.com/alice.png',

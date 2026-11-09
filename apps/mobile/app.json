@@ -8,11 +8,6 @@
     "scheme": "kaikansen",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#F7F2F7",
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#F7F2F7"
-    },
     "ios": {
       "supportsTablet": true
     },
@@ -34,7 +29,20 @@
       "expo-font",
       "expo-secure-store",
       "expo-web-browser",
-      "expo-video"
+      "expo-video",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#F7F2F7",
+          "dark": {
+            "image": "./assets/splash-icon-dark.png",
+            "backgroundColor": "#6E4158"
+          }
+        }
+      ]
     ],
     "owner": "zadid",
     "extra": {

@@ -1360,6 +1360,12 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     }
     return this.withRoomLock(roomId, async () => {
       const room = await this.loadRoom(models, roomId);
+      // Membership gate (Bug 1, multi-user matrix 2026-11-09):
+      // room:answer previously never consulted room.players, so
+      // anyone who learned a live roomId could answer, get scored,
+      // end the round and lock real players out. Refuse before any
+      // state inspection or mutation, same as every other action.
+      this.requirePlayer(room, userId);
       if (room.status !== 'in_progress') {
         throw new RoomActionError('Room not in progress');
       }

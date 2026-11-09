@@ -561,6 +561,34 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect(m.rank.scheduled).toEqual([roomId]);
   });
 
+  it('Bug 1: a non-member answer is refused and the round is untouched', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await startedParty(m);
+    const doc = roomDoc(m, roomId);
+    const round = (doc.rounds as Record<string, unknown>[])[0];
+
+    // OUTSIDER is a real user who is NOT a player in this room —
+    // exactly the matrix's lurker. Even the correct answer, even
+    // mid-round, must be refused before any scoring/state change.
+    await expect(
+      m.service.submitAnswer(OUTSIDER, roomId, 1, 'Correct EN'),
+    ).rejects.toThrow('Player not in room');
+
+    expect(round.answers).toHaveLength(0);
+    expect(round.endedAt).toBeFalsy();
+    expect(doc.status).toBe('in_progress');
+    const players = doc.players as Record<string, unknown>[];
+    expect(players.every((p) => p.totalScore === 0)).toBe(true);
+    expect(
+      m.events.find((e) => e.event === 'room:round-ended'),
+    ).toBeUndefined();
+    expect(m.rank.scheduled).toEqual([]);
+
+    // A member answer right after still works normally.
+    const ack = await m.service.submitAnswer(HOST, roomId, 1, 'Correct EN');
+    expect(ack).toMatchObject({ success: true, correct: true });
+  });
+
   it('wrong answers score NEGATIVE seconds remaining (party of 3 keeps playing)', async () => {
     const m = makeFakeModels();
     const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);

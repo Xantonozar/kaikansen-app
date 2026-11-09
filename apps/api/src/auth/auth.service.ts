@@ -226,6 +226,21 @@ export class AuthService {
       // is optional and defaults to the username (see contracts).
       throw new BadRequestException('All fields required');
     }
+    // Bug 5 (multi-user matrix 2026-11-09): the presence check
+    // passes truthy non-strings (username: 12345, email: [...],
+    // password: 999), which then died on .toLowerCase() / bcrypt
+    // as a 500. Wrong-typed fields are a client error — the same
+    // typeof validation the rest of the codebase applies
+    // (playlists/comments validators, this file's profile-update
+    // helpers below).
+    if (
+      typeof username !== 'string' ||
+      typeof email !== 'string' ||
+      typeof password !== 'string' ||
+      (dto.displayName != null && typeof dto.displayName !== 'string')
+    ) {
+      throw new BadRequestException('All fields required');
+    }
 
     const cleanUsername = username.toLowerCase();
     const cleanEmail = email.toLowerCase();
@@ -268,7 +283,12 @@ export class AuthService {
   async login(dto: LoginRequest): Promise<AuthResponse> {
     const model = this.requireModel();
     const { email, password } = dto ?? ({} as LoginRequest);
-    if (!email || !password) {
+    if (
+      typeof email !== 'string' ||
+      typeof password !== 'string' ||
+      !email ||
+      !password
+    ) {
       throw new BadRequestException('Email and password required');
     }
 

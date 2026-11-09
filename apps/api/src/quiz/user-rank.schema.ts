@@ -97,10 +97,19 @@ export class UserRank {
   @Prop({ type: Number, default: 0 })
   longestWinStreak: number;
 
-  @Prop({ type: UserRankStatsSchema })
+  // The subdocs MUST carry a default: Mongoose does not
+  // instantiate a single nested subdocument declared without one,
+  // so a rank doc created (or a legacy row hydrated) through this
+  // schema otherwise has stats/season === undefined — and
+  // RankService's first `stats.totalGames += 1` threw on every
+  // finished game, silently killing all RP application (Bug 2,
+  // multi-user matrix 2026-11-09; the throw was swallowed by the
+  // scheduler's catch). `default: () => ({})` materialises the
+  // subdoc with its own zeroed defaults in both cases.
+  @Prop({ type: UserRankStatsSchema, default: () => ({}) })
   stats: UserRankStats;
 
-  @Prop({ type: UserRankSeasonSchema })
+  @Prop({ type: UserRankSeasonSchema, default: () => ({}) })
   season: UserRankSeason;
 }
 

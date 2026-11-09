@@ -4,7 +4,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import type { Model } from 'mongoose';
+import { Types, type Model } from 'mongoose';
 import type {
   PlayerRankSummary,
   PlayerRanksResponse,
@@ -242,6 +242,18 @@ export class RankReadService {
     ) {
       const leaderboard: RankLeaderboardEntry[] = snapshot.entries
         .slice(0, LEADERBOARD_LIMIT)
+        // Bug 3 (multi-user matrix 2026-11-09): the snapshot is a
+        // shared-DB document written by the web's cron — a null or
+        // malformed entry must never 500 the endpoint for every
+        // caller. Unrenderable entries are skipped, the same
+        // treatment the live path gives gone users.
+        .filter(
+          (entry) =>
+            entry != null &&
+            typeof entry === 'object' &&
+            typeof entry.userId === 'string' &&
+            typeof entry.username === 'string',
+        )
         .map((entry) => ({
           userId: entry.userId,
           rp: entry.rp,
@@ -271,11 +283,21 @@ export class RankReadService {
       .exec()) as UserRankDoc[];
 
     const uniqueIds = [...new Set(rankDocs.map((r) => String(r.userId)))];
+    // Bug 3: UserRank.userId is a plain String on the shared
+    // schema, and a legacy row can carry a value that is not an
+    // ObjectId string. Mongoose casts the WHOLE $in against
+    // users._id, so one such row threw a CastError and 500ed the
+    // leaderboard for everyone. A non-ObjectId userId can never
+    // join a user (users._id is an ObjectId), so exclude those ids
+    // from the join — the row then drops exactly like a gone user.
+    const joinableIds = uniqueIds.filter((id) =>
+      Types.ObjectId.isValid(id),
+    );
     const userDocs =
-      uniqueIds.length === 0
+      joinableIds.length === 0
         ? []
         : ((await models.users
-            .find({ _id: { $in: uniqueIds } })
+            .find({ _id: { $in: joinableIds } })
             .lean()
             .exec()) as UserDoc[]);
     const usersById = new Map(userDocs.map((u) => [String(u._id), u]));
