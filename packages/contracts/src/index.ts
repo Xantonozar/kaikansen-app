@@ -78,6 +78,13 @@ export interface ThemeSummary {
   duration: number | null;
   isPopular: boolean;
   popularRank: number | null;
+  /**
+   * The anime's AniList media id — the themecache document's own
+   * indexed `anilistId` field, null when the catalogue carries none
+   * for the anime. The Library AniList segment groups summaries by
+   * it, and the anime detail route is keyed by it.
+   */
+  anilistId: number | null;
 }
 
 /**
@@ -575,6 +582,23 @@ export interface PlaylistSummary {
    * the first theme the same way).
    */
   coverImage: string | null;
+  /**
+   * The first up-to-four DISTINCT resolvable item covers in
+   * stored order (this backend's own addition — the Library
+   * Playlists design's 2×2 mosaic; the web derives a single cover
+   * client-side and has no equivalent field). Empty when the
+   * playlist is empty or every item left the catalogue.
+   */
+  coverImages: string[];
+  /**
+   * Summed KNOWN durations (seconds) of the playlist's resolvable
+   * items — the Playlist Detail header's runtime rule, served on
+   * the summary so the Library card can draw "N themes · M min".
+   * Null when no resolvable item's duration is known; renderers
+   * omit the segment rather than invent it (this backend's own
+   * addition).
+   */
+  totalDurationSeconds: number | null;
   /** ISO timestamps. */
   createdAt: string;
   updatedAt: string;

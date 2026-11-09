@@ -452,7 +452,24 @@ describe('Playlists flow with mocked models (e2e)', () => {
     ]);
     expect(two.body.themeCount).toBe(2);
     expect(two.body.coverImage).toBe('https://example.com/b.jpg');
+    // Summary additions: mosaic covers in stored order + the
+    // summed known durations (both seeds carry 90s).
+    expect(two.body.coverImages).toEqual([
+      'https://example.com/b.jpg',
+      'https://example.com/a.jpg',
+    ]);
+    expect(two.body.totalDurationSeconds).toBe(180);
     expect(JSON.stringify(two.body)).not.toContain('embedding');
+
+    const mine = await http.get('/playlists').set(asUser1()).expect(200);
+    const listed = mine.body.playlists.find(
+      (p: { id: string }) => p.id === id,
+    );
+    expect(listed.coverImages).toEqual([
+      'https://example.com/b.jpg',
+      'https://example.com/a.jpg',
+    ]);
+    expect(listed.totalDurationSeconds).toBe(180);
 
     const dup = await http
       .post(`/playlists/${id}/items`)

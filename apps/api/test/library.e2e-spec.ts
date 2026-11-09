@@ -846,6 +846,48 @@ process.env.JWT_SECRET = E2E_SECRET;
     expect(second.body).toEqual(first.body);
     expect(anilistEntriesFetch).toHaveBeenCalledTimes(1);
   });
+
+  it('GET /library/themes?source=anilist serves only the AniList side; the default stays the union', async () => {
+    const http = request(app.getHttpServer());
+    const asUser2 = () => ({
+      Authorization: `Bearer ${tokenFor('user-2')}`,
+    });
+
+    // user-1 recorded a watch of theme-1 above but has NO AniList
+    // link: the AniList source is the honest empty page — his
+    // history-only theme must not leak into it.
+    const unlinked = await http
+      .get('/library/themes?source=anilist')
+      .set(asUser1())
+      .expect(200);
+    expect(unlinked.body).toEqual({
+      themes: [],
+      total: 0,
+      page: 1,
+      limit: 50,
+    });
+
+    // The default read for the same caller still unions his watch
+    // history in (byte-compatible).
+    const union = await http
+      .get('/library/themes')
+      .set(asUser1())
+      .expect(200);
+    expect(union.body.total).toBe(1);
+    expect(union.body.themes[0].slug).toBe('test_anime-op1-1');
+
+    // user-2 is linked (stored ids [42], cache fresh) with no
+    // watch history of his own: the AniList source serves theme-1,
+    // and the summary carries the real anilistId grouping key.
+    const linked = await http
+      .get('/library/themes?source=anilist')
+      .set(asUser2())
+      .expect(200);
+    expect(linked.body.total).toBe(1);
+    expect(linked.body.anilistUser).toBe('AniUser');
+    expect(linked.body.themes[0].slug).toBe('test_anime-op1-1');
+    expect(linked.body.themes[0].anilistId).toBe(42);
+  });
 });
 
 /**

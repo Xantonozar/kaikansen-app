@@ -1376,6 +1376,102 @@ describe('LibraryService.listLibraryThemes', () => {
     const res = await service.listLibraryThemes('user-3');
     expect(res).toEqual({ themes: [], total: 0, page: 1, limit: 50 });
   });
+
+  it('source=anilist serves ONLY the AniList side — a history-only theme is excluded', async () => {
+    const { models, service } = makeServiceWithClient();
+    models.userModel.docs.push({
+      _id: 'user-3',
+      username: 'three',
+      totalRatings: 0,
+      totalTime: 0,
+      anilist: {
+        accessToken: 'token-3',
+        userId: 42,
+        username: 'AniThree',
+        syncedAt: new Date(), // fresh — the stored set is served as-is
+        completedMediaIds: [42], // theme-1's anilistId
+      },
+    });
+    // A theme the caller has WATCHED whose anime is not on their
+    // AniList lists (anilistId 777 is outside the stored set).
+    models.themeModel.docs.push(
+      makeTheme({
+        _id: 'theme-hist',
+        slug: 'hist_only-op1-5',
+        animeTitle: 'History Only',
+        animeSeasonYear: 2028,
+        anilistId: 777,
+      }),
+    );
+    models.historyModel.docs.push(
+      { userId: 'user-3', themeId: 'theme-hist', themeSlug: 'hist_only-op1-5' },
+      { userId: 'user-3', themeId: 'theme-1', themeSlug: 'test_anime-op1-1' },
+    );
+
+    // The default union serves both sides (2028 sorts first).
+    const union = await service.listLibraryThemes('user-3');
+    expect(union.total).toBe(2);
+    expect(union.themes.map((t) => t.slug)).toEqual([
+      'hist_only-op1-5',
+      'test_anime-op1-1',
+    ]);
+
+    // The AniList source drops the history clause entirely: the
+    // AniList-list theme stays, the history-only theme is gone,
+    // and the summary carries the real anilistId grouping key.
+    const res = await service.listLibraryThemes(
+      'user-3',
+      1,
+      50,
+      undefined,
+      'anilist',
+    );
+    expect(res.total).toBe(1);
+    expect(res.themes.map((t) => t.slug)).toEqual(['test_anime-op1-1']);
+    expect(res.themes[0].anilistId).toBe(42);
+    expect(res.anilistUser).toBe('AniThree');
+  });
+
+  it('source=anilist answers the plain early return for an unlinked caller, history notwithstanding', async () => {
+    const { models, service } = makeServiceWithClient();
+    models.historyModel.docs.push(
+      { userId: 'user-1', themeId: 'theme-1', themeSlug: 'test_anime-op1-1' },
+    );
+
+    // Sanity: the default union serves the watched theme…
+    const union = await service.listLibraryThemes('user-1');
+    expect(union.total).toBe(1);
+
+    // …but an unlinked caller has no AniList side to serve — the
+    // endpoint's early-return shape, with no AniList meta at all.
+    const res = await service.listLibraryThemes(
+      'user-1',
+      1,
+      50,
+      undefined,
+      'anilist',
+    );
+    expect(res).toEqual({ themes: [], total: 0, page: 1, limit: 50 });
+    expect(res).not.toHaveProperty('anilistUser');
+    expect(res).not.toHaveProperty('anilistSyncDeferred');
+    expect(res).not.toHaveProperty('anilistDataStale');
+  });
+
+  it('an unrecognised source value keeps the default union (byte-compatible)', async () => {
+    const { models, service } = makeServiceWithClient();
+    models.historyModel.docs.push(
+      { userId: 'user-1', themeId: 'theme-1', themeSlug: 'test_anime-op1-1' },
+    );
+    const res = await service.listLibraryThemes(
+      'user-1',
+      1,
+      50,
+      undefined,
+      'history',
+    );
+    expect(res.total).toBe(1);
+    expect(res.themes[0].slug).toBe('test_anime-op1-1');
+  });
 });
 
 describe('LibraryService.getAnilistEntries', () => {

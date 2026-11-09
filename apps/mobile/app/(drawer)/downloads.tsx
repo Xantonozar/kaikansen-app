@@ -12,7 +12,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import {
-  ChevronLeft,
+  ArrowLeft,
   Download,
   Pause,
   Play,
@@ -35,19 +35,31 @@ import {
   radii,
   spacing,
   typeStyles,
+  withOpacity,
   type Theme,
 } from '../../src/theme';
 import { useTheme } from '../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../src/layout';
 
 /**
- * Downloads (DESIGN.md §6.26, layout-fidelity Slice 4) — the
- * standalone screen over the downloads store (src/downloads.ts):
- * the summary card (count + bytes on this device), one row per
- * completed download (cover, title, artist · size, play disc,
- * delete with confirmation), and one row per download still in
- * flight (progress bar + percentage from the store's progress,
- * ✕ cancelling for real via the store's resumable handle).
+ * Downloads — the standalone screen over the downloads store
+ * (src/downloads.ts), matched to the Downloads design (mock +
+ * downloads.html): circular glass back button + 24pt title, the
+ * summary card (sage download disc, real on-device count and
+ * bytes), then INDIVIDUAL white row cards — one per completed
+ * download (52pt cover, title, artist · real file size, play disc,
+ * trash) and one per download still in flight (spinner over the
+ * cover, real progress bar + percentage, ✕ cancelling for real via
+ * the store's resumable handle). Completed rows render first, the
+ * in-flight rows after them, as the mock stacks them.
+ *
+ * Every number is the store's: the count is the completed records
+ * whose file is actually on the device (fileMissing records are
+ * shown broken, not counted), and the summary bytes are the
+ * store's totalBytes — the summed real sizes of those same files.
+ * (The earlier build counted in-flight downloads in the headline;
+ * the design's headline is an on-device claim, so it now counts
+ * completed downloads only — in-flight rows still list below.)
  *
  * Playback claims the playable downloads as the queue and opens
  * the player, exactly like the Library's Offline segment; a row
@@ -69,7 +81,7 @@ export default function DownloadsScreen() {
   };
 
   const healthy = downloads.records.filter((r) => !r.fileMissing);
-  const count = healthy.length + downloads.downloading.length;
+  const count = healthy.length;
 
   const playRecord = (record: DownloadRecord) => {
     const queueItems: QueueItem[] = healthy.map((r) => ({
@@ -120,14 +132,15 @@ export default function DownloadsScreen() {
       <View style={styles.topBar}>
         <Pressable
           onPress={goBack}
-          hitSlop={3}
+          hitSlop={6}
           accessibilityRole="button"
           accessibilityLabel="Back"
-          style={styles.backHit}
+          style={({ pressed }) => [
+            styles.backDisc,
+            pressed && styles.pressed,
+          ]}
         >
-          <View style={styles.backTile}>
-            <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-          </View>
+          <ArrowLeft size={20} color={theme.text} strokeWidth={2.2} />
         </Pressable>
         <Text style={styles.title}>Downloads</Text>
       </View>
@@ -151,7 +164,7 @@ export default function DownloadsScreen() {
           <>
             <View style={styles.summaryCard}>
               <View style={styles.summaryIcon}>
-                <Download size={22} color={theme.success} strokeWidth={2} />
+                <Download size={24} color={theme.success} strokeWidth={2.2} />
               </View>
               <View style={styles.summaryTexts}>
                 <Text style={styles.summaryTitle}>
@@ -164,85 +177,26 @@ export default function DownloadsScreen() {
               </View>
             </View>
 
-            {count === 0 && downloads.records.length === 0 && (
-              <Text style={styles.emptyText}>
-                Nothing downloaded yet — open a theme and tap Download to
-                keep it here for offline listening.
-              </Text>
-            )}
+            {downloads.records.length === 0 &&
+              downloads.downloading.length === 0 && (
+                <Text style={styles.emptyText}>
+                  Nothing downloaded yet — open a theme and tap Download to
+                  keep it here for offline listening.
+                </Text>
+              )}
 
-            {(downloads.downloading.length > 0 ||
-              downloads.records.length > 0) && (
-              <View style={styles.card}>
-                {downloads.downloading.map((pending, i) => {
-                  const progress = downloads.progressFor(pending.id);
-                  const pct =
-                    progress != null
-                      ? Math.round(Math.min(1, Math.max(0, progress)) * 100)
-                      : null;
-                  return (
-                    <View
-                      key={pending.id}
-                      style={[
-                        styles.row,
-                        i > 0 && styles.rowDivider,
-                      ]}
-                    >
-                      {cover(pending.coverImage)}
-                      <View style={styles.rowMain}>
-                        <Text style={styles.rowTitle} numberOfLines={1}>
-                          {pending.songTitle}
-                        </Text>
-                        <Text style={styles.rowSub} numberOfLines={1}>
-                          {pending.artistName ?? pending.animeTitle}
-                        </Text>
-                        <View style={styles.progressTrack}>
-                          <View
-                            style={[
-                              styles.progressFill,
-                              {
-                                width:
-                                  progress != null
-                                    ? `${Math.round(progress * 100)}%`
-                                    : '12%',
-                              },
-                            ]}
-                          />
-                        </View>
-                        <Text style={styles.rowSub}>
-                          Downloading…{pct != null ? ` ${pct}%` : ''}
-                        </Text>
-                      </View>
-                      <Pressable
-                        onPress={() => void downloads.cancel(pending.id)}
-                        hitSlop={6}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Cancel the download of ${pending.songTitle}`}
-                        style={({ pressed }) => [
-                          styles.cancelButton,
-                          pressed && styles.pressed,
-                        ]}
-                      >
-                        <X size={16} color={theme.muted} strokeWidth={2} />
-                      </Pressable>
-                    </View>
-                  );
-                })}
-
-                {downloads.records.map((record, i) => {
+            {(downloads.records.length > 0 ||
+              downloads.downloading.length > 0) && (
+              <View style={styles.rows}>
+                {downloads.records.map((record) => {
                   const isCurrent =
                     session.active &&
                     session.slug === record.slug &&
                     session.mode === record.mode &&
                     (session.entry?.atEntryId ?? session.entryIdOverride) ===
                       record.atEntryId;
-                  const divider =
-                    i > 0 || downloads.downloading.length > 0;
                   return (
-                    <View
-                      key={record.id}
-                      style={[styles.row, divider && styles.rowDivider]}
-                    >
+                    <View key={record.id} style={styles.rowCard}>
                       {cover(record.coverImage)}
                       <View style={styles.rowMain}>
                         <Text style={styles.rowTitle} numberOfLines={1}>
@@ -256,10 +210,18 @@ export default function DownloadsScreen() {
                             File missing — remove it and download again
                           </Text>
                         ) : (
-                          <Text style={styles.rowSub} numberOfLines={1}>
-                            {record.artistName ?? record.animeTitle} ·{' '}
-                            {formatBytes(record.size)}
-                          </Text>
+                          <View style={styles.subRow}>
+                            <Text
+                              style={[styles.rowSub, styles.artistText]}
+                              numberOfLines={1}
+                            >
+                              {record.artistName ?? record.animeTitle}
+                            </Text>
+                            <View style={styles.subDot} />
+                            <Text style={styles.sizeText}>
+                              {formatBytes(record.size)}
+                            </Text>
+                          </View>
                         )}
                       </View>
                       {!record.fileMissing && (
@@ -285,14 +247,16 @@ export default function DownloadsScreen() {
                         >
                           {isCurrent && playback.isPlaying ? (
                             <Pause
-                              size={15}
+                              size={16}
                               color={theme.onAccentContainer}
+                              fill={theme.onAccentContainer}
                               strokeWidth={2}
                             />
                           ) : (
                             <Play
-                              size={15}
+                              size={16}
                               color={theme.onAccentContainer}
+                              fill={theme.onAccentContainer}
                               strokeWidth={2}
                             />
                           )}
@@ -308,7 +272,73 @@ export default function DownloadsScreen() {
                           pressed && styles.pressed,
                         ]}
                       >
-                        <Trash2 size={17} color={theme.muted} strokeWidth={2} />
+                        <Trash2
+                          size={16}
+                          color={withOpacity(theme.secondary, 0.7)}
+                          strokeWidth={1.9}
+                        />
+                      </Pressable>
+                    </View>
+                  );
+                })}
+
+                {downloads.downloading.map((pending) => {
+                  const progress = downloads.progressFor(pending.id);
+                  const pct =
+                    progress != null
+                      ? Math.round(Math.min(1, Math.max(0, progress)) * 100)
+                      : null;
+                  return (
+                    <View key={pending.id} style={styles.rowCard}>
+                      <View style={styles.coverWrap}>
+                        {cover(pending.coverImage)}
+                        <View style={styles.coverOverlay}>
+                          {/* On-media white — literal per the Player
+                              slice's precedent (no token covers it). */}
+                          <ActivityIndicator size={16} color="#FFFFFF" />
+                        </View>
+                      </View>
+                      <View style={styles.rowMain}>
+                        <Text style={styles.rowTitle} numberOfLines={1}>
+                          {pending.songTitle}
+                        </Text>
+                        <Text style={styles.rowSub} numberOfLines={1}>
+                          {pending.artistName ?? pending.animeTitle}
+                        </Text>
+                        <View style={styles.progressBlock}>
+                          <View style={styles.progressTrack}>
+                            <View
+                              style={[
+                                styles.progressFill,
+                                {
+                                  width:
+                                    progress != null
+                                      ? `${Math.round(progress * 100)}%`
+                                      : '12%',
+                                },
+                              ]}
+                            />
+                          </View>
+                          <Text style={styles.progressText}>
+                            Downloading...{pct != null ? ` ${pct}%` : ''}
+                          </Text>
+                        </View>
+                      </View>
+                      <Pressable
+                        onPress={() => void downloads.cancel(pending.id)}
+                        hitSlop={6}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Cancel the download of ${pending.songTitle}`}
+                        style={({ pressed }) => [
+                          styles.cancelButton,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <X
+                          size={16}
+                          color={withOpacity(theme.secondary, 0.8)}
+                          strokeWidth={2.2}
+                        />
                       </Pressable>
                     </View>
                   );
@@ -335,25 +365,24 @@ const createStyles = (theme: Theme) =>
       maxWidth: CONTENT_MAX_WIDTH,
       alignSelf: 'center',
       paddingHorizontal: spacing.screenEdge,
-      paddingVertical: spacing.sm,
-      gap: spacing.sm,
+      paddingTop: spacing.sm,
+      paddingBottom: spacing.lg,
+      gap: 14,
     },
-    backHit: {
-      width: 44,
-      height: 44,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    backTile: {
-      width: 38,
-      height: 38,
-      borderRadius: radii.base,
-      backgroundColor: theme.raised,
+    backDisc: {
+      width: 40,
+      height: 40,
+      borderRadius: radii.pill,
+      backgroundColor: withOpacity(theme.surface, 0.7),
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
       alignItems: 'center',
       justifyContent: 'center',
     },
     title: {
-      ...typeStyles.heading,
+      fontFamily: fontFamilies.display,
+      fontSize: 24,
+      letterSpacing: -0.4,
       color: theme.text,
       flex: 1,
     },
@@ -378,15 +407,16 @@ const createStyles = (theme: Theme) =>
     summaryCard: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
+      gap: 14,
       backgroundColor: theme.surface,
-      borderRadius: radii.card,
-      padding: spacing.md,
-      marginTop: spacing.sm,
+      borderRadius: radii.md,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      padding: spacing.lg,
     },
     summaryIcon: {
-      width: 46,
-      height: 46,
+      width: 48,
+      height: 48,
       borderRadius: radii.pill,
       backgroundColor: theme.successContainer,
       alignItems: 'center',
@@ -398,39 +428,55 @@ const createStyles = (theme: Theme) =>
       gap: 2,
     },
     summaryTitle: {
-      ...typeStyles.body,
       fontFamily: fontFamilies.bodyStrong,
+      fontSize: 16,
       color: theme.text,
     },
     summarySub: {
-      ...typeStyles.caption,
-      color: theme.muted,
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
+      color: theme.secondary,
       lineHeight: 16,
     },
-    card: {
-      backgroundColor: theme.surface,
-      borderRadius: radii.card,
-      paddingHorizontal: spacing.md,
+    rows: {
+      gap: 10,
       marginTop: spacing.lg,
     },
-    row: {
+    rowCard: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
-      paddingVertical: spacing.sm + 2,
-    },
-    rowDivider: {
-      borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: theme.border,
+      backgroundColor: theme.surface,
+      borderRadius: radii.md,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      padding: spacing.md,
     },
     cover: {
-      width: 44,
-      height: 44,
+      width: 52,
+      height: 52,
       borderRadius: radii.base,
       flexShrink: 0,
     },
     coverEmpty: {
       backgroundColor: theme.raised,
+    },
+    coverWrap: {
+      width: 52,
+      height: 52,
+      borderRadius: radii.base,
+      overflow: 'hidden',
+      flexShrink: 0,
+    },
+    coverOverlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: withOpacity(theme.accent, 0.2),
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     rowMain: {
       flex: 1,
@@ -442,28 +488,56 @@ const createStyles = (theme: Theme) =>
       color: theme.text,
     },
     rowSub: {
-      ...typeStyles.caption,
-      color: theme.muted,
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
+      color: theme.secondary,
+    },
+    subRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    artistText: {
+      flexShrink: 1,
+    },
+    subDot: {
+      width: 4,
+      height: 4,
+      borderRadius: radii.pill,
+      backgroundColor: withOpacity(theme.secondary, 0.4),
+      flexShrink: 0,
+    },
+    sizeText: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
+      color: withOpacity(theme.secondary, 0.9),
+      flexShrink: 0,
     },
     brokenText: {
       color: theme.danger,
     },
+    progressBlock: {
+      marginTop: spacing.sm,
+      gap: spacing.xs,
+    },
     progressTrack: {
-      height: 5,
+      height: 6,
       borderRadius: radii.pill,
       backgroundColor: theme.accentContainer,
       overflow: 'hidden',
-      marginTop: spacing.xs,
-      marginBottom: 2,
     },
     progressFill: {
       height: '100%',
       borderRadius: radii.pill,
       backgroundColor: theme.accent,
     },
+    progressText: {
+      ...typeStyles.caption,
+      color: theme.secondary,
+    },
     playDisc: {
-      width: 34,
-      height: 34,
+      width: 36,
+      height: 36,
       borderRadius: radii.pill,
       backgroundColor: theme.accentContainer,
       alignItems: 'center',
@@ -478,10 +552,8 @@ const createStyles = (theme: Theme) =>
       flexShrink: 0,
     },
     cancelButton: {
-      width: 30,
-      height: 30,
-      borderRadius: radii.pill,
-      backgroundColor: theme.raised,
+      width: 32,
+      height: 32,
       alignItems: 'center',
       justifyContent: 'center',
       flexShrink: 0,

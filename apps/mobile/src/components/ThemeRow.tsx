@@ -108,6 +108,20 @@ import { ThemeRowMenu } from './ThemeRowMenu';
  * lavender chip, 6px radius, NO sequence), the play disc (36pt,
  * 20pt glyph), then the ⋮ (19pt in the secondary). Saving lives
  * in the ⋮ menu — the mock draws no heart.
+ *
+ * A seventh opt-in, `search` (Search typed-results rows, measured
+ * from search-results.html), is that screen's own cut — NOT the
+ * consolidated default above: radii.md card at 12px padding with
+ * a 10px bottom margin, a 48pt thumb at radii.base, the title
+ * 14pt bold on one line (the HTML truncates — the same recorded
+ * law-#9 deviation), the artist beneath at 12pt in the mauve
+ * secondary with the OP/ED chip inline after it (6px-radius
+ * lavender chip, 10pt semibold in the accent for OP and ED alike,
+ * carrying the real sequence — "OP 1" — and the bare type when
+ * the stored sequence is 0, the detail screen's convention), and
+ * a cluster of only the play disc (32pt, 19pt glyph) and the ⋮
+ * (20pt in the secondary). The results mock draws no heart —
+ * saving lives in the ⋮ menu, as on the Season/Anime/Artist rows.
  */
 export function ThemeRow({
   item,
@@ -127,6 +141,7 @@ export function ThemeRow({
   season = false,
   anime = false,
   artist = false,
+  search = false,
 }: {
   item: ThemeSummary;
   onPress?: () => void;
@@ -155,6 +170,8 @@ export function ThemeRow({
   anime?: boolean;
   /** The Artist detail rows' mock anatomy (see header). */
   artist?: boolean;
+  /** The Search typed-results rows' mock anatomy (see header). */
+  search?: boolean;
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -170,11 +187,14 @@ export function ThemeRow({
       style={({ pressed }) => [
         styles.playDisc,
         compact && styles.playDiscCompact,
+        search && styles.playDiscSearch,
         pressed && styles.pressed,
       ]}
     >
       <Play
-        size={artist || season ? 20 : anime ? 18 : compact ? 17 : 15}
+        size={
+          artist || season ? 20 : search ? 19 : anime ? 18 : compact ? 17 : 15
+        }
         color={theme.accent}
         fill={theme.accent}
         strokeWidth={2}
@@ -218,6 +238,7 @@ export function ThemeRow({
         season && styles.rowSeason,
         anime && styles.rowAnime,
         artist && styles.rowArtist,
+        search && styles.rowSearch,
         pressed && styles.pressed,
       ]}
     >
@@ -231,6 +252,7 @@ export function ThemeRow({
             season && styles.thumbSeason,
             anime && styles.thumbAnime,
             artist && styles.thumbArtist,
+            search && styles.thumbSearch,
           ]}
         />
       ) : (
@@ -242,6 +264,7 @@ export function ThemeRow({
             season && styles.thumbSeason,
             anime && styles.thumbAnime,
             artist && styles.thumbArtist,
+            search && styles.thumbSearch,
             styles.placeholder,
           ]}
         />
@@ -298,6 +321,33 @@ export function ThemeRow({
               {metaText ?? artistText}
             </Text>
           </>
+        ) : search ? (
+          <>
+            {/* Search results anatomy (search-results.html): the
+                title on one line (the HTML truncates — the recorded
+                law-#9 deviation), the artist in the mauve secondary
+                beneath with the OP/ED chip inline after it. The
+                chip carries the real sequence and falls back to
+                the bare type when the stored sequence is 0 (the
+                detail screen's convention). */}
+            <Text style={styles.songSearch} numberOfLines={1}>
+              {item.songTitle}
+            </Text>
+            <View style={styles.metaRowSearch}>
+              <Text style={styles.metaSearch} numberOfLines={1}>
+                {metaText ?? artistText}
+              </Text>
+              {typeChip && (
+                <View style={styles.typeChipSearch}>
+                  <Text style={styles.typeSearch}>
+                    {item.sequence > 0
+                      ? `${item.type} ${item.sequence}`
+                      : item.type}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </>
         ) : (
           <>
             {/* Design law #9: long titles wrap (2 lines), never
@@ -333,11 +383,11 @@ export function ThemeRow({
           </Text>
         ) : null}
       </View>
-      <View style={styles.tiles}>
-        {durationText && !season && !anime && !artist ? (
+      <View style={[styles.tiles, search && styles.tilesSearch]}>
+        {durationText && !season && !anime && !artist && !search ? (
           <Text style={styles.duration}>{durationText}</Text>
         ) : null}
-        {onRemove && !season && !anime && !artist && (
+        {onRemove && !season && !anime && !artist && !search && (
           <Pressable
             onPress={onRemove}
             hitSlop={7}
@@ -360,9 +410,10 @@ export function ThemeRow({
             </View>
             {playButton}
           </>
-        ) : season || anime ? (
-          // Season browse / Anime detail cluster (season.html /
-          // anime-detail.html): play disc + ⋮ only.
+        ) : season || anime || search ? (
+          // Season browse / Anime detail / Search results cluster
+          // (season.html / anime-detail.html / search-results.html):
+          // play disc + ⋮ only.
           playButton
         ) : playlist ? (
           heartButton
@@ -382,8 +433,12 @@ export function ThemeRow({
             item={item}
             onPlay={onPlay}
             onOpen={onPress}
-            triggerIconSize={artist ? 19 : anime ? 18 : season ? 20 : undefined}
-            triggerColor={artist || anime || season ? theme.secondary : undefined}
+            triggerIconSize={
+              artist ? 19 : anime ? 18 : season || search ? 20 : undefined
+            }
+            triggerColor={
+              artist || anime || season || search ? theme.secondary : undefined
+            }
           />
         )}
       </View>
@@ -559,6 +614,68 @@ const createStyles = (theme: Theme) =>
     fontFamily: fontFamilies.bodyStrong,
     fontSize: 11,
     color: theme.accent,
+  },
+  rowSearch: {
+    // Search results mock rows (search-results.html): p-3 (12)
+    // padding, rounded-2xl (16) card corners, mb-2.5 (10) between
+    // the group's rows.
+    padding: 12,
+    borderRadius: radii.md,
+    marginBottom: 10,
+  },
+  thumbSearch: {
+    // Search results mock thumb: w-12 h-12 (48), rounded-xl (12).
+    width: 48,
+    height: 48,
+    borderRadius: radii.base,
+  },
+  songSearch: {
+    // search-results.html: text-sm bold, tracking-tight, one line.
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 14,
+    letterSpacing: -0.2,
+    color: theme.text,
+    flexShrink: 1,
+  },
+  metaRowSearch: {
+    // search-results.html: the artist and chip on one line,
+    // gap-2 (8); the row's own gap in `main` gives the mt-0.5.
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  metaSearch: {
+    // search-results.html: the artist at 12px in the mauve
+    // secondary (#8E5B7B).
+    fontFamily: fontFamilies.bodySmall,
+    fontSize: 12,
+    color: theme.secondary,
+    flexShrink: 1,
+  },
+  typeChipSearch: {
+    backgroundColor: theme.accentContainer,
+    // search-results.html rounds the chip at 6px (rounded-md) —
+    // off the radii scale, a literal citing the screen's HTML.
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  typeSearch: {
+    // search-results.html: 10px semibold in the deep mauve, for
+    // OP and ED alike.
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 10,
+    color: theme.accent,
+  },
+  playDiscSearch: {
+    // search-results.html: the play button is w-8 h-8 (32).
+    width: 32,
+    height: 32,
+  },
+  tilesSearch: {
+    // search-results.html: gap-1.5 (6) between the play disc
+    // and the ⋮.
+    gap: 6,
   },
   playDiscCompact: {
     // Detail + Library mocks both draw the disc at ≈86-88px @2x.

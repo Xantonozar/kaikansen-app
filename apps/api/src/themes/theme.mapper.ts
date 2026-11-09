@@ -47,6 +47,7 @@ export function toThemeSummary(doc: ThemeDoc): ThemeSummary {
     duration: doc.duration ?? null,
     isPopular: doc.isPopular ?? false,
     popularRank: doc.popularRank ?? null,
+    anilistId: doc.anilistId ?? null,
   };
 }
 

@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import {
-  ChevronLeft,
+  ArrowLeft,
   ChevronRight,
   Clock,
   Search,
@@ -59,11 +59,20 @@ const RECENTS_CAP = 8;
  *   themes carry, deduped — real catalogue data, no invented
  *   trends. A section with no data simply doesn't render.
  * - Results: the groups GET /search serves, in the mock's order —
- *   Themes (ThemeRows, as everywhere), Anime (cover, title,
- *   year · theme count, chevron → the anime page), Artists
- *   (image or initial disc, name, theme count, chevron → the
- *   artist page). Empty groups are omitted; fixture mode honestly
- *   serves empty anime/artist groups, so it renders Themes alone.
+ *   Themes (ThemeRow's `search` variant: 48pt cover, one-line
+ *   title, artist + OP/ED chip, play disc + ⋮ — the results mock
+ *   draws no heart), Anime (portrait cover, title, year · theme
+ *   count, chevron → the anime page), Artists (the initial-letter
+ *   disc the mock draws — never the artist's image here — name,
+ *   theme count, chevron → the artist page). Empty groups are
+ *   omitted; fixture mode honestly serves empty anime/artist
+ *   groups, so it renders Themes alone. The anime subline omits
+ *   the mock's "TV ·" format word: the catalogue stores no format
+ *   and the owner declined the backfill (the Anime Detail slice's
+ *   standing deviation) — the line is "<year> · <N> themes".
+ *   The header bar is shared with the idle state and follows the
+ *   results HTML's measurements (plain back arrow, white pill
+ *   field), so the idle state's header wears the same cut.
  *
  * A search is recorded in Recent when it is submitted (keyboard
  * search key), picked from a chip/recent row, or when a result is
@@ -242,7 +251,7 @@ export default function SearchScreen() {
           {a.themeCount} {a.themeCount === 1 ? 'theme' : 'themes'}
         </Text>
       </View>
-      <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
+      <ChevronRight size={20} color={theme.secondary} strokeWidth={2} />
     </Pressable>
   );
 
@@ -257,15 +266,14 @@ export default function SearchScreen() {
       accessibilityLabel={`Open ${ar.name}`}
       style={({ pressed }) => [styles.entityRow, pressed && styles.pressed]}
     >
-      {ar.imageUrl ? (
-        <Image source={{ uri: ar.imageUrl }} style={styles.entityDisc} />
-      ) : (
-        <View style={[styles.entityDisc, styles.discFallback]}>
-          <Text style={styles.discInitial}>
-            {ar.name.charAt(0).toUpperCase()}
-          </Text>
-        </View>
-      )}
+      {/* The results mock draws the initial-letter disc for every
+          artist row — never the artist's image (that lives on the
+          artist page) — so the disc is unconditional here. */}
+      <View style={[styles.entityDisc, styles.discFallback]}>
+        <Text style={styles.discInitial}>
+          {ar.name.charAt(0).toUpperCase()}
+        </Text>
+      </View>
       <View style={styles.entityMain}>
         <Text style={styles.entityTitle} numberOfLines={1}>
           {ar.name}
@@ -274,7 +282,7 @@ export default function SearchScreen() {
           {ar.totalThemes} {ar.totalThemes === 1 ? 'theme' : 'themes'}
         </Text>
       </View>
-      <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
+      <ChevronRight size={20} color={theme.secondary} strokeWidth={2} />
     </Pressable>
   );
 
@@ -287,14 +295,15 @@ export default function SearchScreen() {
             hitSlop={4}
             accessibilityRole="button"
             accessibilityLabel="Back"
-            style={styles.backHit}
+            style={({ pressed }) => [
+              styles.backButton,
+              pressed && styles.pressed,
+            ]}
           >
-            <View style={styles.backTile}>
-              <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-            </View>
+            <ArrowLeft size={22} color={theme.text} strokeWidth={2} />
           </Pressable>
           <View style={styles.field}>
-            <Search size={20} color={theme.muted} strokeWidth={2} />
+            <Search size={20} color={theme.secondary} strokeWidth={2} />
             <TextInput
               style={styles.input}
               value={query}
@@ -314,7 +323,7 @@ export default function SearchScreen() {
                 accessibilityLabel="Clear search"
                 style={styles.clearButton}
               >
-                <X size={16} color={theme.muted} strokeWidth={2} />
+                <X size={18} color={theme.secondary} strokeWidth={2} />
               </Pressable>
             )}
           </View>
@@ -438,7 +447,10 @@ export default function SearchScreen() {
         ) : response ? (
           <ScrollView
             style={styles.results}
-            contentContainerStyle={styles.resultsContent}
+            contentContainerStyle={[
+              styles.resultsContent,
+              styles.resultsContentResults,
+            ]}
             keyboardShouldPersistTaps="handled"
           >
             {favorites.lastError && (
@@ -451,12 +463,13 @@ export default function SearchScreen() {
               </Pressable>
             )}
             {results.length > 0 && (
-              <>
-                <Text style={styles.groupHeading}>Themes</Text>
+              <View>
+                <Text style={styles.resultHeading}>Themes</Text>
                 {results.map((item, index) => (
                   <ThemeRow
                     key={item.slug}
                     item={item}
+                    search
                     onPress={() => openTheme(item.slug)}
                     onPlay={() => playFromList(results, index)}
                     saved={favorites.isFavorite(item.slug)}
@@ -464,19 +477,27 @@ export default function SearchScreen() {
                     onToggleSave={() => void favorites.toggle(item.slug)}
                   />
                 ))}
-              </>
+              </View>
             )}
             {anime.length > 0 && (
-              <>
-                <Text style={styles.groupHeading}>Anime</Text>
+              <View
+                style={results.length > 0 ? styles.groupSpaced : undefined}
+              >
+                <Text style={styles.resultHeading}>Anime</Text>
                 {anime.map(animeRow)}
-              </>
+              </View>
             )}
             {artists.length > 0 && (
-              <>
-                <Text style={styles.groupHeading}>Artists</Text>
+              <View
+                style={
+                  results.length > 0 || anime.length > 0
+                    ? styles.groupSpaced
+                    : undefined
+                }
+              >
+                <Text style={styles.resultHeading}>Artists</Text>
                 {artists.map(artistRow)}
-              </>
+              </View>
             )}
           </ScrollView>
         ) : null}
@@ -500,49 +521,50 @@ const createStyles = (theme: Theme) =>
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    // search-results.html: the header row's gap is gap-2.5 (10) —
+    // a literal citing the screen's HTML (prior slices' pattern).
+    gap: 10,
     paddingHorizontal: spacing.screenEdge,
     paddingTop: spacing.lg,
     paddingBottom: spacing.md,
   },
-  backHit: {
-    width: 44,
-    height: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  backTile: {
-    // Mock: white circular back button.
-    width: 38,
-    height: 38,
-    borderRadius: radii.pill,
-    backgroundColor: theme.surface,
+  backButton: {
+    // search-results.html: a plain back arrow in a w-10 h-10 (40)
+    // circle — no tile behind it.
+    width: 40,
+    height: 40,
     alignItems: 'center',
     justifyContent: 'center',
   },
   field: {
-    // Mock: the search field is a white pill.
+    // search-results.html: the search field is a white pill,
+    // px-3.5 py-2 around the input's line — 40 tall, matching
+    // the back button's h-10 row.
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    height: 48,
+    height: 40,
     backgroundColor: theme.surface,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
     borderRadius: radii.pill,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: 14,
   },
   input: {
     flex: 1,
     ...typeStyles.body,
+    // search-results.html: the typed query is font-semibold.
+    fontFamily: fontFamilies.bodyStrong,
     color: theme.text,
     paddingVertical: 0,
   },
   clearButton: {
-    width: 30,
-    height: 30,
-    borderRadius: radii.sm,
+    // search-results.html: the clear ✕ sits in a w-6 h-6 (24)
+    // circle at the field's right end.
+    width: 24,
+    height: 24,
+    borderRadius: radii.pill,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -569,6 +591,26 @@ const createStyles = (theme: Theme) =>
     color: theme.text,
     marginTop: spacing.md,
     marginBottom: spacing.sm,
+  },
+  resultsContentResults: {
+    // search-results.html: the groups start mt-2 (8) under the
+    // header bar.
+    paddingTop: spacing.sm,
+  },
+  resultHeading: {
+    // search-results.html: group headings are text-sm (14)
+    // semibold, tracking-tight, mb-2.5 (10), px-0.5 (2).
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 14,
+    letterSpacing: -0.2,
+    color: theme.text,
+    marginBottom: 10,
+    paddingHorizontal: 2,
+  },
+  groupSpaced: {
+    // search-results.html: sections after the first sit mt-3.5
+    // (14) below the previous group.
+    marginTop: 14,
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -629,37 +671,51 @@ const createStyles = (theme: Theme) =>
     color: theme.muted,
   },
   entityRow: {
+    // search-results.html (Anime + Artists cards): p-3 (12)
+    // padding, rounded-2xl (16) corners, gap-3.5 (14) between the
+    // cover/disc and the text, the theme cards' mb-2.5 (10)
+    // rhythm between stacked rows.
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
+    gap: 14,
     padding: spacing.md,
     minHeight: 56,
     backgroundColor: theme.surface,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
-    borderRadius: radii.card,
-    marginBottom: spacing.sm,
+    borderRadius: radii.md,
+    marginBottom: 10,
   },
   entityCover: {
-    width: 52,
-    height: 52,
-    borderRadius: radii.md,
+    // search-results.html: the anime poster is w-12 h-16
+    // (48×64, portrait), rounded-xl (12).
+    width: 48,
+    height: 64,
+    borderRadius: radii.base,
     backgroundColor: theme.surface,
   },
   entityDisc: {
-    width: 52,
-    height: 52,
+    // search-results.html: the artist disc is w-12 h-12 (48).
+    width: 48,
+    height: 48,
     borderRadius: radii.pill,
     backgroundColor: theme.surface,
   },
   discFallback: {
-    backgroundColor: theme.accentContainer,
+    // search-results.html fills the disc with its lavender-peach
+    // (#FCE8E2) — no token carries that hue; the nearest token
+    // pair is the warm dangerContainer, and the initial below
+    // takes the matching danger (the HTML's peach-text #B05B48
+    // maps to the same family). Flagged in the slice report.
+    backgroundColor: theme.dangerContainer,
     alignItems: 'center',
     justifyContent: 'center',
   },
   discInitial: {
-    ...typeStyles.heading,
-    color: theme.onAccentContainer,
+    // search-results.html: the initial is text-base (16) bold.
+    fontFamily: fontFamilies.display,
+    fontSize: 16,
+    color: theme.danger,
   },
   placeholder: {
     backgroundColor: theme.raised,
@@ -675,8 +731,11 @@ const createStyles = (theme: Theme) =>
     color: theme.text,
   },
   entityMeta: {
-    ...typeStyles.caption,
-    color: theme.muted,
+    // search-results.html: the subline is 12px in the mauve
+    // secondary (#8E5B7B).
+    fontFamily: fontFamilies.bodySmall,
+    fontSize: 12,
+    color: theme.secondary,
   },
   saveError: {
     ...typeStyles.bodySmall,

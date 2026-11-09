@@ -222,10 +222,26 @@ export class PlaylistsService {
     themesById: Map<string, ThemeDoc>,
   ): PlaylistSummary {
     const ids = (doc.themes ?? []).map((t) => String(t));
-    const first = ids
+    // Resolvable items in stored order (dangling ids drop out,
+    // like the web's populate).
+    const summaries = ids
       .map((id) => themesById.get(id))
-      .find((t) => t !== undefined);
-    const firstSummary = first ? toThemeSummary(first) : null;
+      .filter((t): t is ThemeDoc => t !== undefined)
+      .map(toThemeSummary);
+    const firstSummary = summaries[0] ?? null;
+    // Library mosaic: the first up-to-four DISTINCT covers, the
+    // Playlist Detail header grid's derivation.
+    const coverImages: string[] = [];
+    for (const s of summaries) {
+      const cover = s.animeCoverImage ?? s.animeCoverImageSmall;
+      if (cover && !coverImages.includes(cover)) coverImages.push(cover);
+      if (coverImages.length >= 4) break;
+    }
+    // Runtime: the KNOWN durations only; null when none is known
+    // (the detail header's rule — omit, never invent).
+    const knownDurations = summaries
+      .map((s) => s.duration)
+      .filter((d): d is number => d != null);
     return {
       id: String(doc._id),
       name: doc.name,
@@ -236,6 +252,11 @@ export class PlaylistsService {
         ? (firstSummary.animeCoverImage ??
           firstSummary.animeCoverImageSmall)
         : null,
+      coverImages,
+      totalDurationSeconds:
+        knownDurations.length > 0
+          ? knownDurations.reduce((a, b) => a + b, 0)
+          : null,
       createdAt: iso(doc.createdAt),
       updatedAt: iso(doc.updatedAt),
     };

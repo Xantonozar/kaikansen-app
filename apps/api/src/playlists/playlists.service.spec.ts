@@ -54,6 +54,7 @@ function queryOf(result: unknown) {
 const THEME_A = '507f1f77bcf86cd799439011';
 const THEME_B = '507f1f77bcf86cd799439012';
 const THEME_C = '507f1f77bcf86cd799439013';
+const THEME_D = '507f1f77bcf86cd799439014';
 const DANGLING = '507f1f77bcf86cd799439099';
 
 function makeTheme(overrides: Record<string, unknown> = {}) {
@@ -139,6 +140,15 @@ function makeModels() {
       animeTitle: 'Anime C',
       animeCoverImage: null,
       animeCoverImageSmall: null,
+    }),
+    makeTheme({
+      _id: THEME_D,
+      slug: 'anime_d-op1-4',
+      songTitle: 'Song D',
+      animeTitle: 'Anime D',
+      // Same cover as A (mosaic dedupe) and an unknown duration.
+      animeCoverImage: 'https://example.com/a.jpg',
+      duration: null,
     }),
   ];
   const playlists: Record<string, unknown>[] = [];
@@ -347,8 +357,41 @@ describe('PlaylistsService — list mine', () => {
     expect(list.playlists.map((p) => p.name)).toEqual(['First', 'Second']);
     expect(list.playlists[0].themeCount).toBe(1);
     expect(list.playlists[0].coverImage).toBe('https://example.com/b.jpg');
+    expect(list.playlists[0].coverImages).toEqual([
+      'https://example.com/b.jpg',
+    ]);
+    expect(list.playlists[0].totalDurationSeconds).toBe(90);
     expect(list.playlists[1].id).toBe(second.id);
     expect(list.playlists[1].coverImage).toBeNull();
+    expect(list.playlists[1].coverImages).toEqual([]);
+    expect(list.playlists[1].totalDurationSeconds).toBeNull();
+  });
+
+  it('derives mosaic covers (distinct, stored order) and known-duration sums', async () => {
+    const { service } = makeService();
+    const created = await service.createPlaylist('user-1', {
+      name: 'Mixed',
+    });
+    expect(created.coverImages).toEqual([]);
+    expect(created.totalDurationSeconds).toBeNull();
+    // A (cover a.jpg, 90s) + D (same cover, unknown duration)
+    // + C (no cover, 90s): one distinct cover, 180 known seconds.
+    await service.addItem('user-1', created.id, { slug: 'anime_a-op1-1' });
+    await service.addItem('user-1', created.id, { slug: 'anime_d-op1-4' });
+    const withItems = await service.addItem('user-1', created.id, {
+      slug: 'anime_c-op2-3',
+    });
+    expect(withItems.coverImages).toEqual(['https://example.com/a.jpg']);
+    expect(withItems.totalDurationSeconds).toBe(180);
+
+    const onlyUnknown = await service.createPlaylist('user-1', {
+      name: 'Unknown lengths',
+    });
+    const filled = await service.addItem('user-1', onlyUnknown.id, {
+      slug: 'anime_d-op1-4',
+    });
+    expect(filled.coverImages).toEqual(['https://example.com/a.jpg']);
+    expect(filled.totalDurationSeconds).toBeNull();
   });
 });
 
@@ -539,7 +582,7 @@ describe('PlaylistsService — items', () => {
     expect(models.playlistModel.docs[0].themes).toHaveLength(2);
     // The stored end-state IS the counter — no other doc moved.
     expect(models.themeModel.docs.map((t) => t.totalWatches)).toEqual([
-      10, 10, 10,
+      10, 10, 10, 10,
     ]);
   });
 

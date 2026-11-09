@@ -1,5 +1,4 @@
 import type {
-  AnilistEntriesResponse,
   CreatePlaylistRequest,
   FavoriteState,
   FavoritesResponse,
@@ -97,54 +96,39 @@ export async function fetchHistory(): Promise<WatchHistoryResponse> {
  * COMPLETED + CURRENT (watching) lists (the API deliberately
  * widens the web's completed-only read — planning stays out).
  * Flat and paged on the wire (page 1, limit 50
- * by default, animeSeasonYear desc / animeTitle asc); the AniList
- * segment groups by anime client-side, so this pages through the
- * whole set (100 a page, bounded) and resolves the first page's
+ * by default, animeSeasonYear desc / animeTitle asc); callers that
+ * group by anime client-side page through the
+ * whole set (100 a page, bounded) and resolve the first page's
  * response shape with every theme filled in. The response's
  * `anilistUser` is the linked AniList username (absent entirely when
  * both sides of the union are empty — the web's early return).
+ *
+ * With `source: 'anilist'` the API serves the AniList side ALONE —
+ * themes of the caller's AniList anime, no watch-history mixing
+ * (owner ruling 2026-11-10, Option B). That is the Library AniList
+ * segment's only read.
  */
-export async function fetchLibraryThemes(): Promise<LibraryThemesResponse> {
+export async function fetchLibraryThemes(
+  source?: 'anilist',
+): Promise<LibraryThemesResponse> {
   if (fixtureMode) return { themes: [], total: 0, page: 1, limit: 100 };
   const PAGE_LIMIT = 100;
   const MAX_PAGES = 25;
+  const sourceParam = source === 'anilist' ? '&source=anilist' : '';
   const first = await apiJson<LibraryThemesResponse>(
-    `/library/themes?page=1&limit=${PAGE_LIMIT}`,
+    `/library/themes?page=1&limit=${PAGE_LIMIT}${sourceParam}`,
   );
   const themes = [...first.themes];
   let page = 1;
   while (themes.length < first.total && page < MAX_PAGES) {
     page += 1;
     const res = await apiJson<LibraryThemesResponse>(
-      `/library/themes?page=${page}&limit=${PAGE_LIMIT}`,
+      `/library/themes?page=${page}&limit=${PAGE_LIMIT}${sourceParam}`,
     );
     if (res.themes.length === 0) break;
     themes.push(...res.themes);
   }
   return { ...first, themes, page: 1, limit: themes.length };
-}
-
-/**
- * The caller's AniList Watching + Completed ENTRIES
- * (GET /library/anilist-entries) — per-entry progress, score,
- * format and episodes read from AniList itself by the API. The
- * response degrades by flags, never by error: `available: false`
- * (unlinked, or AniList unreachable with no cache) tells the
- * Library segment to fall back to the themes union above.
- * Fixture mode resolves the honest unlinked shape — a demo
- * library invents no AniList entries.
- */
-export async function fetchAnilistEntries(): Promise<AnilistEntriesResponse> {
-  if (fixtureMode) {
-    return {
-      linked: false,
-      available: false,
-      anilistUser: null,
-      watching: [],
-      completed: [],
-    };
-  }
-  return apiJson<AnilistEntriesResponse>('/library/anilist-entries');
 }
 
 /* ------------------------------------------------------------------ */

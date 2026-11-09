@@ -8,6 +8,7 @@ import {
 import {
   ActivityIndicator,
   Image,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -17,23 +18,26 @@ import {
 } from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import {
-  ChevronRight,
-  CircleCheck,
+  Clock,
+  Globe,
   Headphones,
   Library as LibraryIcon,
   Link2,
   ListMusic,
   Lock,
+  MoreVertical,
+  Pause,
+  Pencil,
   Play,
   Plus,
-  RefreshCw,
+  Search,
   Trash2,
+  X,
 } from 'lucide-react-native';
 import type {
-  AnilistEntriesResponse,
-  AnilistEntry,
   FavoritesResponse,
   LibraryThemesResponse,
+  PlaylistDetail,
   PlaylistSummary,
   ThemeSummary,
   WatchHistoryEntry,
@@ -46,11 +50,12 @@ import {
 } from '../../../src/favoritesStore';
 import {
   createPlaylist,
-  fetchAnilistEntries,
+  deletePlaylist,
   fetchFavorites,
   fetchHistory,
   fetchLibraryThemes,
   fetchPlaylists,
+  updatePlaylist,
 } from '../../../src/libraryApi';
 import {
   downloadsSupported,
@@ -59,6 +64,7 @@ import {
   useDownloads,
 } from '../../../src/downloads';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import { ThemeRowMenu } from '../../../src/components/ThemeRowMenu';
 import {
   queueItemFromSummary,
   queueItemsFromSummaries,
@@ -70,6 +76,7 @@ import {
   radii,
   spacing,
   typeStyles,
+  withOpacity,
   type Theme,
 } from '../../../src/theme';
 import { useTheme } from '../../../src/theme-context';
@@ -107,6 +114,30 @@ function relativeTime(iso: string): string {
 }
 
 /**
+ * The Recent mock's played-line voice (library-recent.html):
+ * "Played 24 min ago", "Played 2h ago", "Played yesterday",
+ * "Played 3 days ago" — computed from the entry's REAL viewedAt.
+ * Ladder: under a minute "just now"; under an hour whole minutes;
+ * under a day whole hours; under two days "yesterday"; under a
+ * week whole days; older falls back to the date. Null when the
+ * timestamp is unparseable — the row then omits the line rather
+ * than inventing one.
+ */
+function playedAgo(iso: string): string | null {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return null;
+  const mins = Math.floor((Date.now() - then) / 60000);
+  if (mins < 1) return 'Played just now';
+  if (mins < 60) return `Played ${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `Played ${hours}h ago`;
+  if (hours < 48) return 'Played yesterday';
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `Played ${days} days ago`;
+  return `Played ${new Date(iso).toLocaleDateString()}`;
+}
+
+/**
  * Library (Slice M2) — the real tab: Saved (favorites), Recent
  * (watch history) and Playlists behind one segmented control (the
  * approved mockup's library treatment). Every list is fetched on
@@ -119,28 +150,56 @@ function relativeTime(iso: string): string {
  * prompt as a body state. Tapping a download opens the player on the
  * local file.
  *
- * The AniList segment leads with the designed ENTRY list
- * (design polish pass): GET /library/anilist-entries serves the
- * caller's AniList Watching / Completed entries themselves —
- * poster, progress bar + "Episode X of Y" + percent for Watching;
- * format pill, "✓ Completed" and "Score: n/10" for Completed —
- * behind the "Synced from AniList · @user" line and the
- * Watching/Completed toggle pills. When that read degrades
- * (AniList unreachable, no cache), the segment silently falls
- * back to the previous themes view: GET /library/themes — the
- * union of the caller's watch history and the themes of anime on
- * their AniList COMPLETED + CURRENT (watching) lists (the API
- * widens the web's completed-only read) — grouped by anime with
- * an All / OP / ED filter. Signed-in but unlinked gets a prompt
- * to link AniList in Settings; the link state comes from the
- * session profile's `anilist` field (with the session-local link
- * username as a fallback for a link made moments ago), never
- * guessed.
+ * The AniList segment shows THEMES from the caller's AniList
+ * anime (owner ruling 2026-11-10, Option B — superseding the
+ * polish pass's poster/progress ENTRY list, which is gone): the
+ * segment's only read is GET /library/themes?source=anilist,
+ * the AniList side of the library-themes union served alone —
+ * catalogue themes whose anime is on the caller's AniList
+ * COMPLETED + CURRENT (watching) lists (the stored media-id set
+ * merges the two statuses, so the list is one merged scroll;
+ * the API widens the web's completed-only read) — grouped
+ * per-anime by the summary's real anilistId, with an All / OP /
+ * ED filter, and group headers that open the anime's detail
+ * screen. No watch-history themes are mixed in. Signed-in but
+ * unlinked gets a prompt to link AniList in Settings; the link
+ * state comes from the session profile's `anilist` field (with
+ * the session-local link username as a fallback for a link made
+ * moments ago), never guessed.
  *
  * Honest states throughout: signed-out gets a log-in prompt, fixture
  * mode gets clearly-labelled demo empties (a demo library stores
  * nothing), and each section carries its own loading / error /
  * empty rendering — no fabricated content anywhere.
+ *
+ * Library Playlists design pass: the shared chrome follows the
+ * Library HTML's frame (28px title + search disc, 44px segment
+ * pills, the HTML's +8/+4 inner insets) and the Playlists segment
+ * follows its mock — the full-width mauveDeep New Playlist button,
+ * white cards with the 2×2 cover mosaic (the summary's new
+ * coverImages), the "N themes · M min" line (the detail header's
+ * runtime rule over the summary's totalDurationSeconds) and the
+ * visibility pill under the meta, plus a ⋮ opening the Playlist
+ * Detail owner sheet's actions (Rename / visibility / Delete).
+ * The header's old "+" create shortcut is gone — the mock's
+ * chrome carries search instead; creation lives in the segment.
+ *
+ * Library Recent design pass: the segment follows its mock — the
+ * muted "N recent themes" count (the entries actually rendered)
+ * over individual white cards (library-recent.html:
+ * rounded-[20px], 10px padding, the 56px cover at rounded-2xl),
+ * each carrying the song title, the artist alone, and a clock +
+ * "Played …" line from the entry's real viewedAt (the playedAgo
+ * ladder below — the mock's line drops the old "Watched/Listened
+ * ·" prefix; the entry's mode still drives playback). The play
+ * disc is two-state: mauve with a white pause glyph while this
+ * entry is the live session and playing, pale with a play glyph
+ * otherwise; the disc toggles the engine for the live entry and
+ * claims the segment's queue for any other, and the shared ⋮ menu
+ * closes the row (no heart — saving lives in the menu, as on the
+ * Season/Anime/Artist rows). The HTML truncates its titles to
+ * one line, so these cards share those variants' recorded
+ * law-#9 deviation.
  */
 export default function LibraryScreen() {
   const theme = useTheme();
@@ -193,30 +252,35 @@ export default function LibraryScreen() {
   const [libError, setLibError] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('ALL');
 
-  /* AniList ENTRIES (the designed segment): null until the first
-     fetch lands. `available: false` (or a failed fetch) silently
-     degrades the segment to the themes union below. The toggle
-     pick is the user's explicit choice; until they make one, the
-     tab defaults to Watching — or Completed when they are
-     watching nothing (the mock's default is Watching). */
-  const [entries, setEntries] = useState<AnilistEntriesResponse | null>(
-    null,
-  );
-  const [entriesError, setEntriesError] = useState<string | null>(null);
-  const [tabPick, setTabPick] = useState<'watching' | 'completed' | null>(
-    null,
-  );
-  const anilistTab =
-    tabPick ??
-    (entries && entries.watching.length === 0 && entries.completed.length > 0
-      ? 'completed'
-      : 'watching');
-
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newPublic, setNewPublic] = useState(true);
   const [createError, setCreateError] = useState<string | null>(null);
   const [createBusy, setCreateBusy] = useState(false);
+
+  /* Playlist ⋮ menu + rename (Library Playlists design): the
+     card's ⋮ opens the same owner actions the Playlist Detail
+     header sheet carries — Rename (through the segment's form),
+     the visibility toggle and Delete with a two-tap confirm —
+     wired to the same mutations, patching the list locally from
+     each mutation's returned detail. */
+  const [editing, setEditing] = useState<PlaylistSummary | null>(null);
+  const [menuPlaylist, setMenuPlaylist] = useState<PlaylistSummary | null>(
+    null,
+  );
+  const [menuBusy, setMenuBusy] = useState(false);
+  const [menuError, setMenuError] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(
+    null,
+  );
+  const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (confirmTimer.current) clearTimeout(confirmTimer.current);
+    },
+    [],
+  );
 
   const signedIn = status === 'signedIn';
 
@@ -266,25 +330,13 @@ export default function LibraryScreen() {
           e instanceof Error ? e.message : 'Could not load playlists.',
         ),
       );
-    /* The AniList reads are only fetched when a link is known to
+    /* The AniList read is only fetched when a link is known to
        exist — unlinked, the segment renders its link prompt and
-       there is nothing AniList-side to load. Entries lead; the
-       themes union is fetched alongside as the degradation
-       fallback (and for its favorites sync). */
+       there is nothing AniList-side to load. The read is the
+       AniList-source themes (Option B): AniList-pure, no watch
+       history, grouped per-anime by the segment below. */
     if (anilistLinked) {
-      fetchAnilistEntries()
-        .then((res) => {
-          setEntries(res);
-          setEntriesError(null);
-        })
-        .catch((e: unknown) =>
-          setEntriesError(
-            e instanceof Error
-              ? e.message
-              : 'Could not load your AniList entries.',
-          ),
-        );
-      fetchLibraryThemes()
+      fetchLibraryThemes('anilist')
         .then((res) => {
           setLibThemes(res);
           setLibError(null);
@@ -334,7 +386,7 @@ export default function LibraryScreen() {
      the segment's loaded list becomes the provider queue at the
      tapped row, then the player opens exactly as before. The mode
      claimed is the mode that row would have opened with. */
-  const { startQueue } = usePlaybackSession();
+  const { session, playback, startQueue } = usePlaybackSession();
   const playWithQueue = useCallback(
     (
       items: QueueItem[],
@@ -390,7 +442,24 @@ export default function LibraryScreen() {
       .finally(() => setFavBusy(false));
   }, [fav, favBusy, favPage]);
 
-  const submitCreate = useCallback(() => {
+  /* A mutation's returned detail replaces its list entry (the
+     service resolves the summary server-side, so the card's
+     mosaic/runtime stay truthful after an edit). */
+  const patchPlaylist = useCallback((detail: PlaylistDetail) => {
+    setPlaylists((prev) =>
+      prev ? prev.map((p) => (p.id === detail.id ? detail : p)) : prev,
+    );
+  }, []);
+
+  const closeForm = useCallback(() => {
+    setCreating(false);
+    setEditing(null);
+    setNewName('');
+    setNewPublic(true);
+    setCreateError(null);
+  }, []);
+
+  const submitForm = useCallback(() => {
     const name = newName.trim();
     if (name.length === 0) {
       setCreateError('Give the playlist a name.');
@@ -398,26 +467,113 @@ export default function LibraryScreen() {
     }
     setCreateBusy(true);
     setCreateError(null);
-    createPlaylist({ name, isPublic: newPublic })
-      .then((detail) => {
+    const done = (detail: PlaylistDetail) => {
+      if (editing) {
+        patchPlaylist(detail);
+      } else {
         setPlaylists((prev) => [detail, ...(prev ?? [])]);
-        setCreating(false);
-        setNewName('');
-        setNewPublic(true);
-      })
-      .catch((e: unknown) =>
-        setCreateError(
-          e instanceof Error ? e.message : 'Could not create the playlist.',
-        ),
-      )
-      .finally(() => setCreateBusy(false));
-  }, [newName, newPublic]);
+      }
+      closeForm();
+    };
+    const fail = (e: unknown) =>
+      setCreateError(
+        e instanceof Error
+          ? e.message
+          : editing
+            ? 'Could not save the playlist.'
+            : 'Could not create the playlist.',
+      );
+    const request = editing
+      ? updatePlaylist(editing.id, { name, isPublic: newPublic })
+      : createPlaylist({ name, isPublic: newPublic });
+    request.then(done).catch(fail).finally(() => setCreateBusy(false));
+  }, [newName, newPublic, editing, patchPlaylist, closeForm]);
 
-  /* AniList segment: group the flat union by anime. The endpoint's
-     order (newest season first, then title) fixes the group order;
-     inside a group, OPs come before EDs, each by sequence. The
-     All / OP / ED filter applies before grouping, so a group only
-     ever shows the filtered types. */
+  const openMenu = useCallback((p: PlaylistSummary) => {
+    setMenuPlaylist(p);
+    setMenuError(null);
+    setConfirmDeleteId(null);
+  }, []);
+
+  const closeMenu = useCallback(() => {
+    setMenuPlaylist(null);
+    setMenuError(null);
+    setConfirmDeleteId(null);
+  }, []);
+
+  const startEdit = useCallback(
+    (p: PlaylistSummary) => {
+      closeMenu();
+      setCreating(false);
+      setEditing(p);
+      setNewName(p.name);
+      setNewPublic(p.isPublic);
+      setCreateError(null);
+    },
+    [closeMenu],
+  );
+
+  const toggleMenuVisibility = useCallback(
+    (p: PlaylistSummary) => {
+      setMenuBusy(true);
+      setMenuError(null);
+      updatePlaylist(p.id, { isPublic: !p.isPublic })
+        .then((detail) => {
+          patchPlaylist(detail);
+          closeMenu();
+        })
+        .catch((e: unknown) =>
+          setMenuError(
+            e instanceof Error ? e.message : 'Could not update the playlist.',
+          ),
+        )
+        .finally(() => setMenuBusy(false));
+    },
+    [patchPlaylist, closeMenu],
+  );
+
+  const deleteFromMenu = useCallback(
+    (p: PlaylistSummary) => {
+      /* Two-tap confirm, the detail sheet's pattern: the first
+         tap arms the row (and starts its reset timer), the
+         second deletes. */
+      if (confirmDeleteId !== p.id) {
+        setConfirmDeleteId(p.id);
+        if (confirmTimer.current) clearTimeout(confirmTimer.current);
+        confirmTimer.current = setTimeout(() => setConfirmDeleteId(null), 3000);
+        return;
+      }
+      if (confirmTimer.current) clearTimeout(confirmTimer.current);
+      setMenuBusy(true);
+      setMenuError(null);
+      deletePlaylist(p.id)
+        .then(() => {
+          setPlaylists((prev) =>
+            prev ? prev.filter((x) => x.id !== p.id) : prev,
+          );
+          closeMenu();
+        })
+        .catch((e: unknown) =>
+          setMenuError(
+            e instanceof Error ? e.message : 'Could not delete the playlist.',
+          ),
+        )
+        .finally(() => setMenuBusy(false));
+    },
+    [confirmDeleteId, closeMenu],
+  );
+
+  /* AniList segment: group the flat AniList-source list by anime,
+     keyed by the summary's REAL anilistId (owner ruling
+     2026-11-10) — same-title anime (remakes, split seasons) stay
+     separate groups, which the old title-string key merged. A
+     summary without an id cannot come back from the anilist
+     source (the API filters on the id), but the title-keyed
+     fallback keeps such a row visible rather than dropped. The
+     endpoint's order (newest season first, then title) fixes the
+     group order; inside a group, OPs come before EDs, each by
+     sequence. The All / OP / ED filter applies before grouping,
+     so a group only ever shows the filtered types. */
   const anilistGroups = useMemo(() => {
     if (!libThemes) return [];
     const filtered =
@@ -426,6 +582,7 @@ export default function LibraryScreen() {
         : libThemes.themes.filter((t) => t.type === typeFilter);
     const groups: {
       key: string;
+      anilistId: number | null;
       title: string;
       year: number | null;
       cover: string | null;
@@ -434,11 +591,15 @@ export default function LibraryScreen() {
     const byKey = new Map<string, (typeof groups)[number]>();
     for (const item of filtered) {
       const title = item.animeTitleEnglish ?? item.animeTitle;
-      const key = title.toLowerCase();
+      const key =
+        item.anilistId != null
+          ? `anilist-${item.anilistId}`
+          : `title-${title.toLowerCase()}`;
       let group = byKey.get(key);
       if (!group) {
         group = {
           key,
+          anilistId: item.anilistId,
           title,
           year: item.animeSeasonYear,
           cover: item.animeCoverImageSmall ?? item.animeCoverImage,
@@ -611,47 +772,148 @@ export default function LibraryScreen() {
         </View>
       );
     }
+    /* The live-session identity for a history row (the Downloads
+       screen's rule): the session's slug + mode + entry must all
+       match the row's. A row whose stored atEntryId is null names
+       the theme's primary entry, which the session resolves to a
+       concrete id — slug + mode is the honest match there. */
+    const sessionEntryId =
+      session.entry?.atEntryId ?? session.entryIdOverride;
     return (
       <>
-        {history.map((entry) =>
-          entry.theme ? (
-            <ThemeRow
-              typeChip={false}
-              key={entry.id}
-              item={entry.theme}
-              detail={`${entry.mode === 'watch' ? 'Watched' : 'Listened'} · ${relativeTime(entry.viewedAt)}`}
-              onPress={() => openTheme(entry.theme!.slug)}
-              onPlay={() => {
-                // Queue = the segment's playable history, in shown
-                // order; entries whose theme left the catalogue
-                // render as tombstones and can't be queued.
-                const playable = history.filter((e) => e.theme !== null);
-                const items = playable.map((e) => ({
-                  ...queueItemFromSummary(e.theme!),
-                  atEntryId: e.atEntryId,
-                }));
-                const index = playable.findIndex((e) => e.id === entry.id);
-                playWithQueue(
-                  items,
-                  index,
-                  entry.theme!.slug,
-                  entry.mode,
-                  entry.atEntryId,
-                );
-              }}
-              saved={favorites.isFavorite(entry.theme.slug)}
-              savePending={favorites.isPending(entry.theme.slug)}
-              onToggleSave={() => void favorites.toggle(entry.theme!.slug)}
-            />
-          ) : (
-            <View key={entry.id} style={styles.goneRow}>
-              <Text style={styles.goneText} numberOfLines={1}>
-                A theme that has left the catalogue ·{' '}
-                {relativeTime(entry.viewedAt)}
-              </Text>
-            </View>
-          ),
+        {history.length > 0 && (
+          <Text style={styles.recentCount}>
+            {history.length} recent{' '}
+            {history.length === 1 ? 'theme' : 'themes'}
+          </Text>
         )}
+        {history.map((entry) => {
+          if (!entry.theme) {
+            // Tombstone: the theme left the catalogue — the
+            // segment's card clothing, the honest text kept.
+            return (
+              <View key={entry.id} style={styles.recentGoneCard}>
+                <Text style={styles.goneText} numberOfLines={1}>
+                  A theme that has left the catalogue ·{' '}
+                  {relativeTime(entry.viewedAt)}
+                </Text>
+              </View>
+            );
+          }
+          const item = entry.theme;
+          const cover = item.animeCoverImageSmall ?? item.animeCoverImage;
+          const played = playedAgo(entry.viewedAt);
+          const isCurrent =
+            session.active &&
+            session.slug === item.slug &&
+            session.mode === entry.mode &&
+            (entry.atEntryId == null ||
+              sessionEntryId === entry.atEntryId);
+          const showPause = isCurrent && playback.isPlaying;
+          const playEntry = () => {
+            // Queue = the segment's playable history, in shown
+            // order; entries whose theme left the catalogue
+            // render as tombstones and can't be queued.
+            const playable = history.filter((e) => e.theme !== null);
+            const items = playable.map((e) => ({
+              ...queueItemFromSummary(e.theme!),
+              atEntryId: e.atEntryId,
+            }));
+            const index = playable.findIndex((e) => e.id === entry.id);
+            playWithQueue(
+              items,
+              index,
+              item.slug,
+              entry.mode,
+              entry.atEntryId,
+            );
+          };
+          return (
+            <Pressable
+              key={entry.id}
+              onPress={() => openTheme(item.slug)}
+              accessibilityRole="button"
+              accessibilityLabel={`Open ${item.songTitle}`}
+              style={({ pressed }) => [
+                styles.recentCard,
+                pressed && styles.pressed,
+              ]}
+            >
+              {cover ? (
+                <Image
+                  source={{ uri: cover }}
+                  style={styles.recentCover}
+                />
+              ) : (
+                <View
+                  style={[styles.recentCover, styles.plCoverEmpty]}
+                />
+              )}
+              <View style={styles.recentMain}>
+                <Text style={styles.recentTitle} numberOfLines={1}>
+                  {item.songTitle}
+                </Text>
+                <Text style={styles.recentArtist} numberOfLines={1}>
+                  {item.artistName ?? item.allArtists.join(', ')}
+                </Text>
+                {played && (
+                  <View style={styles.recentPlayedRow}>
+                    <Clock
+                      size={13}
+                      color={theme.muted}
+                      strokeWidth={2}
+                    />
+                    <Text style={styles.recentPlayed}>{played}</Text>
+                  </View>
+                )}
+              </View>
+              <View style={styles.recentCluster}>
+                <Pressable
+                  onPress={() =>
+                    isCurrent ? playback.toggleMain() : playEntry()
+                  }
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    showPause
+                      ? `Pause ${item.songTitle}`
+                      : isCurrent
+                        ? `Resume ${item.songTitle}`
+                        : `Play ${item.songTitle}`
+                  }
+                  style={({ pressed }) => [
+                    styles.recentDisc,
+                    showPause && styles.recentDiscPlaying,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  {showPause ? (
+                    <Pause
+                      size={19}
+                      color={theme.onAccent}
+                      fill={theme.onAccent}
+                      strokeWidth={2}
+                    />
+                  ) : (
+                    <Play
+                      size={20}
+                      color={theme.secondary}
+                      fill={theme.secondary}
+                      strokeWidth={2}
+                    />
+                  )}
+                </Pressable>
+                <ThemeRowMenu
+                  item={item}
+                  onPlay={playEntry}
+                  onOpen={() => openTheme(item.slug)}
+                  triggerIconSize={20}
+                  triggerColor={theme.secondary}
+                />
+              </View>
+            </Pressable>
+          );
+        })}
         {history.length === 0 && (
           <Text style={styles.emptyText}>
             Nothing here yet — themes you watch or listen to will show up.
@@ -661,6 +923,41 @@ export default function LibraryScreen() {
           <Text style={styles.inlineError}>{historyError}</Text>
         )}
       </>
+    );
+  };
+
+  /* The card's 2×2 cover mosaic — the Playlist Detail header
+     grid's derivation and geometry, at this card's scale: the
+     summary's distinct covers in stored order; a lone cover fills
+     the square; missing cells are tinted tiles (an empty playlist
+     carries the ListMusic glyph in its first cell). */
+  const renderMosaic = (covers: string[]) => {
+    if (covers.length === 1) {
+      return (
+        <Image source={{ uri: covers[0] }} style={styles.plGridSingle} />
+      );
+    }
+    return (
+      <View style={styles.plGrid}>
+        {[0, 1, 2, 3].map((i) =>
+          covers[i] ? (
+            <Image
+              key={i}
+              source={{ uri: covers[i] }}
+              style={styles.plGridCell}
+            />
+          ) : (
+            <View
+              key={i}
+              style={[styles.plGridCell, styles.plGridCellEmpty]}
+            >
+              {covers.length === 0 && i === 0 ? (
+                <ListMusic size={16} color={theme.muted} strokeWidth={2} />
+              ) : null}
+            </View>
+          ),
+        )}
+      </View>
     );
   };
 
@@ -676,7 +973,7 @@ export default function LibraryScreen() {
     }
     return (
       <>
-        {!creating ? (
+        {!creating && !editing ? (
           <Pressable
             onPress={() => {
               setCreating(true);
@@ -685,12 +982,12 @@ export default function LibraryScreen() {
             accessibilityRole="button"
             accessibilityLabel="New playlist"
             style={({ pressed }) => [
-              styles.createRow,
+              styles.newPlaylistButton,
               pressed && styles.pressed,
             ]}
           >
-            <Plus size={18} color={theme.accent} strokeWidth={2} />
-            <Text style={styles.createRowText}>New playlist</Text>
+            <Plus size={20} color={theme.onAccent} strokeWidth={2} />
+            <Text style={styles.newPlaylistText}>New Playlist</Text>
           </Pressable>
         ) : (
           <View style={styles.createForm}>
@@ -703,7 +1000,7 @@ export default function LibraryScreen() {
               autoFocus
               maxLength={100}
               returnKeyType="done"
-              onSubmitEditing={submitCreate}
+              onSubmitEditing={submitForm}
             />
             <View style={styles.createOptions}>
               <View style={styles.segmented}>
@@ -740,7 +1037,7 @@ export default function LibraryScreen() {
               </View>
               <View style={styles.createButtons}>
                 <Pressable
-                  onPress={() => setCreating(false)}
+                  onPress={closeForm}
                   accessibilityRole="button"
                   accessibilityLabel="Cancel"
                   style={({ pressed }) => [
@@ -751,10 +1048,12 @@ export default function LibraryScreen() {
                   <Text style={styles.ghostButtonText}>Cancel</Text>
                 </Pressable>
                 <Pressable
-                  onPress={submitCreate}
+                  onPress={submitForm}
                   disabled={createBusy}
                   accessibilityRole="button"
-                  accessibilityLabel="Create playlist"
+                  accessibilityLabel={
+                    editing ? 'Save playlist' : 'Create playlist'
+                  }
                   style={({ pressed }) => [
                     styles.smallPrimary,
                     pressed && styles.pressed,
@@ -764,7 +1063,9 @@ export default function LibraryScreen() {
                   {createBusy ? (
                     <ActivityIndicator size="small" color={theme.onAccent} />
                   ) : (
-                    <Text style={styles.smallPrimaryText}>Create</Text>
+                    <Text style={styles.smallPrimaryText}>
+                      {editing ? 'Save' : 'Create'}
+                    </Text>
                   )}
                 </Pressable>
               </View>
@@ -783,53 +1084,78 @@ export default function LibraryScreen() {
               </View>
             ) : (
               <>
-                {playlists.map((p) => (
-                  <Pressable
-                    key={p.id}
-                    onPress={() => router.push(`/playlist/${p.id}`)}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Open playlist ${p.name}`}
-                    style={({ pressed }) => [
-                      styles.plCard,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    {p.coverImage ? (
-                      <Image
-                        source={{ uri: p.coverImage }}
-                        style={styles.plCover}
-                      />
-                    ) : (
-                      <View style={[styles.plCover, styles.plCoverEmpty]}>
-                        <ListMusic size={18} color={theme.muted} strokeWidth={2} />
-                      </View>
-                    )}
-                    <View style={styles.plMain}>
-                      <Text style={styles.plName} numberOfLines={1}>
-                        {p.name}
-                      </Text>
-                      <Text style={styles.plMeta} numberOfLines={1}>
-                        {p.themeCount}{' '}
-                        {p.themeCount === 1 ? 'theme' : 'themes'}
-                        {p.description ? ` · ${p.description}` : ''}
-                      </Text>
-                    </View>
-                    <View
-                      style={[
-                        styles.plChip,
-                        !p.isPublic && styles.plChipPrivate,
+                {playlists.map((p) => {
+                  /* The detail header's runtime rule: the summed
+                     KNOWN durations, rounded to minutes; the
+                     segment is omitted when none is known. */
+                  const runtimeMin =
+                    p.totalDurationSeconds != null
+                      ? Math.round(p.totalDurationSeconds / 60)
+                      : null;
+                  return (
+                    <Pressable
+                      key={p.id}
+                      onPress={() => router.push(`/playlist/${p.id}`)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open playlist ${p.name}`}
+                      style={({ pressed }) => [
+                        styles.plCard2,
+                        pressed && styles.pressed,
                       ]}
                     >
-                      {!p.isPublic && (
-                        <Lock size={11} color={theme.muted} strokeWidth={2} />
-                      )}
-                      <Text style={styles.plChipText}>
-                        {p.isPublic ? 'Public' : 'Private'}
-                      </Text>
-                    </View>
-                    <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
-                  </Pressable>
-                ))}
+                      {renderMosaic(p.coverImages)}
+                      <View style={styles.plCardMain}>
+                        <Text style={styles.plCardName} numberOfLines={1}>
+                          {p.name}
+                        </Text>
+                        <Text style={styles.plCardMeta} numberOfLines={1}>
+                          {p.themeCount}{' '}
+                          {p.themeCount === 1 ? 'theme' : 'themes'}
+                          {runtimeMin !== null
+                            ? ` · ${runtimeMin} min`
+                            : ''}
+                        </Text>
+                        <View
+                          style={[
+                            styles.plVisPill,
+                            p.isPublic
+                              ? styles.plVisPublic
+                              : styles.plVisPrivate,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.plVisText,
+                              {
+                                color: p.isPublic
+                                  ? theme.success
+                                  : theme.secondary,
+                              },
+                            ]}
+                          >
+                            {p.isPublic ? 'Public' : 'Private'}
+                          </Text>
+                        </View>
+                      </View>
+                      <Pressable
+                        onPress={() => openMenu(p)}
+                        hitSlop={6}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Actions for playlist ${p.name}`}
+                        style={({ pressed }) => [
+                          styles.plMenuButton,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <MoreVertical
+                          size={20}
+                          color={theme.muted}
+                          strokeWidth={2}
+                        />
+                      </Pressable>
+                    </Pressable>
+                  );
+                })}
                 {playlists.length === 0 && (
                   <Text style={styles.emptyText}>
                     No playlists yet — create your first one above.
@@ -840,173 +1166,6 @@ export default function LibraryScreen() {
                 )}
               </>
             )}
-      </>
-    );
-  };
-
-  /* One AniList entry card (the mock): poster, title, and the
-     status block — Watching draws the sage progress bar with
-     "Episode X of Y" + percent; Completed draws the format pill,
-     "✓ Completed" and the caller's score. Cards are display-only:
-     no app screen is keyed by AniList media id, so there is
-     nowhere honest for a tap to go. */
-  const entryCard = (entry: AnilistEntry, status: 'watching' | 'completed') => {
-    const percent =
-      entry.episodes && entry.episodes > 0
-        ? Math.min(100, Math.round((entry.progress / entry.episodes) * 100))
-        : null;
-    const formatPill = [
-      entry.format,
-      entry.episodes ? `${entry.episodes} eps` : null,
-    ]
-      .filter(Boolean)
-      .join(' · ');
-    return (
-      <View key={entry.mediaId} style={styles.entryCard}>
-        {entry.coverImage ? (
-          <Image source={{ uri: entry.coverImage }} style={styles.entryPoster} />
-        ) : (
-          <View style={[styles.entryPoster, styles.plCoverEmpty]} />
-        )}
-        <View style={styles.entryMain}>
-          <View style={styles.entryHeadRow}>
-            <Text style={styles.entryTitle} numberOfLines={1}>
-              {entry.title}
-            </Text>
-            {status === 'watching' ? (
-              <View style={styles.watchingPill}>
-                <Text style={styles.watchingPillText}>Watching</Text>
-              </View>
-            ) : formatPill ? (
-              <View style={styles.formatPill}>
-                <Text style={styles.formatPillText}>{formatPill}</Text>
-              </View>
-            ) : null}
-          </View>
-          {status === 'watching' ? (
-            <>
-              {percent !== null && (
-                <View style={styles.progressTrack}>
-                  <View
-                    style={[
-                      styles.progressFill,
-                      { width: `${percent}%` },
-                    ]}
-                  />
-                </View>
-              )}
-              <View style={styles.entryFootRow}>
-                <Text style={styles.entryMeta}>
-                  Episode {entry.progress}
-                  {entry.episodes ? ` of ${entry.episodes}` : ''}
-                </Text>
-                {percent !== null && (
-                  <Text style={styles.entryPercent}>{percent}%</Text>
-                )}
-              </View>
-            </>
-          ) : (
-            <View style={styles.entryFootRow}>
-              <View style={styles.completedMark}>
-                <CircleCheck size={16} color={theme.success} strokeWidth={2} />
-                <Text style={styles.completedText}>Completed</Text>
-              </View>
-              {entry.score !== null && (
-                <Text style={styles.entryMeta}>
-                  Score: {entry.score}/10
-                </Text>
-              )}
-            </View>
-          )}
-        </View>
-      </View>
-    );
-  };
-
-  /* The designed AniList segment: synced line, Watching/Completed
-     toggle pills with counts, then the active group's entry
-     cards. */
-  const renderAnilistEntries = (res: AnilistEntriesResponse) => {
-    const list = anilistTab === 'watching' ? res.watching : res.completed;
-    const tabPill = (
-      key: 'watching' | 'completed',
-      label: string,
-      count: number,
-    ) => {
-      const active = anilistTab === key;
-      return (
-        <Pressable
-          key={key}
-          onPress={() => setTabPick(key)}
-          accessibilityRole="button"
-          accessibilityState={{ selected: active }}
-          accessibilityLabel={`${label}, ${count} entries`}
-          style={[
-            styles.tabPill,
-            active &&
-              (key === 'watching'
-                ? styles.tabPillWatchingActive
-                : styles.tabPillCompletedActive),
-          ]}
-        >
-          <Text
-            style={[
-              styles.tabPillText,
-              active &&
-                (key === 'watching'
-                  ? styles.tabPillWatchingText
-                  : styles.tabPillCompletedText),
-            ]}
-          >
-            {label}
-          </Text>
-          <View
-            style={[
-              styles.tabCount,
-              active &&
-                (key === 'watching'
-                  ? styles.tabCountWatching
-                  : styles.tabCountCompleted),
-            ]}
-          >
-            <Text
-              style={[
-                styles.tabCountText,
-                active &&
-                  (key === 'watching'
-                    ? styles.tabPillWatchingText
-                    : styles.tabPillCompletedText),
-              ]}
-            >
-              {count}
-            </Text>
-          </View>
-        </Pressable>
-      );
-    };
-    return (
-      <>
-        <View style={styles.syncedRow}>
-          <RefreshCw size={14} color={theme.secondary} strokeWidth={2} />
-          <Text style={styles.syncedText}>
-            Synced from AniList ·{' '}
-            <Text style={styles.syncedName}>
-              @{res.anilistUser ?? anilistName ?? 'AniList'}
-            </Text>
-          </Text>
-        </View>
-        <View style={styles.tabRow}>
-          {tabPill('watching', 'Watching', res.watching.length)}
-          {tabPill('completed', 'Completed', res.completed.length)}
-        </View>
-        {list.map((entry) => entryCard(entry, anilistTab))}
-        {list.length === 0 && (
-          <Text style={styles.emptyText}>
-            {anilistTab === 'watching'
-              ? 'You are not watching anything on AniList right now.'
-              : 'No completed anime on AniList yet.'}
-          </Text>
-        )}
       </>
     );
   };
@@ -1048,19 +1207,9 @@ export default function LibraryScreen() {
         </View>
       );
     }
-    /* Entries lead when AniList served them; while that read is
-       still in flight the segment waits (the themes fallback
-       would flash the wrong UI). Settled-unavailable — or a
-       failed entries fetch — degrades silently to the themes
-       union below. */
-    if (entries?.available) return renderAnilistEntries(entries);
-    if (!entries && !entriesError && !libError) {
-      return (
-        <View style={styles.sectionState}>
-          <ActivityIndicator color={theme.accent} />
-        </View>
-      );
-    }
+    /* The themes view is the segment's only content (Option B).
+       A failed read surfaces the segment's error state; while
+       the read is in flight the segment waits on the spinner. */
     if (libError && !libThemes) return sectionError(libError);
     if (!libThemes) {
       return (
@@ -1078,8 +1227,8 @@ export default function LibraryScreen() {
         <Text style={styles.dlTotal}>
           {anilistName ? `AniList · ${anilistName} · ` : ''}
           {libThemes.total}{' '}
-          {libThemes.total === 1 ? 'theme' : 'themes'} from your
-          completed and watching anime and watch history
+          {libThemes.total === 1 ? 'theme' : 'themes'} from anime on
+          your AniList completed and watching lists
         </Text>
         <View style={styles.filterRow}>
           {(['ALL', 'OP', 'ED'] as const).map((f) => {
@@ -1110,7 +1259,20 @@ export default function LibraryScreen() {
         </View>
         {anilistGroups.map((group) => (
           <View key={group.key}>
-            <View style={styles.groupHeader}>
+            <Pressable
+              onPress={
+                group.anilistId != null
+                  ? () => router.push(`/anime/${group.anilistId}`)
+                  : undefined
+              }
+              disabled={group.anilistId == null}
+              accessibilityRole="button"
+              accessibilityLabel={`Open ${group.title}`}
+              style={({ pressed }) => [
+                styles.groupHeader,
+                pressed && styles.pressed,
+              ]}
+            >
               {group.cover ? (
                 <Image
                   source={{ uri: group.cover }}
@@ -1129,7 +1291,7 @@ export default function LibraryScreen() {
                   {group.themes.length === 1 ? 'theme' : 'themes'}
                 </Text>
               </View>
-            </View>
+            </Pressable>
             {group.themes.map((item) => (
               <ThemeRow
                 typeChip={false}
@@ -1304,6 +1466,137 @@ export default function LibraryScreen() {
     );
   };
 
+  /* The playlist ⋮ bottom sheet — the bottom-sheet pattern of
+     ThemeRowMenu / the Playlist Detail owner sheet, with that
+     sheet's rows: Rename (through the segment's form), the
+     visibility toggle and Delete with its two-tap confirm. */
+  const renderPlaylistMenu = () => {
+    const p = menuPlaylist;
+    if (!p) return null;
+    const confirming = confirmDeleteId === p.id;
+    return (
+      <Modal
+        visible
+        transparent
+        animationType="slide"
+        onRequestClose={closeMenu}
+      >
+        <View style={styles.menuBackdrop}>
+          <Pressable
+            style={styles.menuDismiss}
+            onPress={closeMenu}
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+          />
+          <View style={styles.menuSheet}>
+            <View style={styles.menuHeader}>
+              <View style={styles.menuHeaderMain}>
+                <Text style={styles.menuTitle} numberOfLines={1}>
+                  {p.name}
+                </Text>
+                <Text style={styles.menuSubtitle}>
+                  {p.isPublic ? 'Public playlist' : 'Private playlist'}
+                  {' · '}
+                  {p.themeCount}{' '}
+                  {p.themeCount === 1 ? 'theme' : 'themes'}
+                </Text>
+              </View>
+              <Pressable
+                onPress={closeMenu}
+                accessibilityRole="button"
+                accessibilityLabel="Close menu"
+                style={({ pressed }) => [
+                  styles.menuClose,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <X size={18} color={theme.text} strokeWidth={2} />
+              </Pressable>
+            </View>
+
+            <Pressable
+              onPress={() => startEdit(p)}
+              disabled={menuBusy}
+              accessibilityRole="button"
+              accessibilityLabel="Rename playlist"
+              style={({ pressed }) => [
+                styles.menuRow,
+                pressed && styles.pressed,
+              ]}
+            >
+              <View style={styles.menuIcon}>
+                <Pencil size={18} color={theme.accent} strokeWidth={2} />
+              </View>
+              <Text style={styles.menuLabel}>Rename</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => toggleMenuVisibility(p)}
+              disabled={menuBusy}
+              accessibilityRole="button"
+              accessibilityLabel={
+                p.isPublic ? 'Make playlist private' : 'Make playlist public'
+              }
+              style={({ pressed }) => [
+                styles.menuRow,
+                pressed && styles.pressed,
+              ]}
+            >
+              <View style={styles.menuIcon}>
+                {p.isPublic ? (
+                  <Lock size={18} color={theme.accent} strokeWidth={2} />
+                ) : (
+                  <Globe size={18} color={theme.accent} strokeWidth={2} />
+                )}
+              </View>
+              <Text style={styles.menuLabel}>
+                {p.isPublic ? 'Make private' : 'Make public'}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => deleteFromMenu(p)}
+              disabled={menuBusy}
+              accessibilityRole="button"
+              accessibilityLabel={
+                confirming ? 'Confirm delete playlist' : 'Delete playlist'
+              }
+              style={({ pressed }) => [
+                styles.menuRow,
+                pressed && styles.pressed,
+              ]}
+            >
+              <View
+                style={[
+                  styles.menuIcon,
+                  confirming && styles.menuIconDanger,
+                ]}
+              >
+                <Trash2
+                  size={18}
+                  color={confirming ? theme.onAccent : theme.danger}
+                  strokeWidth={2}
+                />
+              </View>
+              <Text
+                style={[
+                  styles.menuLabel,
+                  { color: confirming ? theme.danger : theme.text },
+                ]}
+              >
+                {confirming ? 'Tap again to delete' : 'Delete playlist'}
+              </Text>
+            </Pressable>
+
+            {menuError && (
+              <Text style={styles.inlineError}>{menuError}</Text>
+            )}
+          </View>
+        </View>
+      </Modal>
+    );
+  };
+
   /* ---------------- chrome ---------------- */
 
   return (
@@ -1311,24 +1604,18 @@ export default function LibraryScreen() {
       <View style={styles.column}>
         <View style={styles.header}>
           <Text style={styles.title}>Library</Text>
-          {!fixtureMode && signedIn && (
-            <Pressable
-              onPress={() => {
-                setSection('playlists');
-                setCreating(true);
-                setCreateError(null);
-              }}
-              hitSlop={6}
-              accessibilityRole="button"
-              accessibilityLabel="New playlist"
-              style={({ pressed }) => [
-                styles.headerAction,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Plus size={20} color={theme.text} strokeWidth={2} />
-            </Pressable>
-          )}
+          <Pressable
+            onPress={() => router.push('/search')}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel="Search"
+            style={({ pressed }) => [
+              styles.searchButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Search size={24} color={theme.text} strokeWidth={2} />
+          </Pressable>
         </View>
 
         <View style={styles.segmentedBar}>
@@ -1343,7 +1630,10 @@ export default function LibraryScreen() {
                 accessibilityLabel={label}
                 style={[
                   styles.barSegment,
-                  active && { backgroundColor: theme.accent },
+                  active && {
+                    backgroundColor: theme.accent,
+                    borderColor: theme.accent,
+                  },
                 ]}
               >
                 <Text
@@ -1387,6 +1677,7 @@ export default function LibraryScreen() {
           {section === 'anilist' && renderAnilist()}
           {section === 'offline' && renderOffline()}
         </ScrollView>
+        {renderPlaylistMenu()}
       </View>
     </View>
   );
@@ -1448,22 +1739,27 @@ const createStyles = (theme: Theme) =>
     color: theme.onAccent,
   },
   header: {
+    // The shared Library HTML's frame: the title row sits 8px
+    // inside the screen edge (px-4 main + px-2 header).
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.screenEdge,
+    paddingHorizontal: spacing.screenEdge + 8,
     paddingTop: spacing.md,
-    paddingBottom: spacing.sm,
+    paddingBottom: spacing.md,
   },
   title: {
-    ...typeStyles.heading,
+    // The HTML's 28px extrabold screen title.
+    fontFamily: fontFamilies.wordmark,
+    fontSize: 28,
+    letterSpacing: -0.7,
     color: theme.text,
   },
-  headerAction: {
-    width: 38,
-    height: 38,
-    borderRadius: radii.base,
-    backgroundColor: theme.raised,
+  searchButton: {
+    // The HTML's 40px circular search hit area (icon 24).
+    width: 40,
+    height: 40,
+    borderRadius: radii.pill,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1471,176 +1767,29 @@ const createStyles = (theme: Theme) =>
     // Lavender Dusk mock: the Library segments are separate
     // TEXT-ONLY pills on ONE row — lavender inactive, mauveDeep
     // filled active — not one bar, no icons, never wrapping.
+    // The HTML measures them 44 tall with a 6px gap, inset 4px
+    // inside the screen edge (px-4 main + px-1 nav).
     flexDirection: 'row',
-    gap: spacing.sm,
-    marginHorizontal: spacing.screenEdge,
+    gap: 6,
+    marginHorizontal: spacing.screenEdge + 4,
+    paddingTop: spacing.xs,
   },
   barSegment: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 36,
+    height: 44,
     paddingHorizontal: spacing.xs,
     borderRadius: radii.pill,
-    backgroundColor: theme.accentContainer,
-  },
-  barSegmentText: {
-    ...typeStyles.bodySmall,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.onAccentContainer,
-  },
-  syncedRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs + 2,
-    paddingBottom: spacing.md,
-  },
-  syncedText: {
-    ...typeStyles.bodySmall,
-    color: theme.muted,
-  },
-  syncedName: {
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.text,
-  },
-  tabRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    paddingBottom: spacing.md,
-  },
-  tabPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs + 2,
-    minHeight: 36,
-    paddingHorizontal: spacing.md,
-    borderRadius: radii.pill,
-    backgroundColor: theme.accentContainer,
-  },
-  tabPillWatchingActive: {
-    backgroundColor: theme.successContainer,
-  },
-  tabPillCompletedActive: {
-    backgroundColor: theme.accentContainer,
-  },
-  tabPillText: {
-    ...typeStyles.bodySmall,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.muted,
-  },
-  tabPillWatchingText: {
-    color: theme.success,
-  },
-  tabPillCompletedText: {
-    color: theme.onAccentContainer,
-  },
-  tabCount: {
-    minWidth: 22,
-    alignItems: 'center',
-    borderRadius: radii.pill,
-    paddingHorizontal: spacing.xs + 2,
-    paddingVertical: 1,
-  },
-  tabCountWatching: {
-    backgroundColor: theme.surface,
-  },
-  tabCountCompleted: {
-    backgroundColor: theme.surface,
-  },
-  tabCountText: {
-    ...typeStyles.caption,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.muted,
-  },
-  entryCard: {
-    flexDirection: 'row',
-    gap: spacing.md,
-    backgroundColor: theme.surface,
+    backgroundColor: theme.raised,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
-    borderRadius: radii.card,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
   },
-  entryPoster: {
-    width: 56,
-    height: 74,
-    borderRadius: radii.base,
-    backgroundColor: theme.surface,
-  },
-  entryMain: {
-    flex: 1,
-    gap: spacing.sm,
-    justifyContent: 'center',
-  },
-  entryHeadRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  entryTitle: {
-    flex: 1,
-    ...typeStyles.body,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.text,
-  },
-  watchingPill: {
-    backgroundColor: theme.successContainer,
-    borderRadius: radii.pill,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-  },
-  watchingPillText: {
-    ...typeStyles.caption,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.success,
-  },
-  formatPill: {
-    backgroundColor: theme.accentContainer,
-    borderRadius: radii.pill,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-  },
-  formatPillText: {
-    ...typeStyles.caption,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.onAccentContainer,
-  },
-  progressTrack: {
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: theme.accentContainer,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: 3,
-    backgroundColor: theme.success,
-  },
-  entryFootRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-  },
-  entryMeta: {
-    ...typeStyles.bodySmall,
+  barSegmentText: {
+    // The HTML's 12px medium chip label.
+    fontFamily: fontFamilies.caption,
+    fontSize: 12,
     color: theme.muted,
-  },
-  entryPercent: {
-    ...typeStyles.bodySmall,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.success,
-  },
-  completedMark: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs + 2,
-  },
-  completedText: {
-    ...typeStyles.bodySmall,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.success,
   },
   fixtureNote: {
     ...typeStyles.caption,
@@ -1652,7 +1801,9 @@ const createStyles = (theme: Theme) =>
     flex: 1,
   },
   content: {
-    paddingHorizontal: spacing.screenEdge,
+    // The shared Library HTML's section inset: 4px inside the
+    // screen edge (px-4 main + px-1 section).
+    paddingHorizontal: spacing.screenEdge + 4,
     paddingTop: spacing.md,
     paddingBottom: spacing.xxxl,
   },
@@ -1709,30 +1860,124 @@ const createStyles = (theme: Theme) =>
     fontFamily: fontFamilies.bodyStrong,
     color: theme.accent,
   },
-  goneRow: {
-    paddingVertical: spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: theme.border,
-  },
   goneText: {
     ...typeStyles.bodySmall,
     color: theme.muted,
   },
-  createRow: {
+  recentCount: {
+    // library-recent.html: the count line at 12.5px medium in
+    // the muted plum, inset 4px past the rows (its px-2 against
+    // the section's px-1) with 10 below it.
+    fontFamily: fontFamilies.caption,
+    fontSize: 12.5,
+    color: theme.muted,
+    paddingHorizontal: spacing.xs,
+    paddingBottom: 10,
+  },
+  recentCard: {
+    // library-recent.html: rounded-[20px] cards (a literal —
+    // 20 sits between radii.md and radii.card), p-2.5 (10),
+    // stacked with a gap-2.5 (10) rhythm.
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    minHeight: 48,
+    backgroundColor: theme.surface,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
-    borderRadius: radii.base,
-    paddingHorizontal: spacing.md,
+    borderRadius: 20,
+    padding: 10,
+    marginBottom: 10,
+  },
+  recentGoneCard: {
+    // The tombstone row in the segment's card clothing.
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    borderRadius: 20,
+    padding: 10,
+    marginBottom: 10,
+  },
+  recentCover: {
+    // library-recent.html: w-14 h-14 (56), rounded-2xl (16).
+    width: 56,
+    height: 56,
+    borderRadius: radii.md,
+    backgroundColor: theme.surface,
+    flexShrink: 0,
+  },
+  recentMain: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  recentTitle: {
+    // library-recent.html: text-[14.5px] bold, truncated to
+    // one line — the recorded law-#9 deviation the season /
+    // anime / artist row variants carry.
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 14.5,
+    color: theme.text,
+  },
+  recentArtist: {
+    // library-recent.html: 12px medium in the muted plum.
+    fontFamily: fontFamilies.caption,
+    fontSize: 12,
+    color: theme.muted,
+  },
+  recentPlayedRow: {
+    // library-recent.html: the 13px schedule glyph + 11px
+    // line, gap-1, mt-0.5.
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginTop: 2,
+  },
+  recentPlayed: {
+    fontFamily: fontFamilies.body,
+    fontSize: 11,
+    color: theme.muted,
+  },
+  recentCluster: {
+    // library-recent.html: the play disc + ⋮ cluster, gap-1.
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    flexShrink: 0,
+  },
+  recentDisc: {
+    // library-recent.html: the w-9 h-9 (36) disc — pale
+    // lavender (theme.raised is the HTML's exact #EDE3F2) with
+    // the mauve play glyph.
+    width: 36,
+    height: 36,
+    borderRadius: radii.pill,
+    backgroundColor: theme.raised,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recentDiscPlaying: {
+    // The mock's playing disc: filled in the mauve family
+    // (the HTML's #7B5368, and its mini player's #8A5D84, both
+    // map to the token mauve — theme.secondary) under a white
+    // pause glyph.
+    backgroundColor: theme.secondary,
+  },
+  newPlaylistButton: {
+    // The mock's full-width mauveDeep create button (~50 tall,
+    // measured from the mock; radii.md corners).
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    height: 50,
+    borderRadius: radii.md,
+    backgroundColor: theme.accent,
     marginBottom: spacing.md,
   },
-  createRowText: {
-    ...typeStyles.body,
+  newPlaylistText: {
     fontFamily: fontFamilies.bodyStrong,
-    color: theme.text,
+    fontSize: 17,
+    color: theme.onAccent,
   },
   createForm: {
     backgroundColor: theme.surface,
@@ -1815,19 +2060,156 @@ const createStyles = (theme: Theme) =>
   disabled: {
     opacity: 0.5,
   },
-  plCard: {
+  plCard2: {
+    // The Playlists mock's white card: measured ~91 tall (its
+    // content sizes it), 14 padding, cards stacked with a ~15
+    // gap (spacing.lg).
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    borderRadius: radii.card,
+    padding: 14,
+    marginBottom: spacing.lg,
+  },
+  plCardMain: {
+    flex: 1,
+    gap: 3,
+  },
+  plCardName: {
+    // The mock's card name: display face at a measured ~18.
+    fontFamily: fontFamilies.display,
+    fontSize: 18,
+    color: theme.text,
+  },
+  plCardMeta: {
+    // The mock's count line: 14 medium muted.
+    fontFamily: fontFamilies.caption,
+    fontSize: 14,
+    color: theme.muted,
+  },
+  plVisPill: {
+    alignSelf: 'flex-start',
+    borderRadius: radii.pill,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginTop: 3,
+  },
+  plVisPrivate: {
+    backgroundColor: theme.accentContainer,
+  },
+  plVisPublic: {
+    backgroundColor: theme.successContainer,
+  },
+  plVisText: {
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 12,
+  },
+  plMenuButton: {
+    width: 36,
+    height: 36,
+    borderRadius: radii.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  plGrid: {
+    // The detail header's collage at this card's scale: 64
+    // square, 2 padding + 2 gutters, cells rounded 3.
+    width: 64,
+    height: 64,
+    borderRadius: radii.base,
+    backgroundColor: theme.raised,
+    padding: 2,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 2,
+    overflow: 'hidden',
+  },
+  plGridCell: {
+    width: 29,
+    height: 29,
+    borderRadius: 3,
+    backgroundColor: theme.surface,
+  },
+  plGridCellEmpty: {
+    backgroundColor: theme.accentContainer,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  plGridSingle: {
+    width: 64,
+    height: 64,
+    borderRadius: radii.base,
+    backgroundColor: theme.surface,
+  },
+  /* Playlist ⋮ sheet — the Playlist Detail sheet's geometry. */
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: withOpacity(theme.background, 0.72),
+    justifyContent: 'flex-end',
+  },
+  menuDismiss: {
+    flex: 1,
+  },
+  menuSheet: {
+    backgroundColor: theme.surface,
+    borderTopLeftRadius: radii.cardLg,
+    borderTopRightRadius: radii.cardLg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    paddingHorizontal: spacing.screenEdge,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xl,
+  },
+  menuHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  menuHeaderMain: {
+    flex: 1,
+    gap: 2,
+  },
+  menuTitle: {
+    ...typeStyles.heading,
+    color: theme.text,
+  },
+  menuSubtitle: {
+    ...typeStyles.caption,
+    color: theme.muted,
+  },
+  menuClose: {
+    width: 36,
+    height: 36,
+    borderRadius: radii.base,
+    backgroundColor: theme.raised,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  menuRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
     paddingVertical: spacing.sm + 2,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: theme.border,
   },
-  plCover: {
-    width: 52,
-    height: 52,
+  menuIcon: {
+    width: 38,
+    height: 38,
     borderRadius: radii.base,
-    backgroundColor: theme.surface,
+    backgroundColor: theme.raised,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  menuIconDanger: {
+    backgroundColor: theme.danger,
+  },
+  menuLabel: {
+    ...typeStyles.body,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
   },
   plCoverEmpty: {
     backgroundColor: theme.raised,

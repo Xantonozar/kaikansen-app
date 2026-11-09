@@ -504,6 +504,16 @@ export class LibraryService {
    * an empty page whose meta carries NO AniList fields — mirrored
    * (the response simply omits them).
    *
+   * `source=anilist` (owner ruling 2026-11-10, "Option B") serves
+   * the AniList side ALONE: the Library segment it feeds shows
+   * themes from the caller's AniList anime, never their watch
+   * history, so the history clause is dropped entirely — the query
+   * is only `anilistId ∈ stored ids`, with the same cache dance,
+   * ordering, paging and meta as the union. An unlinked caller (or
+   * a linked one whose ids never landed) gets the same plain early
+   * return the union gives an empty library. Any other `source`
+   * value (or none) keeps the union byte-identical.
+   *
    * Not-found: the caller's document being gone is the web's 404
    * 'User not found'; kept, in this module's style.
    */
@@ -512,10 +522,12 @@ export class LibraryService {
     page = FAVORITES_DEFAULT_PAGE,
     limit = FAVORITES_DEFAULT_LIMIT,
     type?: string,
+    source?: string,
   ): Promise<LibraryThemesResponse> {
     const models = this.requireModels();
     const safePage = Number.isFinite(page) && page > 0 ? page : 1;
     const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 50;
+    const anilistOnly = source === 'anilist';
 
     const user = await models.users.findById(userId).exec();
     if (!user) {
@@ -523,13 +535,18 @@ export class LibraryService {
     }
 
     // 1. Watched themes (the web takes every history row's themeId;
-    // duplicates collapse inside the $in query itself).
-    const historyDocs = await models.history
-      .find({ userId: user._id })
-      .select('themeId')
-      .lean()
-      .exec();
-    const watchedThemeIds = historyDocs.map((wh) => wh.themeId);
+    // duplicates collapse inside the $in query itself). Skipped
+    // entirely in the AniList-only mode — history never contributes
+    // there.
+    const watchedThemeIds: unknown[] = [];
+    if (!anilistOnly) {
+      const historyDocs = await models.history
+        .find({ userId: user._id })
+        .select('themeId')
+        .lean()
+        .exec();
+      watchedThemeIds.push(...historyDocs.map((wh) => wh.themeId));
+    }
 
     // 2. AniList library media ids (completed+watching), per the
     // cache dance above.

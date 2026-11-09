@@ -170,6 +170,7 @@ function toSummary(theme: ThemeDetail): ThemeSummary {
     duration: theme.duration,
     isPopular: theme.isPopular,
     popularRank: theme.popularRank,
+    anilistId: theme.anilistId,
   };
 }
 

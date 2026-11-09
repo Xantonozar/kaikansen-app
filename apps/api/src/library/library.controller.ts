@@ -130,13 +130,14 @@ export class LibraryController {
   @Get('library/themes')
   @ApiOkResponse({
     description:
-      'The caller’s library themes, paged: watch history ∪ AniList completed (the web’s /api/themes/library, renamed onto this API’s /library prefix — the literal path would collide with GET /themes/:slug).',
+      'The caller’s library themes, paged: watch history ∪ AniList completed (the web’s /api/themes/library, renamed onto this API’s /library prefix — the literal path would collide with GET /themes/:slug). With source=anilist, only the AniList side is served (themes of the caller’s AniList anime, no watch history).',
   })
   libraryThemes(
     @Req() req: { user: TokenPayload },
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('type') type?: string,
+    @Query('source') source?: string,
   ): Promise<LibraryThemesResponse> {
     const parsedPage = Number.parseInt(page ?? '', 10);
     const parsedLimit = Number.parseInt(limit ?? '', 10);
@@ -145,6 +146,7 @@ export class LibraryController {
       Number.isNaN(parsedPage) ? 1 : parsedPage,
       Number.isNaN(parsedLimit) ? 50 : parsedLimit,
       type,
+      source,
     );
   }
 
