@@ -450,7 +450,12 @@ describe('ThemesService.getThemeBySlug', () => {
     );
   });
 
-  it('never overwrites a stored audioUrl with the derivation', async () => {
+  it('resolves a stored video-link audioUrl to the derived .ogg (owner doctrine, 2026-11-10)', async () => {
+    // This test previously asserted the OPPOSITE ("never overwrites
+    // a stored audioUrl with the derivation"): the fixture stores
+    // the video link itself in the audioUrl slot — the seed's video-
+    // as-audio class — and the old rule served it verbatim. The
+    // owner's 2026-11-10 doctrine supersedes it: derivation first.
     const entry = {
       atEntryId: 11,
       version: 'v1',
@@ -477,10 +482,10 @@ describe('ThemesService.getThemeBySlug', () => {
     const detail = await service.getThemeBySlug('test_anime-op1-1');
 
     expect(detail.audioUrl).toBe(
-      'https://v.animethemes.moe/TestAnime-OP1.webm',
+      'https://a.animethemes.moe/TestAnime-OP1.ogg',
     );
     expect(detail.entries[0].audioUrl).toBe(
-      'https://v.animethemes.moe/TestAnime-OP1.webm',
+      'https://a.animethemes.moe/TestAnime-OP1.ogg',
     );
   });
 

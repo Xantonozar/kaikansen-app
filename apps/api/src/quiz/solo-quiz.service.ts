@@ -314,9 +314,12 @@ export class SoloQuizService {
       theme: {
         slug: correctTheme.slug,
         videoUrl: correctTheme.videoUrl,
-        // Stored audio, else the derived .ogg twin (audio-url.ts):
-        // most catalogue themes store no audioUrl, and the quiz's
-        // audio candidate would otherwise be missing entirely.
+        // The resolved audio (audio-url.ts, owner doctrine
+        // 2026-11-10): the derived .ogg twin whenever the theme's
+        // video link derives — a stored audioUrl is only a fallback
+        // and a stored video link is never served as audio. The
+        // client falls back to the videoUrl (audio-only) when this
+        // is null or fails.
         audioUrl: resolveAudioUrl(correctTheme.audioUrl, correctTheme.videoUrl),
         coverImage:
           correctTheme.animeCoverImage ?? correctTheme.animeCoverImageSmall ?? null,

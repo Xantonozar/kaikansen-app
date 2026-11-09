@@ -1311,7 +1311,11 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     this.emit(room, 'room:round-started', {
       round: roundNumber,
       theme: {
-        videoUrl: mediaCandidates[0] ?? round.videoUrl,
+        // The round's own video URL — NOT mediaCandidates[0]: the
+        // candidate list is in playback order (audio first, see
+        // buildMediaCandidates), so its head is the .ogg, while
+        // this field must stay the video it names.
+        videoUrl: round.videoUrl,
         mediaCandidates,
         options,
       },
@@ -1322,15 +1326,20 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     this.armRoundTimer(String(room._id), room.settings.timeLimitSeconds || 30);
   }
 
-  /** Raw-URL media candidates (the web proxies these; see class docs). */
+  /**
+   * Raw-URL media candidates (the web proxies these; see class
+   * docs), in the quiz's playback order (owner doctrine,
+   * 2026-11-10): the resolved audio FIRST — the derived .ogg twin
+   * whenever the theme's video link derives (audio-url.ts) — then
+   * the theme's video file itself, retained as the audio-only last
+   * resort (played behind no surface), then the entries' own video
+   * sources. Clients try the list in order and may only report a
+   * round unplayable after the last candidate fails.
+   */
   private buildMediaCandidates(theme: RoomThemeDoc): string[] {
     const direct = [
-      theme.videoUrl,
-      // The audio candidate: stored audioUrl, else the derived .ogg
-      // twin of the theme's video (audio-url.ts) — most catalogue
-      // themes store no audioUrl, so without derivation the listen
-      // candidate behind the artwork would never exist.
       resolveAudioUrl(theme.audioUrl, theme.videoUrl),
+      theme.videoUrl,
       ...(Array.isArray(theme.entries)
         ? theme.entries.flatMap((entry) =>
             Array.isArray(entry?.videoSources)

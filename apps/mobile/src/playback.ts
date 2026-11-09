@@ -174,42 +174,60 @@ const AUDIO_FILE_EXTENSIONS = [
 ];
 
 /**
- * The ONE audio source a quiz question may play, picked from a
- * multiplayer round's flat candidate list. The API builds that list
- * as [video, audio, ...entry video sources] (quiz-rooms
- * buildMediaCandidates; the contract documents the same order), but
- * the list itself is unlabelled, so the audio entry is recognised,
- * in order:
+ * The audio sources a quiz question may play, IN ORDER, picked
+ * from a multiplayer round's flat candidate list (owner doctrine,
+ * 2026-11-10: the .ogg first; the video file itself, played
+ * audio-only, is the last resort — a question may only report no
+ * playable media after BOTH have failed). The API builds the list
+ * in playback order as [resolved audio, video, ...entry video
+ * sources] (quiz-rooms buildMediaCandidates; the contract
+ * documents the same order), but the list itself is unlabelled,
+ * so the order is re-derived defensively:
  *  1. the derived .ogg twin of the round's videoUrl, when listed
  *     (the catalogue's normal case — stored audioUrl is null and
  *     the API resolved the same derivation);
- *  2. any non-video candidate whose path ends in an audio extension
- *     (a stored audioUrl on another host);
- *  3. the candidate in the API's audio slot — index 1 when index 0
- *     is the video (a stored audioUrl that itself carries a
- *     video-file extension: the sync stores the lowest-resolution
- *     entry link as audioUrl when it stores one at all).
- * Null when no candidate can be identified as audio: the round then
- * reports no playable media instead of ever surfacing the video.
+ *  2. the API's audio slot — the list's first entry when it is not
+ *     the video (a stored audioUrl whose extension is not
+ *     recognised, already resolved by the API);
+ *  3. any other non-video candidate whose path ends in an audio
+ *     extension (a stored audioUrl on another host);
+ *  4. for lists built before the doctrine change ([video, audio,
+ *     ...]), the old audio slot — index 1 when index 0 is the
+ *     video (even when that slot holds a video-file link: played
+ *     with no surface, it is audio in effect);
+ *  5. the round's videoUrl itself, audio-only — the last resort.
+ * The video is never RENDERED (the question phase has no surface);
+ * as a source it simply plays its audio track. Empty when the
+ * list holds nothing plausible at all.
  */
-export function quizAudioCandidate(
+export function quizAudioCandidates(
   videoUrl: string | null,
   candidates: (string | null)[],
-): string | null {
-  const plausible = candidates.filter(isPlausibleUrl);
-  if (plausible.length === 0) return null;
-  const derived = deriveAudioUrl(videoUrl);
-  if (derived && plausible.includes(derived)) return derived;
-  const byExtension = plausible.find((url) => {
-    if (url === videoUrl) return false;
+): string[] {
+  const plausible = candidates
+    .filter(isPlausibleUrl)
+    .filter((url, i, all) => all.indexOf(url) === i);
+  if (plausible.length === 0) return [];
+  const ordered: string[] = [];
+  const push = (url: string | null) => {
+    if (url !== null && plausible.includes(url) && !ordered.includes(url)) {
+      ordered.push(url);
+    }
+  };
+  push(deriveAudioUrl(videoUrl));
+  if (plausible[0] !== videoUrl) push(plausible[0]);
+  for (const url of plausible) {
+    if (url === videoUrl) continue;
     const path = url.split(/[?#]/)[0].toLowerCase();
-    return AUDIO_FILE_EXTENSIONS.some((ext) => path.endsWith(ext));
-  });
-  if (byExtension) return byExtension;
-  if (videoUrl && plausible[0] === videoUrl && plausible.length > 1) {
-    return plausible[1];
+    if (AUDIO_FILE_EXTENSIONS.some((ext) => path.endsWith(ext))) {
+      push(url);
+    }
   }
-  return null;
+  if (videoUrl && plausible[0] === videoUrl && plausible.length > 1) {
+    push(plausible[1]);
+  }
+  push(videoUrl);
+  return ordered;
 }
 
 /**

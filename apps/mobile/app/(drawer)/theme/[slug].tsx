@@ -394,6 +394,11 @@ export default function ThemeDetailScreen() {
         entryIdOverride: null,
         mode,
         active: true,
+        // W2: a Watch claim from this screen degrades to the
+        // audio chain when every video candidate fails — the
+        // hero below renders the artwork + audio-only note off
+        // playback.audioFallback instead of a dead black frame.
+        watchAudioFallback: true,
       },
       { items: [currentItem, ...related], index: 0 },
     );
@@ -688,7 +693,7 @@ export default function ThemeDetailScreen() {
         {formatTime(playback.progress.current)} /{' '}
         {formatTime(playback.progress.duration)}
       </Text>
-      {playMode === 'watch' && (
+      {playMode === 'watch' && !playback.audioFallback && (
         <Pressable
           onPress={() => {
             void videoRef.current?.enterFullscreen();
@@ -765,28 +770,59 @@ export default function ThemeDetailScreen() {
             {/* 1 — Media hero (the player, once playing) */}
             <View style={styles.artWrap}>
               {playMode === 'watch' ? (
-                <View style={styles.heroPlayer}>
-                  {/* textureView, not the default surfaceView:
-                      this hero mounts conditionally (on the Watch
-                      tap) inside a ScrollView, where a SurfaceView
-                      can attach after playback starts and stay
-                      black; a TextureView composites like a normal
-                      view and reliably shows the frames. */}
-                  <VideoView
-                    ref={videoRef}
-                    player={playback.player}
-                    style={styles.heroVideo}
-                    contentFit="contain"
-                    nativeControls={false}
-                    surfaceType="textureView"
-                  />
-                  {playback.buffering && (
-                    <View style={styles.heroCenter}>
-                      <ActivityIndicator color={theme.accent} size="large" />
-                    </View>
-                  )}
-                  {playerStrip}
-                </View>
+                playback.audioFallback ? (
+                  /* W2 degradation: every video candidate failed,
+                     so the engine is playing the audio chain (the
+                     .ogg) — the media area shows the theme's
+                     artwork instead of a dead black frame, with
+                     the player surface hidden (audio only) and the
+                     honest note under the hero. The strip keeps
+                     working: play/pause and seek drive the audio. */
+                  <View style={styles.heroPlayer}>
+                    <VideoView
+                      player={playback.player}
+                      style={styles.hiddenSurface}
+                      nativeControls={false}
+                    />
+                    {cover ? (
+                      <Image
+                        source={{ uri: cover }}
+                        style={styles.heroVideo}
+                      />
+                    ) : (
+                      <View style={[styles.heroVideo, styles.coverEmpty]} />
+                    )}
+                    {playback.buffering && (
+                      <View style={styles.heroCenter}>
+                        <ActivityIndicator color={theme.accent} size="large" />
+                      </View>
+                    )}
+                    {playerStrip}
+                  </View>
+                ) : (
+                  <View style={styles.heroPlayer}>
+                    {/* textureView, not the default surfaceView:
+                        this hero mounts conditionally (on the Watch
+                        tap) inside a ScrollView, where a SurfaceView
+                        can attach after playback starts and stay
+                        black; a TextureView composites like a normal
+                        view and reliably shows the frames. */}
+                    <VideoView
+                      ref={videoRef}
+                      player={playback.player}
+                      style={styles.heroVideo}
+                      contentFit="contain"
+                      nativeControls={false}
+                      surfaceType="textureView"
+                    />
+                    {playback.buffering && (
+                      <View style={styles.heroCenter}>
+                        <ActivityIndicator color={theme.accent} size="large" />
+                      </View>
+                    )}
+                    {playerStrip}
+                  </View>
+                )
               ) : playMode === 'listen' ? (
                 /* Listen hero — the design's card (kaikansen-detail
                    -listen-mini-realimg.png): a lavender card holding
@@ -1097,6 +1133,14 @@ export default function ThemeDetailScreen() {
                     <Text style={styles.retryChipText}>Try again</Text>
                   </Pressable>
                 </View>
+              ) : playMode === 'watch' && playback.audioFallback ? (
+                /* W2: the video chain failed and the audio chain
+                   is playing instead — say so honestly, in the
+                   same note voice as the other playback states. */
+                <Text style={styles.playerNote}>
+                  The video could not be played, so you are hearing
+                  the audio only.
+                </Text>
               ) : null}
 
               {/* 4 — Action row (design law #6): four 48px lavender

@@ -489,7 +489,17 @@ describe('QuizRoomsService — game flow + scoring', () => {
     });
     const theme = (event!.payload.theme ?? {}) as Record<string, unknown>;
     expect(theme.videoUrl).toBe('https://video/main.webm');
-    expect(theme.mediaCandidates).toContain('https://audio/main.webm');
+    // Owner doctrine (2026-11-10): the fixture's stored audioUrl
+    // ('https://audio/main.webm') is itself a video link and its
+    // video URL derives no .ogg, so NO audio candidate is resolved —
+    // the list is the video file (audio-only last resort) followed
+    // by the entry's video source. (This expectation previously
+    // enshrined the stored link as the audio candidate.)
+    expect(theme.mediaCandidates).toEqual([
+      'https://video/main.webm',
+      'https://src/0.webm',
+    ]);
+    expect(theme.mediaCandidates).not.toContain('https://audio/main.webm');
     expect(theme.options).toHaveLength(4);
     expect(JSON.stringify(event?.payload)).not.toContain('correctAnswer');
 
@@ -523,6 +533,14 @@ describe('QuizRoomsService — game flow + scoring', () => {
       'https://a.animethemes.moe/Correct-OP1.ogg',
     );
     expect(theme.mediaCandidates).not.toContain('https://audio/main.webm');
+    // Playback order (owner doctrine, 2026-11-10): the resolved
+    // .ogg leads; the video file follows as the audio-only last
+    // resort, ahead of the entry's own video sources.
+    expect(theme.mediaCandidates).toEqual([
+      'https://a.animethemes.moe/Correct-OP1.ogg',
+      'https://v.animethemes.moe/Correct-OP1.webm',
+      'https://src/0.webm',
+    ]);
   });
 
   it('party scoring: server-timed base + first-correct bonus, last player auto-locked, game ends with RP scheduled', async () => {

@@ -98,6 +98,13 @@ export interface PlaybackSession {
   entryIdOverride: number | null;
   mode: PlaybackMode;
   active: boolean;
+  /** Opt-in for the engine's watch→audio degradation (W2): an
+      exhausted watch chain plays the listen chain's audio instead
+      of surfacing the error. Claimed by theme detail (its hero
+      renders the artwork + audio-only note); queue claims and the
+      player route leave it off. Preserved across queue advances
+      so a claim's degradation survives walking its queue. */
+  watchAudioFallback?: boolean;
 }
 
 const IDLE_SESSION: PlaybackSession = {
@@ -243,6 +250,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     entryIdOverride: session.entryIdOverride,
     mode: session.mode,
     active: session.active,
+    watchAudioFallback: session.watchAudioFallback ?? false,
   });
 
   /** Point the session at a queue item, detail unresolved — the
@@ -420,7 +428,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       }
       setQueue({ items: currentQueue.items, index });
       // The mode is whatever the session runs in — advancing
-      // never flips watch/listen.
+      // never flips watch/listen. The claim's W2 opt-in rides
+      // along for the same reason: the degradation a screen
+      // claimed with applies to the tracks it advances to.
       setSession((prevSession) => ({
         slug: item.slug,
         detail: null,
@@ -428,6 +438,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         entryIdOverride: item.atEntryId,
         mode: prevSession.mode,
         active: true,
+        watchAudioFallback: prevSession.watchAudioFallback,
       }));
     },
     [],

@@ -39,6 +39,16 @@ import {
  *   The detail screen keeps it false until the user presses
  *   Watch/Listen; flipping back to false pauses and unloads, so a
  *   slug change starts clean. The player route passes true.
+ * - Watch degradation (W2, opt-in via `watchAudioFallback` — the
+ *   theme detail claim): when the watch chain exhausts (every
+ *   video candidate failed, or there were none), playback falls
+ *   back to the listen chain's audio — the .ogg first — instead of
+ *   surfacing the error, and the hook reports `audioFallback` so
+ *   the consumer can show the artwork with an audio-only note.
+ *   The session's mode stays 'watch' throughout: the toggle is
+ *   the user's, and `retry` disengages the fallback to try the
+ *   video again. Only when the audio chain also exhausts does
+ *   the error surface.
  * - History: the first time playback genuinely starts for an
  *   entry+mode, POST /library/history fires once (recordWatch no-ops
  *   in fixture mode and when signed out). Resumes/seeks never
@@ -56,8 +66,13 @@ export function usePlayback(args: {
   entryIdOverride?: number | null;
   mode: PlaybackMode;
   active: boolean;
+  /** Opt-in (theme detail claims it): degrade an exhausted watch
+      chain to the listen chain's audio instead of the error state
+      (see the header's W2 note). Off for every other consumer. */
+  watchAudioFallback?: boolean;
 }) {
   const { slug, detail, entry, mode, active } = args;
+  const watchAudioFallback = args.watchAudioFallback === true;
   const downloads = useDownloads();
 
   const wantedEntryId =
@@ -77,18 +92,25 @@ export function usePlayback(args: {
   // video sources by resolution descending → entry videoUrl →
   // theme videoUrl. A local download stays on its single file; the
   // chains only engage for remote playback, advancing one step per
-  // player error.
+  // player error. The listen chain is resolved in watch mode too:
+  // it is the W2 degradation target when the watch chain exhausts.
   const listenCandidates = useMemo(
-    () =>
-      detail && mode === 'listen' ? resolveListenCandidates(detail, entry) : [],
-    [detail, entry, mode],
+    () => (detail ? resolveListenCandidates(detail, entry) : []),
+    [detail, entry],
   );
   const watchCandidates = useMemo(
     () =>
       detail && mode === 'watch' ? resolveWatchCandidates(detail, entry) : [],
     [detail, entry, mode],
   );
-  const candidates = mode === 'listen' ? listenCandidates : watchCandidates;
+  // W2 state: true once an exhausted watch chain has degraded to
+  // the listen chain's audio (opt-in claims only).
+  const [audioFallback, setAudioFallback] = useState(false);
+  const candidates = audioFallback
+    ? listenCandidates
+    : mode === 'listen'
+      ? listenCandidates
+      : watchCandidates;
   const [candidateIndex, setCandidateIndex] = useState(0);
   // The URL whose failure was already handled (advanced past or
   // surfaced) — a failing source reports through BOTH the load
@@ -98,8 +120,38 @@ export function usePlayback(args: {
   // A different theme/entry/mode restarts the chain from the top.
   useEffect(() => {
     setCandidateIndex(0);
+    setAudioFallback(false);
     failedUrlRef.current = null;
   }, [slug, mode, entry?.atEntryId]);
+
+  // W2, the empty-chain case: watch was claimed but the entry has
+  // NO video candidates at all — the chain is exhausted before it
+  // starts, so degrade to the audio chain immediately instead of
+  // sitting on a dead "unavailable" (remote playback only; a local
+  // watch download keeps its single-file behaviour).
+  useEffect(() => {
+    if (
+      active &&
+      mode === 'watch' &&
+      watchAudioFallback &&
+      !audioFallback &&
+      !localUsable &&
+      detail &&
+      watchCandidates.length === 0 &&
+      listenCandidates.length > 0
+    ) {
+      setAudioFallback(true);
+    }
+  }, [
+    active,
+    mode,
+    watchAudioFallback,
+    audioFallback,
+    localUsable,
+    detail,
+    watchCandidates,
+    listenCandidates,
+  ]);
 
   const url = localUsable
     ? downloadFileUri(localUsable)
@@ -151,6 +203,23 @@ export function usePlayback(args: {
       setCandidateIndex(candidateIndex + 1);
       return;
     }
+    if (
+      !localUsable &&
+      mode === 'watch' &&
+      watchAudioFallback &&
+      !audioFallback &&
+      listenCandidates.length > 0
+    ) {
+      // W2: the watch chain is exhausted — degrade to the listen
+      // chain (the .ogg first) rather than a dead error. The
+      // failed-URL guard resets so the audio chain's own failures
+      // are handled fresh; the consumer renders the artwork and
+      // the audio-only note off `audioFallback`.
+      failedUrlRef.current = null;
+      setCandidateIndex(0);
+      setAudioFallback(true);
+      return;
+    }
     setPlayerError(
       message ??
         'This source could not be played. It may be unavailable or in a format this device cannot play.',
@@ -197,6 +266,7 @@ export function usePlayback(args: {
     }
     loadedUrlRef.current = null;
     failedUrlRef.current = null;
+    setAudioFallback(false);
     setPlayerError(null);
     setEnded(false);
     setProgress({ current: 0, duration: 0 });
@@ -275,6 +345,16 @@ export function usePlayback(args: {
   };
 
   const retry = () => {
+    // From the W2 fallback, "try again" means trying the VIDEO
+    // again: disengage the fallback and restart the watch chain
+    // from its first candidate (the state change reloads it).
+    if (audioFallback) {
+      setPlayerError(null);
+      failedUrlRef.current = null;
+      setCandidateIndex(0);
+      setAudioFallback(false);
+      return;
+    }
     // Retry restarts the chain from its first candidate; the index
     // change alone reloads it, so only force the load when the
     // first candidate is already the one showing.
@@ -306,6 +386,9 @@ export function usePlayback(args: {
     offline,
     unavailable,
     buffering,
+    /** W2: watch degraded to the listen chain's audio (opt-in
+        claims only) — render artwork + an audio-only note. */
+    audioFallback,
     playerError,
     ended,
     isPlaying,

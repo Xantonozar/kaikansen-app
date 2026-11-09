@@ -495,8 +495,19 @@ export default function SoloQuizScreen() {
     const audioEmpty = audioState.phase === 'empty';
     body = (
       <>
+        {/* Audio candidates in doctrine order (owner, 2026-11-10):
+            the API-resolved audio (the derived .ogg) first, then
+            the theme's video file played audio-only as the last
+            resort — the question reports unplayable only after
+            both fail. QuizAudioOnly renders no surface either way. */}
         <QuizAudioOnly
-          candidates={[question.theme.audioUrl]}
+          candidates={[
+            question.theme.audioUrl,
+            question.theme.videoUrl,
+          ].filter(
+            (url, i, all): url is string =>
+              url !== null && all.indexOf(url) === i,
+          )}
           mediaKey={`${gameId ?? 'game'}:${question.index}`}
           onStateChange={handleAudioState}
         />

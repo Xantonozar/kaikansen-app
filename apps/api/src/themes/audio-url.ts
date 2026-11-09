@@ -11,11 +11,18 @@
  * `https://a.animethemes.moe/<File>.ogg`). Verified downloadable
  * (HTTP 206, audio/ogg) across the catalogue's decades.
  *
- * The rule is deliberately narrow: only an exact
- * `https://v.animethemes.moe/<file>.webm` video URL derives; any
- * other host or shape returns null and callers keep today's
- * behaviour. Derivation happens on READ (response mapping / payload
- * building) — it is never written back to the shared database.
+ * RESOLUTION DOCTRINE (owner ruling, 2026-11-10 — supersedes the
+ * original "stored data always wins" rule): the stored audioUrl is
+ * NOT trusted first, because for a whole class of themes it IS a
+ * video link, and serving it as audio left the quiz with nothing
+ * playable. Whenever the theme's video link derives, the derived
+ * .ogg is the audio — regardless of what is stored. A stored
+ * audioUrl is honoured only when nothing derives AND the stored
+ * value is not itself a video-file URL; if neither exists the
+ * answer is null and callers fall back to the video file played
+ * audio-only. Derivation happens on READ (response mapping /
+ * payload building) — it is never written back to the shared
+ * database.
  */
 
 const VIDEO_PREFIX = 'https://v.animethemes.moe/';
@@ -42,14 +49,40 @@ export function deriveAudioUrl(
 }
 
 /**
- * The audio URL a surface should use for a theme/entry: the stored
- * audioUrl when one exists (stored data always wins — derivation
- * never overwrites it), else the derived .ogg twin of the video URL,
+ * Whether a URL points at a video file rather than an audio file:
+ * it IS the theme's video URL, or its path ends in the video
+ * container extension the catalogue uses (.webm). The seed stored
+ * video links in audioUrl slots, so this is how a stored "audio"
+ * value is recognised as a video link in disguise.
+ */
+function isVideoFileUrl(
+  url: string,
+  videoUrl: string | null | undefined,
+): boolean {
+  if (url === videoUrl) return true;
+  const path = url.split(/[?#]/)[0].toLowerCase();
+  return path.endsWith(VIDEO_SUFFIX);
+}
+
+/**
+ * The audio URL a surface should use for a theme/entry (owner
+ * doctrine, 2026-11-10): the derived .ogg twin whenever the video
+ * URL derives — regardless of what is stored; else the stored
+ * audioUrl when it is a genuine audio link (not a video file);
  * else null.
  */
 export function resolveAudioUrl(
   audioUrl: string | null | undefined,
   videoUrl: string | null | undefined,
 ): string | null {
-  return audioUrl ?? deriveAudioUrl(videoUrl);
+  const derived = deriveAudioUrl(videoUrl);
+  if (derived !== null) return derived;
+  if (
+    typeof audioUrl === 'string' &&
+    audioUrl.length > 0 &&
+    !isVideoFileUrl(audioUrl, videoUrl)
+  ) {
+    return audioUrl;
+  }
+  return null;
 }

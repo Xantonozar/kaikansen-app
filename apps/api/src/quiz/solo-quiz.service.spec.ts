@@ -224,11 +224,17 @@ describe('SoloQuizService — game flow', () => {
     );
   });
 
-  it('keeps a stored audioUrl on the question theme (never derived over)', async () => {
+  it('serves no audioUrl when the stored value is a video link and nothing derives (owner doctrine, 2026-11-10)', async () => {
     const { service } = makeService();
     const state = await service.createGame(USER_1, { quizType: 'anime' });
-    // Factory themes store https://audio/<i>.webm with a non-AT video.
-    expect(state.question?.theme.audioUrl).toBe('https://audio/1.webm');
+    // Factory themes store https://audio/<i>.webm — a video LINK —
+    // with a non-AnimeThemes video URL, so nothing derives and the
+    // stored value is not audio: it must NOT be served as the
+    // question's audio. (This expectation previously enshrined the
+    // old "stored always wins" rule; the client's audio-only last
+    // resort is the question's videoUrl, which stays intact.)
+    expect(state.question?.theme.audioUrl).toBeNull();
+    expect(state.question?.theme.videoUrl).toBeTruthy();
   });
 
   it('scores a correct answer with the web formula and persists the attempt', async () => {

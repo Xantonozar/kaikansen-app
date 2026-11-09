@@ -79,9 +79,11 @@ export function toThemeDetail(doc: ThemeDoc): ThemeDetail {
         mime: source.mime ?? 'video/webm',
       })),
       videoUrl: entry.videoUrl ?? null,
-      // Stored audio wins; a missing one falls back to the derived
-      // .ogg twin of the entry's own video file (see audio-url.ts) —
-      // the catalogue's audioUrl is null for most entries, and the
+      // Resolved per audio-url.ts (owner doctrine, 2026-11-10):
+      // the derived .ogg twin of the entry's own video file
+      // whenever it derives; a stored audioUrl is honoured only
+      // when nothing derives and it is not itself a video link.
+      // The catalogue's audioUrl is null for most entries, and the
       // player/downloads read this field first.
       audioUrl: resolveAudioUrl(entry.audioUrl, entry.videoUrl),
       duration: entry.duration ?? null,

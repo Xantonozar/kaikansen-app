@@ -64,7 +64,7 @@ import {
   QuizAudioOnly,
   type QuizAudioState,
 } from '../../../src/components/QuizMedia';
-import { quizAudioCandidate } from '../../../src/playback';
+import { quizAudioCandidates } from '../../../src/playback';
 import { QuizOptions } from '../../../src/components/QuizOptions';
 import {
   fontFamilies,
@@ -552,17 +552,18 @@ export default function QuizRoomScreen() {
     ? Date.parse(liveRound.startedAt) + liveRound.timeLimitSeconds * 1000
     : 0;
 
-  // Owner ruling (2026-11-09): quiz questions are AUDIO-ONLY — the
-  // round's flat candidate list leads with the theme's video, which
-  // gives the anime away on sight. Only the identified audio
-  // candidate (the hidden .ogg) may play; when none can be
-  // identified the media card reports no playable media instead.
-  const roundAudioCandidate = liveRound
-    ? quizAudioCandidate(
+  // Owner rulings: quiz questions are AUDIO-ONLY (2026-11-09 — the
+  // theme's video gives the anime away on sight, so no candidate is
+  // ever rendered), and the audio plays the .ogg first with the
+  // video file as the audio-only last resort (2026-11-10) — the
+  // ordered candidate list tries each in turn, and the round only
+  // reports no playable media after all of them fail.
+  const roundAudioCandidates = liveRound
+    ? quizAudioCandidates(
         liveRound.theme.videoUrl,
         liveRound.theme.mediaCandidates,
       )
-    : null;
+    : [];
 
   const startHint = (() => {
     if (!room || phase !== 'waiting') return null;
@@ -1001,9 +1002,7 @@ export default function QuizRoomScreen() {
                   plays behind no surface at all — the ring and
                   the Playing pill below report its state. */}
               <QuizAudioOnly
-                candidates={
-                  roundAudioCandidate ? [roundAudioCandidate] : []
-                }
+                candidates={roundAudioCandidates}
                 mediaKey={`${roomId}:${liveRound.round}`}
                 onStateChange={handleRoomAudioState}
               />

@@ -49,17 +49,40 @@ describe('deriveAudioUrl — the .ogg twin rule', () => {
   });
 });
 
-describe('resolveAudioUrl — stored wins, derivation fills the gap', () => {
-  it('keeps a stored audioUrl verbatim (never overwritten)', () => {
+describe('resolveAudioUrl — the derived .ogg wins (owner doctrine)', () => {
+  // Owner ruling, 2026-11-10: this block deliberately REPLACES the
+  // original "stored data always wins" doctrine (whose test kept a
+  // stored video link verbatim as audio). The seed stored video
+  // links in audioUrl slots for a whole class of themes, which left
+  // the quiz serving a .webm as its audio — or nothing playable at
+  // all. Now: derivation first, a stored value only when nothing
+  // derives and it is a genuine audio link.
+
+  it('resolves to the derived .ogg when the stored audioUrl is the video link itself', () => {
     expect(
       resolveAudioUrl(
         'https://v.animethemes.moe/NeonGenesisEvangelion-OP1.webm',
         'https://v.animethemes.moe/NeonGenesisEvangelion-OP1.webm',
       ),
-    ).toBe('https://v.animethemes.moe/NeonGenesisEvangelion-OP1.webm');
+    ).toBe('https://a.animethemes.moe/NeonGenesisEvangelion-OP1.ogg');
+  });
+
+  it('resolves to the derived .ogg when the stored audioUrl is another video link (the lowest-res entry link)', () => {
     expect(
-      resolveAudioUrl('https://cdn.example.com/audio.ogg', null),
-    ).toBe('https://cdn.example.com/audio.ogg');
+      resolveAudioUrl(
+        'https://v.animethemes.moe/NeonGenesisEvangelion-OP1v2.webm',
+        'https://v.animethemes.moe/NeonGenesisEvangelion-OP1.webm',
+      ),
+    ).toBe('https://a.animethemes.moe/NeonGenesisEvangelion-OP1.ogg');
+  });
+
+  it('prefers the derived .ogg even over a stored REAL audio URL', () => {
+    expect(
+      resolveAudioUrl(
+        'https://cdn.example.com/audio.ogg',
+        'https://v.animethemes.moe/NeonGenesisEvangelion-OP1.webm',
+      ),
+    ).toBe('https://a.animethemes.moe/NeonGenesisEvangelion-OP1.ogg');
   });
 
   it('derives when the stored audioUrl is null', () => {
@@ -69,6 +92,37 @@ describe('resolveAudioUrl — stored wins, derivation fills the gap', () => {
         'https://v.animethemes.moe/NeonGenesisEvangelion-OP1.webm',
       ),
     ).toBe('https://a.animethemes.moe/NeonGenesisEvangelion-OP1.ogg');
+  });
+
+  it('honours a stored real audio URL when no video link derives', () => {
+    expect(
+      resolveAudioUrl('https://cdn.example.com/audio.ogg', null),
+    ).toBe('https://cdn.example.com/audio.ogg');
+    // A video URL on an unverified host derives nothing, so the
+    // stored audio stands.
+    expect(
+      resolveAudioUrl(
+        'https://cdn.example.com/audio.ogg',
+        'https://example.com/theme.webm',
+      ),
+    ).toBe('https://cdn.example.com/audio.ogg');
+  });
+
+  it('returns null when the stored audioUrl is a video link and nothing derives', () => {
+    // The stored value equals the video URL (a non-AnimeThemes pair).
+    expect(
+      resolveAudioUrl(
+        'https://video.example.com/main.webm',
+        'https://video.example.com/main.webm',
+      ),
+    ).toBeNull();
+    // A .webm stored value is a video link even on an "audio" host.
+    expect(
+      resolveAudioUrl(
+        'https://audio.example.com/main.webm',
+        'https://video.example.com/main.webm',
+      ),
+    ).toBeNull();
   });
 
   it('stays null when there is nothing to derive from', () => {

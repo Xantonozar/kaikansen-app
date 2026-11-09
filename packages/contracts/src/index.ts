@@ -994,7 +994,7 @@ export interface RoundStartedEvent {
   round: number;
   theme: {
     videoUrl: string;
-    /** Playable candidates in order: video, audio, entry sources (raw URLs). */
+    /** Playable candidates in playback order: the resolved audio (.ogg), the video file (audio-only last resort), entry sources (raw URLs). */
     mediaCandidates: string[];
     options: string[];
   };
