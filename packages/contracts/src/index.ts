@@ -69,6 +69,13 @@ export interface ThemeSummary {
   totalRatings: number;
   totalWatches: number;
   totalListens: number;
+  /**
+   * Representative duration in seconds — the themecache document's
+   * own `duration` field, the very value ThemeDetail serves (the
+   * web's stored per-theme duration; schema default 90). Null only
+   * when a stored document carries none.
+   */
+  duration: number | null;
   isPopular: boolean;
   popularRank: number | null;
 }
@@ -106,16 +113,70 @@ export interface HomeResponse {
 }
 
 /**
- * Response body of GET /search — the theme ("song") slice of the web
- * app's search envelope (ZadidSalman/Kaisen `app/api/search/route.ts`):
- * the web returns grouped artists/anime/users alongside songs; this
- * backend serves themes only, so `results` carries the songs group and
- * the remaining fields mirror the web's `meta` object.
+ * Response body of GET /season — one season's themes, the port of
+ * the web's GET /api/themes/seasonal (the read behind the web's
+ * /season/[season]/[year] page and the app's Season browse screen).
+ * The web's own semantics: filter on animeSeason/animeSeasonYear,
+ * optional OP/ED type filter, sort sequence asc then avgRating
+ * desc, 20 per page. `hasMore` mirrors the web's meta (a full page
+ * was served).
+ */
+export interface SeasonResponse {
+  season: Season;
+  year: number;
+  themes: ThemeSummary[];
+  page: number;
+  hasMore: boolean;
+}
+
+/**
+ * One anime match in GET /search's anime group — the web's ALL-view
+ * anime filter (titleRomaji / titleEnglish / synonyms) projected for
+ * a search row: identity + display title, cover, year, and how many
+ * themes the catalogue holds for it (counted from ThemeCache, the
+ * number the row shows and the anime page will list).
+ */
+export interface SearchAnimeResult {
+  anilistId: number;
+  titleRomaji: string;
+  titleEnglish: string | null;
+  coverImageLarge: string | null;
+  seasonYear: number | null;
+  themeCount: number;
+}
+
+/**
+ * One artist match in GET /search's artist group — the web's
+ * ALL-view artist filter (name / aliases). `totalThemes` never
+ * reports below the number of themes actually carrying the slug
+ * (the cache counter drifts; same rule as GET /artists/:slug).
+ */
+export interface SearchArtistResult {
+  slug: string;
+  name: string;
+  imageUrl: string | null;
+  totalThemes: number;
+}
+
+/**
+ * Response body of GET /search — the web app's search envelope
+ * (ZadidSalman/Kaisen `app/api/search/route.ts`) minus its users
+ * group (people search lives at /social/users/search here): the
+ * web returns grouped artists/anime alongside songs; `results`
+ * carries the songs group with its SONGS-view pagination, `anime`
+ * and `artists` carry the ALL-view groups (web cap: 5 each), and the
+ * remaining fields mirror the web's `meta` object. The groups are
+ * served on page 1 only and stay empty when an OP/ED modifier was
+ * parsed out of the query — the web skips them then too.
  */
 export interface SearchResponse {
   query: string;
   /** This page of theme results (web order: totalWatches desc, avgRating desc). */
   results: ThemeSummary[];
+  /** Anime group (page 1 only; empty when an OP/ED modifier is used). */
+  anime: SearchAnimeResult[];
+  /** Artist group (page 1 only; empty when an OP/ED modifier is used). */
+  artists: SearchArtistResult[];
   /** The web search is regex-only end to end (AUDIT.md §6) — always 'regex'. */
   searchType: 'regex';
   /** 1-based page served. */
@@ -215,6 +276,15 @@ export interface UpdateProfileRequest {
   bio?: string;
   /** A valid URL, or null to clear the avatar; omitted = unchanged. */
   avatarUrl?: string | null;
+  /**
+   * Public-profile toggle (the app's Edit Profile design, §6.28).
+   * The field already exists on the user record (default true) and
+   * already has a real effect on BOTH stacks: people search only
+   * returns public profiles. The web's own edit schema does not
+   * accept it (the web has no toggle UI) — this API accepts it
+   * additively; omitted = unchanged.
+   */
+  isPublic?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -486,6 +556,15 @@ export interface PlaylistsResponse {
 export interface PlaylistDetail extends PlaylistSummary {
   /** The owner's user id (the web serves the raw document's userId). */
   userId: string;
+  /**
+   * The owner's public identity for the design's "by <owner>" line —
+   * the same two public fields the profile endpoint projects
+   * (GET /users/:username), resolved from the user document. Null
+   * when the owner no longer resolves (e.g. a deleted account);
+   * never any private field.
+   */
+  ownerDisplayName: string | null;
+  ownerUsername: string | null;
   items: ThemeSummary[];
 }
 
@@ -781,6 +860,29 @@ export interface QuizRoomState {
   rounds: QuizRoundState[];
 }
 
+/**
+ * One row of the public-rooms list (`room:list-public` ack) — the
+ * multiplayer lobby's discovery list (Slice 5). This API's own
+ * addition: the web has no room list (its public flow is join-or-
+ * create matchmaking only), but the app's lobby design draws open
+ * public rooms, so the data is served from the same room documents.
+ * Full rooms are included with `isFull` set — the design renders
+ * them with a disabled "Full" state rather than hiding them.
+ */
+export interface PublicRoomListItem {
+  roomId: string;
+  roomCode: string;
+  roomType: QuizRoomType;
+  guessType: RoomGuessType;
+  roundCount: number;
+  playerCount: number;
+  maxPlayers: number;
+  isFull: boolean;
+  /** Host display data, from the host's own player row. */
+  hostUsername: string;
+  hostAvatar: string | null;
+}
+
 /** Ack envelope for every room socket event (mirrors the web REST bodies). */
 export interface QuizRoomAck {
   success: boolean;
@@ -789,6 +891,8 @@ export interface QuizRoomAck {
   roomId?: string;
   roomCode?: string;
   room?: QuizRoomState;
+  /** `room:list-public` ack payload. */
+  rooms?: PublicRoomListItem[];
   gameStarted?: boolean;
   alreadyAdvanced?: boolean;
   currentRound?: number;
@@ -895,6 +999,22 @@ export interface NetworkUser {
   displayName: string;
   avatarUrl: string | null;
   bio: string;
+  /**
+   * Quiz rank tier — enriched ONLY by GET /users/:username/network,
+   * whose rows the app's Network screen (§6.17) draws with the tier
+   * beside the handle. Read from the user's rank document; a user
+   * with no document gets 'academy', the default the rank reads
+   * themselves materialise. User-search results omit it (the web's
+   * projection there has no rank either).
+   */
+  tier?: RankTier;
+  /**
+   * Whether the CALLER follows this user — enriched ONLY by the
+   * network endpoint, and only when the request carried a valid
+   * Bearer <redacted> (anonymous reads omit the field). Drives the
+   * rows' Follow / Following buttons.
+   */
+  isFollowing?: boolean;
 }
 
 /**
@@ -1254,6 +1374,24 @@ export interface UserRankProfile {
   /** ISO timestamps. */
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * One row of GET /rank/players — a player's rank standing reduced
+ * to what a room roster draws (tier + RP). Unlike GET /rank/:userId
+ * this read NEVER creates a rank document: a player with no rank
+ * document reports the materialised defaults (academy, 0 RP),
+ * exactly what the web's getUserRank would create for them.
+ */
+export interface PlayerRankSummary {
+  userId: string;
+  tier: RankTier;
+  rp: number;
+}
+
+/** Response body of GET /rank/players?ids=<csv> (public, read-only). */
+export interface PlayerRanksResponse {
+  players: PlayerRankSummary[];
 }
 
 /**

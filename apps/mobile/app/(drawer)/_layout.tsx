@@ -1,6 +1,7 @@
-import { useWindowDimensions } from 'react-native';
+import { StyleSheet, useWindowDimensions, View } from 'react-native';
 import { Drawer } from 'expo-router/drawer';
 import { AppDrawerContent } from '../../src/components/AppDrawerContent';
+import { MiniPlayer } from '../../src/components/MiniPlayer';
 import { useTheme } from '../../src/theme-context';
 
 /**
@@ -11,6 +12,10 @@ import { useTheme } from '../../src/theme-context';
  * every entry itself, so the default drawer item list is unused;
  * screens are declared hidden and exist only as navigation targets.
  * Log in / Register stay on the root stack (pre-auth surfaces).
+ *
+ * The mini player (layout-fidelity Slice 1) overlays the bottom of
+ * pushed screens from here; it gates itself off tab routes (the
+ * TabBar mount covers those), the player route and quiz play.
  */
 export default function DrawerLayout() {
   const theme = useTheme();
@@ -18,6 +23,7 @@ export default function DrawerLayout() {
   const drawerWidth = Math.min(width * 0.84, 288);
 
   return (
+    <View style={[styles.root, { backgroundColor: theme.background }]}>
     <Drawer
       drawerContent={(props) => <AppDrawerContent {...props} />}
       screenOptions={{
@@ -35,6 +41,7 @@ export default function DrawerLayout() {
       />
       <Drawer.Screen name="player" options={{ drawerItemStyle: { display: 'none' } }} />
       <Drawer.Screen name="quiz/solo" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen name="quiz/leaderboard" options={{ drawerItemStyle: { display: 'none' } }} />
       <Drawer.Screen name="quiz/lobby" options={{ drawerItemStyle: { display: 'none' } }} />
       <Drawer.Screen name="quiz/room" options={{ drawerItemStyle: { display: 'none' } }} />
       <Drawer.Screen
@@ -49,6 +56,34 @@ export default function DrawerLayout() {
         name="notifications"
         options={{ drawerItemStyle: { display: 'none' } }}
       />
+      <Drawer.Screen
+        name="downloads"
+        options={{ drawerItemStyle: { display: 'none' } }}
+      />
+      <Drawer.Screen
+        name="edit-profile"
+        options={{ drawerItemStyle: { display: 'none' } }}
+      />
+      <Drawer.Screen
+        name="favourites"
+        options={{ drawerItemStyle: { display: 'none' } }}
+      />
+      <Drawer.Screen
+        name="network/[username]"
+        options={{ drawerItemStyle: { display: 'none' } }}
+      />
+      <Drawer.Screen
+        name="profile"
+        options={{ drawerItemStyle: { display: 'none' } }}
+      />
     </Drawer>
+    <MiniPlayer placement="overlay" />
+    </View>
   );
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
+});

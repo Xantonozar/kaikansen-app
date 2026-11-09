@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,11 +11,15 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ChevronLeft, Star } from 'lucide-react-native';
+import { ChevronLeft, ExternalLink } from 'lucide-react-native';
 import type { AnimeDetailResponse, ThemeSummary } from '@kaikansen/contracts';
 import { fetchAnimeDetail } from '../../../src/api';
 import { useFavorites } from '../../../src/favoritesStore';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import {
+  queueItemsFromSummaries,
+  usePlaybackSession,
+} from '../../../src/playback-context';
 import {
   fontFamilies,
   radii,
@@ -26,10 +31,23 @@ import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
 /**
- * Anime detail (DESIGN.md §6.8) — cover header, title, meta chips
- * (season · year, score, studio), genre chips, then the anime's
- * themes grouped Openings / Endings. Data: GET /anime/:id (the web's
- * anime page read, ported to the API for this screen).
+ * Anime detail (DESIGN.md §6.8) — layout-fidelity Slice 6 rebuilt
+ * the header to the design's composition (measured in
+ * anime-detail.html): a full-bleed 224dp banner (bannerImage,
+ * falling back to the large cover — the web page's own chain minus
+ * its picsum placeholder), a floating translucent back disc, and a
+ * white info card overlapping the banner by 16dp carrying the
+ * title, the meta line ("26 episodes · FALL 1995") and the genre
+ * chips; then the anime's themes grouped Openings / Endings and a
+ * "View on AniList" row.
+ *
+ * Data: GET /anime/:id (the web's anime page read, ported to the
+ * API for this screen). The design's meta line has NO format
+ * ("TV ·") prefix — ozar declined the anime-format backfill
+ * (2026-11-09), and format is stored nowhere in the catalogue.
+ * The card also omits the pre-fidelity build's score chip, studio
+ * line and romaji subtitle: not in the design (the data stays in
+ * the payload, undrawn) — flagged in the Slice 6 report.
  */
 export default function AnimeDetailScreen() {
   const theme = useTheme();
@@ -72,10 +90,26 @@ export default function AnimeDetailScreen() {
     (slug: string) => router.push(`/theme/${slug}`),
     [router],
   );
+  const { startQueue } = usePlaybackSession();
   const playTheme = useCallback(
-    (slug: string) =>
-      router.push({ pathname: '/player', params: { slug, mode: 'watch' } }),
-    [router],
+    (slug: string) => {
+      // The queue is the page's rows in display order: Openings
+      // (by sequence), then Endings (by sequence) — the same order
+      // renderRows draws them.
+      if (data) {
+        const ordered = (['OP', 'ED'] as const).flatMap((type) =>
+          data.themes
+            .filter((t) => t.type === type)
+            .sort((a, b) => a.sequence - b.sequence),
+        );
+        const index = ordered.findIndex((t) => t.slug === slug);
+        if (index >= 0) {
+          startQueue(queueItemsFromSummaries(ordered), index, 'watch');
+        }
+      }
+      router.push({ pathname: '/player', params: { slug, mode: 'watch' } });
+    },
+    [router, data, startQueue],
   );
 
   const renderRows = (rows: ThemeSummary[]) =>
@@ -91,20 +125,33 @@ export default function AnimeDetailScreen() {
       />
     ));
 
+  const metaLine = data
+    ? [
+        data.anime.totalEpisodes != null
+          ? `${data.anime.totalEpisodes} episodes`
+          : null,
+        data.anime.season && data.anime.seasonYear
+          ? `${data.anime.season} ${data.anime.seasonYear}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : '';
+  const bannerUri = data?.anime.bannerImage ?? data?.anime.coverImageLarge;
+
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
-      <View style={styles.header}>
-        <Pressable
-          onPress={() => router.back()}
-          hitSlop={6}
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-          style={styles.backTile}
-        >
-          <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-        </Pressable>
-        <Text style={styles.headerTitle}>Anime</Text>
-      </View>
+      {/* Floating back disc over the banner (the design's only
+          chrome on this screen — there is no title bar). */}
+      <Pressable
+        onPress={() => router.back()}
+        hitSlop={6}
+        accessibilityRole="button"
+        accessibilityLabel="Back"
+        style={styles.backFloat}
+      >
+        <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
+      </Pressable>
 
       {error ? (
         <View style={styles.center}>
@@ -127,72 +174,31 @@ export default function AnimeDetailScreen() {
           contentContainerStyle={styles.content}
           showsVerticalScrollIndicator={false}
         >
+          {/* Full-bleed banner, 224dp (mock: h-56). */}
+          {bannerUri ? (
+            <Image source={{ uri: bannerUri }} style={styles.banner} />
+          ) : (
+            <View style={[styles.banner, styles.placeholder]} />
+          )}
           <View style={styles.column}>
-            <View style={styles.heroRow}>
-              {data.anime.coverImageLarge ? (
-                <Image
-                  source={{ uri: data.anime.coverImageLarge }}
-                  style={styles.cover}
-                />
-              ) : (
-                <View style={[styles.cover, styles.placeholder]} />
+            {/* Info card overlapping the banner by 16dp (mock: -mt-4). */}
+            <View style={styles.infoCard}>
+              <Text style={styles.title}>
+                {data.anime.titleEnglish ?? data.anime.titleRomaji}
+              </Text>
+              {metaLine.length > 0 && (
+                <Text style={styles.metaLine}>{metaLine}</Text>
               )}
-              <View style={styles.heroMain}>
-                <Text style={styles.title}>
-                  {data.anime.titleEnglish ?? data.anime.titleRomaji}
-                </Text>
-                {data.anime.titleEnglish &&
-                  data.anime.titleRomaji !== data.anime.titleEnglish && (
-                    <Text style={styles.subtitle}>
-                      {data.anime.titleRomaji}
-                    </Text>
-                  )}
-                <View style={styles.metaChips}>
-                  {data.anime.season && data.anime.seasonYear && (
-                    <View style={styles.metaChip}>
-                      <Text style={styles.metaChipText}>
-                        {data.anime.season} {data.anime.seasonYear}
-                      </Text>
+              {data.anime.genres.length > 0 && (
+                <View style={styles.genreRow}>
+                  {data.anime.genres.map((genre) => (
+                    <View key={genre} style={styles.genreChip}>
+                      <Text style={styles.genreText}>{genre}</Text>
                     </View>
-                  )}
-                  {data.anime.averageScore != null && (
-                    <View style={styles.metaChip}>
-                      <Star
-                        size={12}
-                        color={theme.onAccentContainer}
-                        fill={theme.onAccentContainer}
-                        strokeWidth={2}
-                      />
-                      <Text style={styles.metaChipText}>
-                        {(data.anime.averageScore / 10).toFixed(1)}
-                      </Text>
-                    </View>
-                  )}
-                  {data.anime.totalEpisodes != null && (
-                    <View style={styles.metaChip}>
-                      <Text style={styles.metaChipText}>
-                        {data.anime.totalEpisodes} episodes
-                      </Text>
-                    </View>
-                  )}
+                  ))}
                 </View>
-                {data.anime.studios.length > 0 && (
-                  <Text style={styles.studio}>
-                    {data.anime.studios.join(', ')}
-                  </Text>
-                )}
-              </View>
+              )}
             </View>
-
-            {data.anime.genres.length > 0 && (
-              <View style={styles.genreRow}>
-                {data.anime.genres.map((genre) => (
-                  <View key={genre} style={styles.genreChip}>
-                    <Text style={styles.genreText}>{genre}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
 
             {(['OP', 'ED'] as const).map((type) => {
               const rows = data.themes
@@ -213,6 +219,25 @@ export default function AnimeDetailScreen() {
                 No themes for this anime yet.
               </Text>
             )}
+
+            {data.anime.anilistId != null && (
+              <Pressable
+                onPress={() =>
+                  void Linking.openURL(
+                    `https://anilist.co/anime/${data.anime.anilistId}`,
+                  )
+                }
+                accessibilityRole="link"
+                accessibilityLabel="View on AniList"
+                style={({ pressed }) => [
+                  styles.anilistRow,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.anilistText}>View on AniList</Text>
+                <ExternalLink size={16} color={theme.muted} strokeWidth={2} />
+              </Pressable>
+            )}
           </View>
         </ScrollView>
       )}
@@ -226,110 +251,107 @@ const createStyles = (theme: Theme) =>
       flex: 1,
       backgroundColor: theme.background,
     },
-    header: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
-      paddingHorizontal: spacing.screenEdge,
-      paddingVertical: spacing.sm,
-    },
-    backTile: {
-      width: 38,
-      height: 38,
+    backFloat: {
+      // The mock's floating back disc: translucent white over the
+      // banner (white/80 — the same fixed-colour precedent as the
+      // scrims; token `surface` at 80% renders identically in the
+      // light theme and follows the dark theme's surface).
+      position: 'absolute',
+      top: spacing.sm,
+      left: spacing.screenEdge,
+      zIndex: 2,
+      width: 40,
+      height: 40,
       borderRadius: radii.pill,
       backgroundColor: theme.surface,
+      opacity: 0.9,
       alignItems: 'center',
       justifyContent: 'center',
     },
-    headerTitle: {
-      ...typeStyles.heading,
-      color: theme.text,
-    },
     content: {
-      paddingHorizontal: spacing.screenEdge,
       paddingBottom: spacing.xxxl,
     },
-    column: {
+    banner: {
       width: '100%',
-      maxWidth: CONTENT_MAX_WIDTH,
-      alignSelf: 'center',
-    },
-    heroRow: {
-      flexDirection: 'row',
-      gap: spacing.lg,
-      paddingTop: spacing.sm,
-    },
-    cover: {
-      width: 112,
-      height: 158,
-      borderRadius: radii.card,
+      height: 224,
       backgroundColor: theme.surface,
     },
     placeholder: {
       backgroundColor: theme.raised,
     },
-    heroMain: {
-      flex: 1,
-      gap: spacing.xs,
-      paddingTop: spacing.xs,
+    column: {
+      width: '100%',
+      maxWidth: CONTENT_MAX_WIDTH,
+      alignSelf: 'center',
+      paddingHorizontal: spacing.screenEdge,
+    },
+    infoCard: {
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.cardLg,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.lg,
+      marginTop: -spacing.lg,
     },
     title: {
       ...typeStyles.display,
-      fontSize: 22,
-      lineHeight: 27,
+      fontSize: 20,
+      lineHeight: 25,
       color: theme.text,
     },
-    subtitle: {
-      ...typeStyles.bodySmall,
-      color: theme.muted,
-    },
-    metaChips: {
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      gap: spacing.sm,
-      marginTop: spacing.sm,
-    },
-    metaChip: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 4,
-      backgroundColor: theme.accentContainer,
-      borderRadius: radii.pill,
-      paddingHorizontal: spacing.sm + 2,
-      paddingVertical: 5,
-    },
-    metaChipText: {
-      ...typeStyles.caption,
-      fontFamily: fontFamilies.bodyStrong,
-      color: theme.onAccentContainer,
-    },
-    studio: {
-      ...typeStyles.bodySmall,
-      color: theme.muted,
-      marginTop: spacing.xs,
+    metaLine: {
+      // Mock: 12px medium mauve, wide tracking, uppercase —
+      // "26 episodes · FALL 1995".
+      fontSize: 12,
+      fontFamily: 'Inter_500Medium',
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+      color: theme.secondary,
+      marginTop: spacing.xs + 2,
     },
     genreRow: {
       flexDirection: 'row',
       flexWrap: 'wrap',
       gap: spacing.sm,
-      marginTop: spacing.lg,
+      marginTop: spacing.md,
     },
     genreChip: {
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: 2,
+    },
+    genreText: {
+      fontSize: 11,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.secondary,
+    },
+    anilistRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
       backgroundColor: theme.surface,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.border,
-      borderRadius: radii.pill,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 6,
+      borderRadius: radii.card,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.md,
+      marginTop: spacing.xl,
     },
-    genreText: {
-      ...typeStyles.caption,
+    anilistText: {
+      ...typeStyles.body,
       fontFamily: fontFamilies.bodyStrong,
-      color: theme.muted,
+      color: theme.text,
+    },
+    pressed: {
+      opacity: 0.85,
     },
     sectionHeading: {
-      ...typeStyles.heading,
-      fontFamily: fontFamilies.sectionLabel,
+      // Mock section headings are 15px bold.
+      ...typeStyles.body,
+      fontSize: 15,
+      fontFamily: fontFamilies.bodyStrong,
       color: theme.text,
       marginTop: spacing.xl,
       marginBottom: spacing.md,

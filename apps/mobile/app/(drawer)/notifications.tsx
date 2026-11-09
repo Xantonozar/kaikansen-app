@@ -236,41 +236,48 @@ export default function NotificationsScreen() {
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
           {actionError && <Text style={styles.errorText}>{actionError}</Text>}
-          {items.map((item) => {
-            const actorName = item.actor
-              ? item.actor.displayName || item.actor.username
-              : 'A deleted account';
-            return (
-              <Pressable
-                key={item.id}
-                onPress={() => onOpenRow(item)}
-                accessibilityRole="button"
-                accessibilityLabel={`${actorName} ${typeLine(item.type)}`}
-                style={({ pressed }) => [
-                  styles.row,
-                  !item.read && styles.rowUnread,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Avatar
-                  url={item.actor?.avatarUrl ?? null}
-                  name={actorName}
-                  size={40}
-                />
-                <View style={styles.rowMain}>
-                  <Text style={styles.rowText} numberOfLines={2}>
-                    <Text style={styles.rowName}>{actorName}</Text>
-                    {'  '}
-                    {typeLine(item.type)}
-                  </Text>
+          {/* The design groups every row in ONE white card with
+              hairline dividers (Slice 6; the rows used to be
+              separate cards). Unread rows carry the lavender tint
+              inside the card; the time sits at the first line's
+              right edge, as drawn. */}
+          <View style={styles.card}>
+            {items.map((item, index) => {
+              const actorName = item.actor
+                ? item.actor.displayName || item.actor.username
+                : 'A deleted account';
+              return (
+                <Pressable
+                  key={item.id}
+                  onPress={() => onOpenRow(item)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${actorName} ${typeLine(item.type)}`}
+                  style={({ pressed }) => [
+                    styles.row,
+                    index > 0 && styles.rowDivider,
+                    !item.read && styles.rowUnread,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Avatar
+                    url={item.actor?.avatarUrl ?? null}
+                    name={actorName}
+                    size={36}
+                  />
+                  <View style={styles.rowMain}>
+                    <Text style={styles.rowText} numberOfLines={2}>
+                      <Text style={styles.rowName}>{actorName}</Text>
+                      {'  '}
+                      {typeLine(item.type)}
+                    </Text>
+                  </View>
                   <Text style={styles.rowTime}>
                     {relativeTime(item.createdAt)}
                   </Text>
-                </View>
-                {!item.read && <View style={styles.unreadDot} />}
-              </Pressable>
-            );
-          })}
+                </Pressable>
+              );
+            })}
+          </View>
         </ScrollView>
       )}
     </SafeAreaView>
@@ -361,23 +368,30 @@ const createStyles = (theme: Theme) =>
       marginVertical: spacing.sm,
       lineHeight: 18,
     },
+    card: {
+      // The grouped card (mock: white, rounded-2xl, hairline
+      // border, rows divided by hairlines).
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.md,
+      overflow: 'hidden',
+    },
     row: {
-      // Lavender Dusk: notification rows are white cards; unread rows
-      // carry the lavender tint from the mock.
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
       minHeight: 60,
-      paddingVertical: spacing.sm,
-      paddingHorizontal: spacing.md,
-      backgroundColor: theme.surface,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.border,
-      borderRadius: radii.card,
-      marginBottom: spacing.sm,
+      paddingVertical: spacing.md - 2,
+      paddingHorizontal: spacing.md + 2,
+    },
+    rowDivider: {
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: theme.border,
     },
     rowUnread: {
-      backgroundColor: theme.accentContainer,
+      // The mock's unread tint is a pale wash of the lavender chip.
+      backgroundColor: withOpacity(theme.accentContainer, 0.55),
     },
     rowMain: {
       flex: 1,
@@ -393,13 +407,8 @@ const createStyles = (theme: Theme) =>
     },
     rowTime: {
       ...typeStyles.caption,
-      color: theme.muted,
-    },
-    unreadDot: {
-      width: 8,
-      height: 8,
-      borderRadius: 4,
-      backgroundColor: theme.accent,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.secondary,
       flexShrink: 0,
     },
     pressed: {

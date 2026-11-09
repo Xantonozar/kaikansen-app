@@ -11,6 +11,8 @@ import type {
   UserHistoryResponse,
   UserProfile,
   UserPublicProfile,
+  PlayerRankSummary,
+  RankLeaderboardResponse,
   UserRankProfile,
   UserRatingsResponse,
   UserSearchResponse,
@@ -130,6 +132,40 @@ export async function fetchUserHistory(
 export async function fetchUserRank(userId: string): Promise<UserRankProfile> {
   if (fixtureMode) throw new Error(DEMO_READ_MESSAGE);
   return apiJson<UserRankProfile>(`/rank/${enc(userId)}`);
+}
+
+/** The signed-in caller's own rank document (GET /rank/me). */
+export async function fetchMyRank(): Promise<UserRankProfile> {
+  if (fixtureMode) throw new Error(DEMO_READ_MESSAGE);
+  return apiJson<UserRankProfile>('/rank/me');
+}
+
+/**
+ * Batched player rank standings (GET /rank/players) — the quiz
+ * room roster's tier + RP sublines (layout-fidelity Slice 6). The
+ * endpoint is read-only and reports academy / 0 RP for players
+ * without a rank document. Fixture mode resolves an empty map:
+ * demo mode has no rooms, so there is no roster to enrich.
+ */
+export async function fetchPlayerRanks(
+  userIds: string[],
+): Promise<Map<string, PlayerRankSummary>> {
+  if (fixtureMode || userIds.length === 0) return new Map();
+  const res = await apiJson<{ players: PlayerRankSummary[] }>(
+    `/rank/players?ids=${userIds.map((id) => encodeURIComponent(id)).join(',')}`,
+  );
+  return new Map(res.players.map((p) => [p.userId, p]));
+}
+
+/**
+ * The RP leaderboard (GET /rank/leaderboard) — the web's top 100 by
+ * RP, all-time (the API has no period parameter; see rankUtil).
+ * Fixture mode answers the honest empty board, like the quiz board.
+ */
+export async function fetchRankLeaderboard(): Promise<RankLeaderboardResponse> {
+  if (fixtureMode)
+    return { leaderboard: [], meta: { source: 'live', computedAt: null } };
+  return apiJson<RankLeaderboardResponse>('/rank/leaderboard');
 }
 
 /* ------------------------------------------------------------------ */

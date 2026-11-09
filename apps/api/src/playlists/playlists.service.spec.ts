@@ -214,7 +214,18 @@ function makeModels() {
     }),
   };
 
-  return { playlistModel, themeModel };
+  const users: Record<string, unknown>[] = [
+    { _id: 'user-1', username: 'zadid', displayName: 'Zadid' },
+    { _id: 'user-2', username: 'other_user', displayName: 'Other User' },
+  ];
+  const userModel = {
+    docs: users,
+    findById: jest.fn((id: unknown) =>
+      queryOf(users.find((u) => String(u._id) === String(id)) ?? null),
+    ),
+  };
+
+  return { playlistModel, themeModel, userModel };
 }
 
 function makeService() {
@@ -222,6 +233,7 @@ function makeService() {
   const service = new PlaylistsService(
     models.playlistModel as never,
     models.themeModel as never,
+    models.userModel as never,
   );
   return { models, service };
 }
@@ -320,6 +332,41 @@ describe('PlaylistsService — list mine', () => {
     expect(list.playlists[0].coverImage).toBe('https://example.com/b.jpg');
     expect(list.playlists[1].id).toBe(second.id);
     expect(list.playlists[1].coverImage).toBeNull();
+  });
+});
+
+describe('PlaylistsService — owner identity (detail)', () => {
+  it("resolves the owner's displayName + username from the user document", async () => {
+    const { service } = makeService();
+    const created = await service.createPlaylist('user-1', { name: 'Mine' });
+    expect(created.ownerDisplayName).toBe('Zadid');
+    expect(created.ownerUsername).toBe('zadid');
+  });
+
+  it("carries the OWNER's name on a public read of someone else's playlist", async () => {
+    const { service } = makeService();
+    const owned = await service.createPlaylist('user-2', { name: 'Theirs' });
+    const read = await service.getPlaylist(owned.id);
+    expect(read.ownerDisplayName).toBe('Other User');
+    expect(read.ownerUsername).toBe('other_user');
+  });
+
+  it('yields nulls when the owner no longer resolves (deleted account)', async () => {
+    const { service } = makeService();
+    const created = await service.createPlaylist('user-9', { name: 'Ghost' });
+    expect(created.ownerDisplayName).toBeNull();
+    expect(created.ownerUsername).toBeNull();
+  });
+
+  it('yields nulls when no user model is wired (best-effort decoration)', async () => {
+    const models = makeModels();
+    const service = new PlaylistsService(
+      models.playlistModel as never,
+      models.themeModel as never,
+    );
+    const created = await service.createPlaylist('user-1', { name: 'Solo' });
+    expect(created.ownerDisplayName).toBeNull();
+    expect(created.ownerUsername).toBeNull();
   });
 });
 

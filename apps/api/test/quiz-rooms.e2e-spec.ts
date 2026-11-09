@@ -494,4 +494,45 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     expect(answers).toHaveLength(2);
     expect(answers.every((a) => a.autoLocked === true)).toBe(true);
   }, 20000);
+  it('room:list-public serves the lobby discovery list (Slice 5)', async () => {
+    const host = await connect(tokenFor(HOST, 'host'));
+    const guest = await connect(tokenFor(GUEST, 'guest'));
+
+    const pub = await emitAck(host, 'room:create', {
+      roomType: 'party',
+      poolMode: 'random',
+      guessType: 'song',
+      roundCount: 15,
+      maxPlayers: 4,
+      matchmaking: 'public',
+    });
+    expect(pub.success).toBe(true);
+
+    // An invite-only room created alongside must stay unlisted.
+    const inv = await emitAck(host, 'room:create', {
+      roomType: 'party',
+      poolMode: 'random',
+      guessType: 'anime',
+      roundCount: 5,
+      matchmaking: 'invite',
+    });
+    expect(inv.success).toBe(true);
+
+    const ack = await emitAck(guest, 'room:list-public', {});
+    expect(ack.success).toBe(true);
+    const rooms = ack.rooms as Record<string, unknown>[];
+    expect(Array.isArray(rooms)).toBe(true);
+    const row = rooms.find((r) => r.roomCode === pub.roomCode);
+    expect(row).toMatchObject({
+      roomType: 'party',
+      guessType: 'song',
+      roundCount: 15,
+      playerCount: 1,
+      maxPlayers: 4,
+      isFull: false,
+      hostUsername: 'host',
+    });
+    expect(rooms.some((r) => r.roomCode === inv.roomCode)).toBe(false);
+  }, 15000);
 });
+

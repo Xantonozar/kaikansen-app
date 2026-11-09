@@ -6,6 +6,7 @@ import type {
   HomeResponse,
   RelatedAnimeResponse,
   SearchResponse,
+  SeasonResponse,
   SimilarThemesResponse,
   ThemeDetail,
 } from '@kaikansen/contracts';
@@ -30,6 +31,20 @@ export class ThemesController {
     return this.themes.getHome();
   }
 
+  @Get('season')
+  @ApiOkResponse({
+    description:
+      'One season’s themes (the web’s /api/themes/seasonal port): ?season=SPRING&year=2026, optional ?type=OP|ED and ?page= (20 per page, sequence asc then avgRating desc). 400 when season/year are missing or invalid.',
+  })
+  season(
+    @Query('season') season?: string,
+    @Query('year') year?: string,
+    @Query('type') type?: string,
+    @Query('page') page?: string,
+  ): Promise<SeasonResponse> {
+    return this.themes.getSeasonThemes(season, year, type, page);
+  }
+
   @Get('themes/:slug')
   @ApiOkResponse({ description: 'One theme by slug (404 when unknown).' })
   theme(@Param('slug') slug: string): Promise<ThemeDetail> {
@@ -38,7 +53,8 @@ export class ThemesController {
 
   @Get('search')
   @ApiOkResponse({
-    description: 'Two-stage regex theme search (web parity, searchType: regex).',
+    description:
+      'Two-stage regex theme search (web parity, searchType: regex); page 1 also carries the web ALL-view anime and artist groups.',
   })
   search(
     @Query('q') q = '',

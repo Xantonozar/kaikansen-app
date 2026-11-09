@@ -18,6 +18,7 @@ import type {
   NotificationItem,
   NotificationsResponse,
   NotificationType,
+  RankTier,
   UserActivityItem,
   UserActivityResponse,
   UserPublicProfile,
@@ -26,6 +27,10 @@ import type {
 } from '@kaikansen/contracts';
 import { AuthService } from '../auth/auth.service';
 import { User, type UserDocument } from '../auth/user.schema';
+import {
+  UserRank,
+  type UserRankDocument,
+} from '../quiz/user-rank.schema';
 import { Rating, type RatingDocument } from '../library/rating.schema';
 import {
   WatchHistory,
@@ -221,6 +226,15 @@ export class SocialService {
     @Optional()
     @InjectModel(ThemeCache.name)
     private readonly themeModel?: Model<ThemeCacheDocument>,
+    /**
+     * Rank documents, read ONLY to enrich the network rows with
+     * their tier (the app's Network screen design shows it). Kept
+     * out of requireModels on purpose: the enrichment is additive —
+     * without the model the rows simply omit the field.
+     */
+    @Optional()
+    @InjectModel(UserRank.name)
+    private readonly userRankModel?: Model<UserRankDocument>,
   ) {}
 
   private requireModels(): SocialModels {
@@ -366,8 +380,20 @@ export class SocialService {
    * its identical twin, /friends): both full lists, populated
    * with username/displayName/avatarUrl/bio, in the Follow
    * queries' own (unsorted, unpaginated) order. Public.
+   *
+   * App enrichment (additive — the web's fields and order are
+   * untouched): the app's Network screen (§6.17) draws each row
+   * with the user's rank tier and a Follow/Following button in
+   * the CALLER's state, neither of which the web's projection
+   * carries. Each row therefore also gets `tier` (from the rank
+   * documents) and, when the request carried a valid Bearer <redacted>
+   * `isFollowing` for the caller. Anonymous reads omit
+   * `isFollowing`, mirroring the follow check's pre-lookup false.
    */
-  async getNetwork(username: string): Promise<NetworkResponse> {
+  async getNetwork(
+    username: string,
+    authorization?: string,
+  ): Promise<NetworkResponse> {
     const models = this.requireModels();
     const user = await this.findUserOr404(models, username);
 
@@ -385,7 +411,7 @@ export class SocialService {
       (u) => this.toNetworkUser(u),
     );
 
-    return {
+    const response: NetworkResponse = {
       // A row whose user account is gone maps to null — the web's
       // populate yields exactly that; mirrored.
       followers: (followerRows as FollowDoc[]).map(
@@ -395,6 +421,50 @@ export class SocialService {
         (f) => byId.get(String(f.followeeId)) ?? null,
       ),
     };
+    await this.enrichNetworkRows(models, response, authorization);
+    return response;
+  }
+
+  /**
+   * The network rows' app enrichment (see getNetwork). Tiers are
+   * a pure READ: a user with no rank document gets 'academy',
+   * exactly the default the rank reads materialise — this list
+   * never creates rank documents.
+   */
+  private async enrichNetworkRows(
+    models: SocialModels,
+    response: NetworkResponse,
+    authorization?: string,
+  ): Promise<void> {
+    const rows = [...response.followers, ...response.following].filter(
+      (u): u is NetworkUser => u !== null,
+    );
+    if (rows.length === 0) return;
+    const ids = [...new Set(rows.map((u) => u.id))];
+
+    if (this.userRankModel) {
+      const docs = (await this.userRankModel
+        .find({ userId: { $in: ids } })
+        .lean()
+        .exec()) as { userId?: unknown; tier?: unknown }[];
+      const tiers = new Map(docs.map((d) => [String(d.userId), d.tier]));
+      for (const row of rows) {
+        const tier = tiers.get(row.id);
+        row.tier = (typeof tier === 'string' ? tier : 'academy') as RankTier;
+      }
+    }
+
+    const viewerId = this.optionalUserId(authorization);
+    if (viewerId) {
+      const mine = (await models.follows
+        .find({ followerId: viewerId, followeeId: { $in: ids } })
+        .lean()
+        .exec()) as FollowDoc[];
+      const following = new Set(mine.map((f) => String(f.followeeId)));
+      for (const row of rows) {
+        row.isFollowing = following.has(row.id);
+      }
+    }
   }
 
   /* ---------------------------------------------------------------- */

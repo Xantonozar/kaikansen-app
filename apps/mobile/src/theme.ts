@@ -138,6 +138,9 @@ export const typeStyles = {
 
 /** Shell dimensions — DESIGN.md §5. */
 export const shell = {
-  headerHeight: 64,
+  // 56 = the Lavender Dusk mocks' header bar (Home v3 header is
+  // h-14), measured in layout-fidelity Slice 6; DESIGN.md §5's 64
+  // was the Gate-4 treatment the mocks superseded.
+  headerHeight: 56,
   tabBarHeight: 64,
 } as const;

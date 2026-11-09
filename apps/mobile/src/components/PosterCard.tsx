@@ -20,20 +20,26 @@ import { usePosterCardWidth } from '../layout';
  * translucent strips stand in for the web's CSS gradient — no gradient
  * library in the app). Everything else reads the active theme tokens.
  * Used only by the Home season rail.
+ *
+ * The Lavender Dusk Home mock draws the chip WITH the season
+ * ("SPRING '26 OP"): the caller passes that full label as
+ * `chipLabel` (layout-fidelity Slice 6); without it the chip falls
+ * back to the web's type-only form.
  */
 export function PosterCard({
   item,
   onPress,
+  chipLabel,
 }: {
   item: ThemeSummary;
   onPress?: () => void;
+  chipLabel?: string;
 }) {
   const theme = useTheme();
   const width = usePosterCardWidth();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const cover = item.animeCoverImage ?? item.animeCoverImageSmall;
-  // Type-only chip: the rail's section heading already names the season.
-  const chip = item.type;
+  const chip = chipLabel ?? item.type;
 
   return (
     <Pressable

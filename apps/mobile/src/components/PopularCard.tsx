@@ -132,9 +132,13 @@ const createStyles = (theme: Theme) =>
     gap: spacing.md,
     padding: spacing.md,
     borderRadius: radii.cardLg,
-    // Lavender Dusk mock: Popular rows are white glass cards on the
-    // lavender page, defined by a soft hairline.
-    backgroundColor: theme.surface,
+    // Lavender Dusk glass (design law #3), measured from Home v3 in
+    // Slice 6: the Popular rows are FROSTED — white at 65% over the
+    // lavender page, defined by a soft hairline. RN has no backdrop
+    // blur in this stack, so the measured translucency value is the
+    // treatment (the handoff pack's accepted implementation); the
+    // dark theme's surface takes the same 65% over its background.
+    backgroundColor: withOpacity(theme.surface, 0.65),
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
   },

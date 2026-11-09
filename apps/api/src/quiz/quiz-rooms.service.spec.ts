@@ -711,3 +711,77 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect(left?.payload).toMatchObject({ userId: GUEST, reason: 'disconnect' });
   });
 });
+
+describe('QuizRoomsService — public rooms list (Slice 5)', () => {
+  it('returns an empty list when no public room is waiting', async () => {
+    const models = makeFakeModels();
+    const ack = await models.service.listPublicRooms();
+    expect(ack).toEqual({ success: true, rooms: [] });
+  });
+
+  it('lists waiting public rooms with host + capacity, excludes invite rooms, sorts full rooms last', async () => {
+    const models = makeFakeModels();
+
+    const party = await models.service.createRoom(HOST, {
+      roomType: 'party',
+      poolMode: 'random',
+      guessType: 'song',
+      roundCount: 15,
+      maxPlayers: 3,
+      matchmaking: 'public',
+    });
+    expect(party.success).toBe(true);
+
+    // Invite-only rooms never appear in the discovery list.
+    await models.service.createRoom(HOST, { ...partyCreate });
+
+    // Hostless public duel via matchmaking (the web's public flow).
+    const duel = await models.service.publicMatchmaking(GUEST, {
+      roomType: 'duel',
+      poolMode: 'random',
+      guessType: 'artist',
+    });
+    expect(duel.success).toBe(true);
+
+    const ack = await models.service.listPublicRooms();
+    expect(ack.success).toBe(true);
+    expect(ack.rooms).toHaveLength(2);
+
+    const partyRow = ack.rooms!.find((r) => r.roomCode === party.roomCode);
+    expect(partyRow).toMatchObject({
+      roomType: 'party',
+      guessType: 'song',
+      roundCount: 15,
+      playerCount: 1,
+      maxPlayers: 3,
+      isFull: false,
+      hostUsername: 'host',
+      hostAvatar: 'https://img/host.png',
+    });
+
+    // Hostless duel: the host display falls back to the first
+    // player's row (the matchmaking creator).
+    const duelRow = ack.rooms!.find((r) => r.roomCode === duel.roomCode);
+    expect(duelRow).toMatchObject({
+      roomType: 'duel',
+      guessType: 'artist',
+      playerCount: 1,
+      maxPlayers: 2,
+      isFull: false,
+      hostUsername: 'guest',
+    });
+
+    // Fill the party room: it stays listed, flagged full, and sorts
+    // after the still-joinable duel.
+    await models.service.joinByCode(GUEST, party.roomCode!);
+    await models.service.joinByCode(GUEST2, party.roomCode!);
+    const filled = await models.service.listPublicRooms();
+    expect(filled.rooms).toHaveLength(2);
+    expect(filled.rooms![0].roomCode).toBe(duel.roomCode);
+    expect(filled.rooms![1]).toMatchObject({
+      roomCode: party.roomCode,
+      playerCount: 3,
+      isFull: true,
+    });
+  });
+});

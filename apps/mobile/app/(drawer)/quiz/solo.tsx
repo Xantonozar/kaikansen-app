@@ -30,17 +30,15 @@ import {
 } from 'lucide-react-native';
 import type {
   QuizGuessType,
-  QuizLeaderboardEntry,
   QuizSource,
   SoloAnswerResponse,
   SoloQuestion,
+  UserRankProfile,
 } from '@kaikansen/contracts';
 import { ApiRequestError } from '../../../src/api';
-import {
-  createSoloGame,
-  fetchQuizLeaderboard,
-  submitSoloAnswer,
-} from '../../../src/quizApi';
+import { createSoloGame, submitSoloAnswer } from '../../../src/quizApi';
+import { fetchMyRank } from '../../../src/socialApi';
+import { RankCard } from '../../../src/components/RankCard';
 import { CountdownRing } from '../../../src/components/CountdownRing';
 import { QuizMedia } from '../../../src/components/QuizMedia';
 import { QuizOptions } from '../../../src/components/QuizOptions';
@@ -65,6 +63,13 @@ const GUESS_LABEL: Record<QuizGuessType, string> = {
   artist: 'Guess the artist',
 };
 
+/** Title-case variant for the results screen's subtitle (§6.25). */
+const RESULTS_GUESS_LABEL: Record<QuizGuessType, string> = {
+  anime: 'Guess the Anime',
+  title: 'Guess the Song',
+  artist: 'Guess the Artist',
+};
+
 /**
  * Solo game (Slice M4) — a server-held 10-question game over the
  * S4 REST surface. The client renders the question theme inline
@@ -73,8 +78,14 @@ const GUESS_LABEL: Record<QuizGuessType, string> = {
  * chosen option verbatim — or null on timeout/skip. The answer
  * response drives the feedback state (correct option revealed,
  * points + streak), then the game auto-advances (a Next button
- * skips the wait). The end screen shows the final score and the
- * leaderboard for this quiz type.
+ * skips the wait). The end screen is the designed results screen
+ * (§6.25): final score card with the run's Correct / Accuracy /
+ * Best Streak stats, and the rank card showing the player's
+ * CURRENT rank state. RP is multiplayer-only in this system — the
+ * API applies it solely when a multiplayer room finishes (the
+ * web's rank-utils run from room routes only; solo games record
+ * attempts and award no RP) — so the card is fed by /rank/me and
+ * deliberately shows NO "+N RP" award for a solo run.
  *
  * Errors are never swallowed: a failed create lands on a retry
  * screen; a failed answer keeps the live question with the error
@@ -108,7 +119,10 @@ export default function SoloQuizScreen() {
   const [correctCount, setCorrectCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [fatalMessage, setFatalMessage] = useState<string | null>(null);
-  const [board, setBoard] = useState<QuizLeaderboardEntry[] | null>(null);
+  const [rankProfile, setRankProfile] = useState<UserRankProfile | null>(
+    null,
+  );
+  const [rankLoading, setRankLoading] = useState(false);
 
   const mountedRef = useRef(true);
   const submittingRef = useRef(false);
@@ -148,7 +162,8 @@ export default function SoloQuizScreen() {
     setStreak(0);
     setMaxStreak(0);
     setCorrectCount(0);
-    setBoard(null);
+    setRankProfile(null);
+    setRankLoading(false);
     createSoloGame({ quizType, source })
       .then((state) => {
         if (!live) return;
@@ -189,19 +204,24 @@ export default function SoloQuizScreen() {
     advancedForRef.current = current.answeredCount;
     if (current.gameOver || !current.nextQuestion) {
       setPhase('over');
-      void fetchQuizLeaderboard(quizType)
-        .then((res) => {
-          if (mountedRef.current) setBoard(res.entries);
+      // The results rank card shows the player's CURRENT rank
+      // state (see the docblock: solo runs award no RP). A failed
+      // fetch simply omits the card — the score stands on its own.
+      setRankLoading(true);
+      void fetchMyRank()
+        .then((profile) => {
+          if (mountedRef.current) setRankProfile(profile);
         })
         .catch(() => {
-          // The board is garnish on the end screen; its failure
-          // leaves the score standing and the list simply absent.
-          if (mountedRef.current) setBoard([]);
+          if (mountedRef.current) setRankProfile(null);
+        })
+        .finally(() => {
+          if (mountedRef.current) setRankLoading(false);
         });
     } else {
       startQuestion(current.nextQuestion, timeLimit);
     }
-  }, [quizType, startQuestion, timeLimit]);
+  }, [startQuestion, timeLimit]);
 
   const submit = useCallback(
     async (answer: string | null) => {
@@ -364,71 +384,83 @@ export default function SoloQuizScreen() {
       </View>
     );
   } else if (phase === 'over') {
+    const accuracy =
+      totalQuestions > 0
+        ? Math.round((correctCount / totalQuestions) * 100)
+        : 0;
+    const statCell = (value: string, label: string) => (
+      <View key={label} style={styles.statCell}>
+        <Text style={styles.statValue}>{value}</Text>
+        <Text style={styles.statLabel}>{label}</Text>
+      </View>
+    );
     body = (
       <ScrollView
         contentContainerStyle={styles.overContent}
         showsVerticalScrollIndicator={false}
       >
-        <View style={styles.overCard}>
-          <View style={styles.trophyTile}>
-            <Trophy size={26} color={theme.accent} strokeWidth={2} />
-          </View>
-          <Text style={styles.overScore}>{totalScore}</Text>
-          <Text style={styles.overMeta}>
-            {correctCount} of {totalQuestions} correct · best streak{' '}
-            {maxStreak}
+        <View style={styles.trophyDisc}>
+          <Trophy size={30} color={theme.accent} strokeWidth={2} />
+        </View>
+        <Text style={styles.overTitle}>Run Complete!</Text>
+        <Text style={styles.overSub}>
+          Solo Run · {RESULTS_GUESS_LABEL[quizType]}
+        </Text>
+
+        <View style={styles.scoreCard}>
+          <Text style={styles.scoreLabel}>FINAL SCORE</Text>
+          <Text style={styles.overScore}>
+            {totalScore.toLocaleString('en-US')}
           </Text>
-          <View style={styles.overButtons}>
-            <Pressable
-              onPress={() => setRunId((n) => n + 1)}
-              accessibilityRole="button"
-              accessibilityLabel="Play again"
-              style={({ pressed }) => [
-                styles.primaryButton,
-                styles.overButton,
-                pressed && styles.pressed,
-              ]}
-            >
-              <RotateCcw size={17} color={theme.onAccent} strokeWidth={2} />
-              <Text style={styles.primaryButtonText}>Play again</Text>
-            </Pressable>
-            <Pressable
-              onPress={goBack}
-              accessibilityRole="button"
-              accessibilityLabel="Back to quiz home"
-              style={({ pressed }) => [
-                styles.ghostButton,
-                styles.overButton,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Text style={styles.ghostButtonText}>Quiz home</Text>
-            </Pressable>
+          <View style={styles.scoreDivider} />
+          <View style={styles.statRow}>
+            {statCell(
+              `${correctCount}/${totalQuestions}`,
+              'Correct',
+            )}
+            {statCell(`${accuracy}%`, 'Accuracy')}
+            {statCell(`×${maxStreak}`, 'Best Streak')}
           </View>
         </View>
-        {board !== null && board.length > 0 && (
-          <View style={styles.boardCard}>
-            <Text style={styles.boardTitle}>
-              Top {GUESS_LABEL[quizType].replace('Guess the ', '')} attempts
-            </Text>
-            {board.slice(0, 5).map((entry, i) => (
-              <View key={entry.id} style={styles.boardRow}>
-                <Text style={styles.boardRank}>{i + 1}</Text>
-                <Text style={styles.boardName} numberOfLines={1}>
-                  {entry.author?.displayName ??
-                    entry.author?.username ??
-                    'Guest'}
-                </Text>
-                {entry.correct ? (
-                  <Check size={14} color={theme.accent} strokeWidth={2.5} />
-                ) : (
-                  <X size={14} color={theme.muted} strokeWidth={2.5} />
-                )}
-                <Text style={styles.boardScore}>{entry.score}</Text>
-              </View>
-            ))}
+
+        {rankProfile ? (
+          <View style={styles.rankWrap}>
+            <RankCard profile={rankProfile} />
           </View>
-        )}
+        ) : rankLoading ? (
+          <View style={styles.rankLoading}>
+            <ActivityIndicator color={theme.accent} />
+          </View>
+        ) : null}
+
+        <View style={styles.overButtons}>
+          <Pressable
+            onPress={() => setRunId((n) => n + 1)}
+            accessibilityRole="button"
+            accessibilityLabel="Play again"
+            style={({ pressed }) => [
+              styles.primaryButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.primaryButtonText}>Play Again</Text>
+          </Pressable>
+          <Pressable
+            onPress={goBack}
+            accessibilityRole="button"
+            accessibilityLabel="Back to quiz"
+            style={({ pressed }) => [
+              styles.secondaryButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.secondaryButtonText}>Back to Quiz</Text>
+          </Pressable>
+        </View>
+
+        <Text style={styles.overFooter}>
+          Your answers were saved to your history.
+        </Text>
       </ScrollView>
     );
   } else if (question) {
@@ -784,75 +816,103 @@ const createStyles = (theme: Theme) =>
       padding: spacing.screenEdge,
       paddingBottom: spacing.xxxl,
       gap: spacing.lg,
-    },
-    overCard: {
-      backgroundColor: theme.surface,
-      borderRadius: radii.card,
-      padding: spacing.xl,
       alignItems: 'center',
-      gap: spacing.sm,
-    },
-    trophyTile: {
-      width: 56,
-      height: 56,
-      borderRadius: radii.md,
-      backgroundColor: withOpacity(theme.accent, 0.14),
-      alignItems: 'center',
-      justifyContent: 'center',
     },
     overScore: {
       ...typeStyles.display,
       fontSize: 40,
       color: theme.text,
     },
-    overMeta: {
+    trophyDisc: {
+      width: 76,
+      height: 76,
+      borderRadius: radii.pill,
+      backgroundColor: theme.accentContainer,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginTop: spacing.md,
+    },
+    overTitle: {
+      ...typeStyles.heading,
+      fontSize: 24,
+      color: theme.text,
+      textAlign: 'center',
+    },
+    overSub: {
       ...typeStyles.body,
       color: theme.muted,
       textAlign: 'center',
+      marginTop: -spacing.sm,
     },
-    overButtons: {
-      flexDirection: 'row',
-      gap: spacing.sm,
-      marginTop: spacing.sm,
-    },
-    overButton: {
-      flex: 1,
-    },
-    boardCard: {
+    scoreCard: {
+      alignSelf: 'stretch',
       backgroundColor: theme.surface,
       borderRadius: radii.card,
-      padding: spacing.lg,
-      gap: spacing.xs,
-    },
-    boardTitle: {
-      ...typeStyles.sectionLabel,
-      color: theme.text,
-      marginBottom: spacing.xs,
-    },
-    boardRow: {
-      flexDirection: 'row',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      padding: spacing.xl,
       alignItems: 'center',
       gap: spacing.sm,
-      paddingVertical: spacing.xs + 2,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: theme.border,
     },
-    boardRank: {
-      ...typeStyles.mono,
+    scoreLabel: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      letterSpacing: 1.2,
       color: theme.muted,
-      width: 20,
-      textAlign: 'center',
     },
-    boardName: {
-      fontFamily: fontFamilies.bodyStrong, fontSize: 14,
-      color: theme.text,
+    scoreDivider: {
+      alignSelf: 'stretch',
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: theme.border,
+      marginVertical: spacing.sm,
+    },
+    statRow: {
+      alignSelf: 'stretch',
+      flexDirection: 'row',
+    },
+    statCell: {
       flex: 1,
+      alignItems: 'center',
+      gap: 2,
     },
-    boardScore: {
-      ...typeStyles.mono,
+    statValue: {
+      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 15,
       color: theme.text,
-      minWidth: 34,
-      textAlign: 'right',
+    },
+    statLabel: {
+      ...typeStyles.caption,
+      color: theme.muted,
+    },
+    rankWrap: {
+      alignSelf: 'stretch',
+    },
+    rankLoading: {
+      alignSelf: 'stretch',
+      alignItems: 'center',
+      paddingVertical: spacing.lg,
+    },
+    overButtons: {
+      alignSelf: 'stretch',
+      gap: spacing.sm,
+    },
+    secondaryButton: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.base,
+      minHeight: 48,
+      paddingHorizontal: spacing.lg,
+    },
+    secondaryButtonText: {
+      ...typeStyles.sectionLabel,
+      color: theme.accent,
+    },
+    overFooter: {
+      ...typeStyles.caption,
+      color: theme.muted,
+      textAlign: 'center',
     },
     pressed: {
       opacity: 0.85,

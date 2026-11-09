@@ -8,6 +8,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import type { Model, Types } from 'mongoose';
 import type {
   CreateRoomRequest,
+  PublicRoomListItem,
   PublicRoomRequest,
   QuizRoomAck,
   QuizRoomPlayer,
@@ -972,6 +973,52 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       roomCode: room.roomCode,
       room: this.toRoomState(room),
     };
+  }
+
+  /**
+   * room:list-public — the lobby's public-rooms discovery list
+   * (Slice 5). This API's own addition: the web has no room list
+   * (its public flow is the join-or-create matchmaking above), but
+   * the app's lobby design draws the open rooms, so they are served
+   * from the same room documents. Read-only; waiting public rooms
+   * only, joinable rooms first (the design renders full rooms last
+   * with a disabled "Full" state rather than hiding them), newest
+   * first within each group, capped at 20.
+   */
+  async listPublicRooms(): Promise<QuizRoomAck> {
+    const models = this.requireModels();
+    const docs = (await models.rooms
+      .find({ matchmaking: 'public', status: 'waiting' })
+      .sort({ createdAt: -1 })
+      .limit(40)
+      .lean()
+      .exec()) as unknown as RoomDoc[];
+    const items: PublicRoomListItem[] = docs.map((room) => {
+      const maxPlayers = room.settings?.maxPlayers ?? 0;
+      const playerCount = room.players?.length ?? 0;
+      // The host's display data rides their own player row; public
+      // duels are hostless (hostId null) and fall back to the first
+      // player's row.
+      const hostRow =
+        room.players?.find(
+          (p) => room.hostId && String(p.userId) === String(room.hostId),
+        ) ?? room.players?.[0];
+      return {
+        roomId: String(room._id),
+        roomCode: room.roomCode,
+        roomType: room.roomType as PublicRoomListItem['roomType'],
+        guessType:
+          room.settings?.guessType as PublicRoomListItem['guessType'],
+        roundCount: room.settings?.roundCount ?? 0,
+        playerCount,
+        maxPlayers,
+        isFull: maxPlayers > 0 && playerCount >= maxPlayers,
+        hostUsername: hostRow?.username ?? 'Unknown',
+        hostAvatar: hostRow?.avatar ?? null,
+      };
+    });
+    items.sort((a, b) => Number(a.isFull) - Number(b.isFull));
+    return { success: true, rooms: items.slice(0, 20) };
   }
 
   /** room:subscribe — attach to a room the player already belongs to. */

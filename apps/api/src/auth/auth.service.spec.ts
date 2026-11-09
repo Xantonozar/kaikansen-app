@@ -501,6 +501,41 @@ describe('AuthService', () => {
       );
     });
 
+    it('toggles isPublic: the additive field persists and round-trips through /auth/me', async () => {
+      const { model, service, reg } = await seeded();
+      expect(reg.user.isPublic).toBe(true);
+      const off = await service.updateProfile(reg.user.id, {
+        isPublic: false,
+      });
+      expect(off.isPublic).toBe(false);
+      expect(model.users[0].isPublic).toBe(false);
+      expect(model.findByIdAndUpdate).toHaveBeenCalledWith(
+        reg.user.id,
+        { $set: { isPublic: false } },
+        { new: true },
+      );
+      // What PATCH returns is exactly what GET /auth/me serves.
+      await expect(service.me(reg.user.id)).resolves.toEqual(off);
+      const on = await service.updateProfile(reg.user.id, {
+        isPublic: true,
+      });
+      expect(on.isPublic).toBe(true);
+      expect(model.users[0].isPublic).toBe(true);
+    });
+
+    it('isPublic is checked after the web fields: avatarUrl keeps first-issue priority', async () => {
+      const { model, service, reg } = await seeded();
+      const err = await service
+        .updateProfile(reg.user.id, {
+          isPublic: 'not-a-boolean',
+          avatarUrl: 'not-a-url',
+        } as never)
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).message).toBe('Invalid URL');
+      expect(model.findByIdAndUpdate).not.toHaveBeenCalled();
+    });
+
     it('accepts the boundary values (50-char name, 200-char bio, empty bio)', async () => {
       const { service, reg } = await seeded();
       const res = await service.updateProfile(reg.user.id, {
@@ -544,6 +579,11 @@ describe('AuthService', () => {
         'a boolean avatarUrl',
         { avatarUrl: true },
         'Invalid input: expected string, received boolean',
+      ],
+      [
+        'a non-boolean isPublic',
+        { isPublic: 'yes' },
+        'Invalid input: expected boolean, received string',
       ],
       [
         'an array body',

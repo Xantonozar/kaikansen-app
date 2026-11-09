@@ -20,6 +20,11 @@ import { fetchHome, fixtureMode } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { useFavorites } from '../../../src/favoritesStore';
 import { fetchHistory } from '../../../src/libraryApi';
+import {
+  queueItemFromSummary,
+  queueItemsFromSummaries,
+  usePlaybackSession,
+} from '../../../src/playback-context';
 import { fetchFriendsActivity } from '../../../src/socialApi';
 import { Avatar } from '../../../src/components/Avatar';
 import { PopularCard } from '../../../src/components/PopularCard';
@@ -36,6 +41,11 @@ import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
 type TypeFilter = 'ALL' | ThemeType;
+
+/** 'SPRING' → 'Spring' — the mocks title-case the season name. */
+function seasonTitleCase(season: string): string {
+  return season.charAt(0) + season.slice(1).toLowerCase();
+}
 
 /** How many feed rows Home previews; the full feed lives on Social. */
 const HOME_FEED_PREVIEW = 5;
@@ -121,9 +131,22 @@ export default function HomeScreen() {
     }, [loadFeed, loadHistory]),
   );
 
+  const { startQueue } = usePlaybackSession();
   const continuePlay = useCallback(
     (entry: WatchHistoryEntry) => {
       if (!entry.theme) return;
+      // The rail is the queue (Slice 2.5): the shown history, in
+      // order, claimed in the tapped entry's mode — Next walks
+      // back through what you were listening to.
+      if (history) {
+        const playable = history.filter((e) => e.theme !== null);
+        const items = playable.map((e) => ({
+          ...queueItemFromSummary(e.theme!),
+          atEntryId: e.atEntryId,
+        }));
+        const index = playable.findIndex((e) => e.id === entry.id);
+        if (index >= 0) startQueue(items, index, entry.mode);
+      }
       router.push({
         pathname: '/player',
         params: {
@@ -135,7 +158,7 @@ export default function HomeScreen() {
         },
       });
     },
-    [router],
+    [router, history, startQueue],
   );
 
   const openTheme = useCallback(
@@ -229,7 +252,7 @@ export default function HomeScreen() {
           <View>
             <Text style={styles.eyebrow}>Current Season</Text>
             <Text style={styles.displayTitle}>
-              {home.season.season} {home.season.year}
+              {seasonTitleCase(home.season.season)} {home.season.year}
             </Text>
           </View>
           <Pressable
@@ -251,6 +274,7 @@ export default function HomeScreen() {
               key={item.slug}
               item={item}
               onPress={() => openTheme(item.slug)}
+              chipLabel={`${home.season.season} '${String(home.season.year).slice(2)} ${item.type}`}
             />
           ))}
           {home.seasonRail.length === 0 && (
@@ -285,8 +309,18 @@ export default function HomeScreen() {
             with a play disc; tapping resumes in the entry's mode. */}
         {history !== null && history.length > 0 && (
           <>
-            <View style={styles.sectionHeader}>
+            <View style={[styles.sectionHeader, styles.feedHeader]}>
               <Text style={styles.heading}>Continue Listening</Text>
+              <Pressable
+                onPress={() =>
+                  router.push('/(drawer)/(tabs)/library?segment=recent')
+                }
+                hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel="View all listening history"
+              >
+                <Text style={styles.feedLink}>View All</Text>
+              </Pressable>
             </View>
             <ScrollView
               horizontal
@@ -420,7 +454,7 @@ export default function HomeScreen() {
             filters server-side — FR-HOME-01). Rows are the web's rounded
             Popular cards with play + heart. */}
         <View style={[styles.sectionHeader, styles.popularHeader]}>
-          <Text style={styles.heading}>Popular Themes</Text>
+          <Text style={styles.heading}>🔥 Popular Themes</Text>
           <View style={styles.segmented}>
             {(['ALL', 'OP', 'ED'] as TypeFilter[]).map((value) => {
               const active = typeFilter === value;
@@ -451,11 +485,22 @@ export default function HomeScreen() {
           </View>
         </View>
         <View style={styles.list}>
-          {popular.map((item) => (
+          {popular.map((item, index) => (
             <PopularCard
               key={item.slug}
               item={item}
               onPress={() => openTheme(item.slug)}
+              onPlay={() => {
+                // The shown (type-filtered) Popular list is the
+                // queue (Slice 2.5): the play disc claims it at
+                // this row, then opens the player — the row body
+                // still opens the theme detail as before.
+                startQueue(queueItemsFromSummaries(popular), index, 'watch');
+                router.push({
+                  pathname: '/player',
+                  params: { slug: item.slug, mode: 'watch' },
+                });
+              }}
               saved={favorites.isFavorite(item.slug)}
               savePending={favorites.isPending(item.slug)}
               onToggleSave={() => void favorites.toggle(item.slug)}

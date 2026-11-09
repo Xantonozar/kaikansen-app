@@ -47,4 +47,10 @@ describe('Themes without a database (e2e)', () => {
   it('GET /search returns 503', () => {
     return request(app.getHttpServer()).get('/search?q=test').expect(503);
   });
+
+  it('GET /season returns 503', () => {
+    return request(app.getHttpServer())
+      .get('/season?season=SPRING&year=2026')
+      .expect(503);
+  });
 });

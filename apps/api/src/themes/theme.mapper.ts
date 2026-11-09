@@ -40,6 +40,11 @@ export function toThemeSummary(doc: ThemeDoc): ThemeSummary {
     totalRatings: doc.totalRatings ?? 0,
     totalWatches: doc.totalWatches ?? 0,
     totalListens: doc.totalListens ?? 0,
+    // The representative duration is the document's own field —
+    // the same rule toThemeDetail serves (NOT an entry pick: the
+    // entries' durations are per-version and the web's stored
+    // per-theme duration is this field).
+    duration: doc.duration ?? null,
     isPopular: doc.isPopular ?? false,
     popularRank: doc.popularRank ?? null,
   };

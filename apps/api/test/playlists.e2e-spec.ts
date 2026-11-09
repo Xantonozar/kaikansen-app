@@ -9,6 +9,7 @@ import { AccessTokenGuard } from './../src/auth/access-token.guard';
 import { AnilistClient } from './../src/auth/anilist.client';
 import { AuthService } from './../src/auth/auth.service';
 import { ThemeCache } from './../src/themes/theme-cache.schema';
+import { User } from './../src/auth/user.schema';
 import { Playlist } from './../src/playlists/playlist.schema';
 import { PlaylistsController } from './../src/playlists/playlists.controller';
 import { PlaylistsService } from './../src/playlists/playlists.service';
@@ -284,7 +285,17 @@ function makeFakeModels() {
     },
   };
 
-  return { playlistModel, themeModel };
+  const users: Record<string, unknown>[] = [
+    { _id: 'user-1', username: 'userone', displayName: 'User One' },
+    { _id: 'user-2', username: 'usertwo', displayName: 'User Two' },
+  ];
+  const userModel = {
+    docs: users,
+    findById: (id: unknown) =>
+      queryOf(users.find((u) => String(u._id) === String(id)) ?? null),
+  };
+
+  return { playlistModel, themeModel, userModel };
 }
 
 const E2E_SECRET = ['e2e', 'playlists', 'access', 'secret'].join('-');
@@ -332,6 +343,10 @@ describe('Playlists flow with mocked models (e2e)', () => {
         {
           provide: getModelToken(ThemeCache.name),
           useValue: models.themeModel,
+        },
+        {
+          provide: getModelToken(User.name),
+          useValue: models.userModel,
         },
       ],
     }).compile();
@@ -382,6 +397,25 @@ describe('Playlists flow with mocked models (e2e)', () => {
 
     const read = await http.get(`/playlists/${id}`).expect(200);
     expect(read.body.name).toBe('Road Trip');
+  });
+
+  it("serves the owner's public identity on the detail (the design's by-line)", async () => {
+    const http = request(app.getHttpServer());
+
+    // The seeded playlist belongs to user-2 — the public read
+    // carries THEIR display name + username, tokenless.
+    const seeded = await http.get(`/playlists/${SEEDED_PLAYLIST}`).expect(200);
+    expect(seeded.body.ownerDisplayName).toBe('User Two');
+    expect(seeded.body.ownerUsername).toBe('usertwo');
+
+    // And a fresh create answers with the creator's identity.
+    const created = await http
+      .post('/playlists')
+      .set(asUser1())
+      .send({ name: 'Signed' })
+      .expect(200);
+    expect(created.body.ownerDisplayName).toBe('User One');
+    expect(created.body.ownerUsername).toBe('userone');
   });
 
   it('rejects a create without a name, with the web’s 400 message', async () => {

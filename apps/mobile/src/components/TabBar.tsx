@@ -4,6 +4,7 @@ import { House, Library, Trophy, Users } from 'lucide-react-native';
 import type { ComponentType } from 'react';
 import { radii, shell, spacing, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
+import { MiniPlayer } from './MiniPlayer';
 
 type IconComponent = ComponentType<{ size?: number; color?: string; strokeWidth?: number }>;
 
@@ -38,17 +39,24 @@ export interface TabBarProps {
  * treatment (owner decision 2026-11-09, all 38 approved screens): the bar
  * is ICON-ONLY — the active tab's icon sits in a solid mauveDeep pill,
  * inactive tabs are bare icons. Labels survive as accessibility labels.
+ *
+ * Above the bar sits the mini player (layout-fidelity Slice 1): the
+ * finalized mocks float it over the page background just above the
+ * tab row on every tab screen while a session is playing. It renders
+ * nothing when no session is loaded.
  */
 export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   return (
-    <View
-      style={[
-        styles.bar,
-        { paddingBottom: insets.bottom, height: shell.tabBarHeight + insets.bottom },
-      ]}
-    >
+    <View style={styles.shell}>
+      <MiniPlayer placement="tabBar" />
+      <View
+        style={[
+          styles.bar,
+          { paddingBottom: insets.bottom, height: shell.tabBarHeight + insets.bottom },
+        ]}
+      >
       {state.routes.map((route, index) => {
         const tab = TABS[route.name];
         if (!tab) return null;
@@ -73,12 +81,16 @@ export function TabBar({ state, navigateToTab, insets }: TabBarProps) {
           </Pressable>
         );
       })}
+      </View>
     </View>
   );
 }
 
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
+  shell: {
+    backgroundColor: theme.background,
+  },
   bar: {
     flexDirection: 'row',
     alignItems: 'center',

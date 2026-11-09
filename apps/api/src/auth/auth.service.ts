@@ -680,6 +680,7 @@ function parseProfileUpdate(dto: UpdateProfileRequest): {
   displayName?: string;
   bio?: string;
   avatarUrl?: string | null;
+  isPublic?: boolean;
 } {
   const body: unknown = dto;
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
@@ -692,6 +693,7 @@ function parseProfileUpdate(dto: UpdateProfileRequest): {
     displayName?: string;
     bio?: string;
     avatarUrl?: string | null;
+    isPublic?: boolean;
   } = {};
 
   if (raw.displayName !== undefined) {
@@ -746,6 +748,23 @@ function parseProfileUpdate(dto: UpdateProfileRequest): {
       }
     }
     updates.avatarUrl = value as string | null;
+  }
+
+  // isPublic is NOT part of the web's edit schema (the web has no
+  // toggle UI) — it is accepted additively for the app's Edit
+  // Profile design (§6.28), whose Public-profile switch needs a
+  // writable field. The field and its effect already exist on both
+  // stacks: people search only returns public profiles. The check
+  // runs AFTER avatarUrl so the web fields keep their first-issue
+  // order; the message follows the same zod v4 wording pattern.
+  if (raw.isPublic !== undefined) {
+    const value = raw.isPublic;
+    if (typeof value !== 'boolean') {
+      throw new BadRequestException(
+        `Invalid input: expected boolean, received ${zodReceived(value)}`,
+      );
+    }
+    updates.isPublic = value;
   }
 
   return updates;

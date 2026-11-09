@@ -10,26 +10,28 @@ import {
   Image,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import * as Clipboard from 'expo-clipboard';
 import {
   Check,
   ChevronLeft,
-  Copy,
   Crown,
+  Hourglass,
   LogOut,
   Play,
+  Share2,
   Swords,
   Trophy,
   Users,
 } from 'lucide-react-native';
 import type {
   PlayerAnsweredEvent,
+  PlayerRankSummary,
   QuizPoolMode,
   QuizRoomAck,
   QuizRoomPlayer,
@@ -41,6 +43,7 @@ import type {
   RoundStartedEvent,
 } from '@kaikansen/contracts';
 import { useAuth } from '../../../src/auth';
+import { fetchPlayerRanks } from '../../../src/socialApi';
 import {
   clearRoomOwnership,
   disconnectQuizSocket,
@@ -82,14 +85,16 @@ const POOL_LABEL: Record<QuizPoolMode, string> = {
  * `room:subscribe` as the resync primitive (mount, reconnect, and
  * any event that doesn't carry full state). The phases:
  *
- * - waiting: code + copy, player list with ready state and the
- *   host crown, the host's settings editor (room:update-settings),
- *   Ready toggle, host Start (duels auto-start on both-ready —
- *   server behaviour, the round-started broadcast just arrives);
- * - playing: the round's media + options with a countdown ring
- *   derived from the server's startedAt (the server owns the round
+ * - waiting: code + Invite (share sheet), the settings chip
+ *   summary, player list with rank sublines and HOST/Ready pills,
+ *   the host's settings editor (room:update-settings), Ready
+ *   toggle, host Start (duels auto-start on both-ready — server
+ *   behaviour, the round-started broadcast just arrives);
+ * - playing: the players strip (answered badges + waiting line),
+ *   the round's media + options with a countdown ring derived
+ *   from the server's startedAt (the server owns the round
  *   timer), lock-in on answer, who's-answered from
- *   room:player-answered;
+ *   room:player-answered, and the Live standings card;
  * - reveal: room:round-ended — correct answer, everyone's results,
  *   running scoreboard; the host (or anyone in a hostless public
  *   room) advances with room:next;
@@ -127,8 +132,15 @@ export default function QuizRoomScreen() {
   const [busy, setBusy] = useState<string | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const [closedNote, setClosedNote] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [mediaMissing, setMediaMissing] = useState(false);
+  /**
+   * Waiting-roster rank standings for the design's "Chunin ·
+   * 1,270 RP" player sublines (Slice 6) — GET /rank/players,
+   * read-only; the room payload itself carries no tier/RP.
+   */
+  const [playerRanks, setPlayerRanks] = useState<
+    Record<string, PlayerRankSummary>
+  >({});
 
   const mountedRef = useRef(true);
   const leftRef = useRef(false);
@@ -415,17 +427,14 @@ export default function QuizRoomScreen() {
     }
   }, [goHome, roomId]);
 
-  const onCopyCode = useCallback(() => {
+  const onInvite = useCallback(() => {
     if (!room) return;
-    void Clipboard.setStringAsync(room.roomCode)
-      .then(() => {
-        if (!mountedRef.current) return;
-        setCopied(true);
-        setTimeout(() => {
-          if (mountedRef.current) setCopied(false);
-        }, 2000);
-      })
-      .catch(() => undefined);
+    // The design's code card carries an "Invite friends" share
+    // action (Slice 6) — the system share sheet, carrying the
+    // code. (The pre-fidelity build copied the code instead.)
+    void Share.share({
+      message: `Join my Kaikansen quiz room! Room code: ${room.roomCode}`,
+    }).catch(() => undefined);
   }, [room]);
 
   const onAnswer = useCallback(
@@ -468,6 +477,26 @@ export default function QuizRoomScreen() {
     return [...room.players].sort((a, b) => b.totalScore - a.totalScore);
   }, [room]);
 
+  // Waiting-roster rank sublines (Slice 6): one batched read-only
+  // fetch whenever the waiting membership changes; failures leave
+  // the sublines empty rather than inventing standings.
+  const waitingIds =
+    phase === 'waiting' && room
+      ? room.players.map((p) => p.userId).join(',')
+      : '';
+  useEffect(() => {
+    if (!waitingIds) return;
+    let live = true;
+    fetchPlayerRanks(waitingIds.split(','))
+      .then((map) => {
+        if (live) setPlayerRanks(Object.fromEntries(map));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [waitingIds]);
+
   const deadlineMs = liveRound
     ? Date.parse(liveRound.startedAt) + liveRound.timeLimitSeconds * 1000
     : 0;
@@ -492,6 +521,7 @@ export default function QuizRoomScreen() {
     const host = room?.hostId === player.userId;
     const answered = answeredUsers.has(player.userId);
     const rank = ranks[player.userId];
+    const standing = playerRanks[player.userId];
     return (
       <View key={player.userId} style={styles.playerRow}>
         {player.avatar ? (
@@ -508,7 +538,7 @@ export default function QuizRoomScreen() {
             <Text style={styles.playerName} numberOfLines={1}>
               {player.username}
             </Text>
-            {host && (
+            {host && phase !== 'waiting' && (
               <Crown size={13} color={theme.secondary} strokeWidth={2} />
             )}
             {isMe && <Text style={styles.youTag}>You</Text>}
@@ -519,24 +549,33 @@ export default function QuizRoomScreen() {
               {rank.rpChange} · {rank.tierAfter}
             </Text>
           ) : phase === 'waiting' ? (
-            <Text style={styles.playerSub}>
-              {player.ready ? 'Ready' : 'Not ready'}
-            </Text>
+            // The design's waiting subline is the player's rank
+            // standing ("Chunin · 1,270 RP"); readiness moved to
+            // the right-side pills below (Slice 6).
+            standing ? (
+              <Text style={styles.playerSub}>
+                {standing.tier.charAt(0).toUpperCase() +
+                  standing.tier.slice(1)}{' '}
+                · {standing.rp.toLocaleString()} RP
+              </Text>
+            ) : null
           ) : (
             <Text style={styles.playerSub}>{player.totalScore} pts</Text>
           )}
         </View>
         {phase === 'waiting' ? (
-          <View
-            style={[
-              styles.readyDot,
-              player.ready && styles.readyDotOn,
-            ]}
-          >
-            {player.ready && (
-              <Check size={12} color={theme.onAccent} strokeWidth={3} />
-            )}
-          </View>
+          host ? (
+            <View style={styles.hostPill}>
+              <Text style={styles.hostPillText}>HOST</Text>
+            </View>
+          ) : player.ready ? (
+            <View style={styles.readyPill}>
+              <Check size={11} color={theme.success} strokeWidth={3} />
+              <Text style={styles.readyPillText}>Ready</Text>
+            </View>
+          ) : (
+            <Text style={styles.notReadyText}>Not ready</Text>
+          )
         ) : showAnswerState ? (
           answered ? (
             <Check size={17} color={theme.accent} strokeWidth={2.5} />
@@ -707,32 +746,34 @@ export default function QuizRoomScreen() {
                     <Text style={styles.codeText}>{room.roomCode}</Text>
                   </View>
                   <Pressable
-                    onPress={onCopyCode}
+                    onPress={onInvite}
                     accessibilityRole="button"
-                    accessibilityLabel="Copy room code"
+                    accessibilityLabel="Invite friends"
                     style={({ pressed }) => [
                       styles.copyButton,
                       pressed && styles.pressed,
                     ]}
                   >
-                    {copied ? (
-                      <Check size={16} color={theme.accent} strokeWidth={2.5} />
-                    ) : (
-                      <Copy size={16} color={theme.text} strokeWidth={2} />
-                    )}
-                    <Text style={styles.copyText}>
-                      {copied ? 'Copied' : 'Copy'}
-                    </Text>
+                    <Share2 size={16} color={theme.text} strokeWidth={2} />
+                    <Text style={styles.copyText}>Invite friends</Text>
                   </Pressable>
                 </View>
-                <Text style={styles.summaryText}>
-                  {room.roomType === 'duel' ? 'Duel' : 'Party'} ·{' '}
-                  {GUESS_LABEL[room.settings.guessType]} ·{' '}
-                  {POOL_LABEL[room.settings.poolMode]} ·{' '}
-                  {room.settings.roundCount} rounds ·{' '}
-                  {room.settings.timeLimitSeconds}s per round ·{' '}
-                  {room.players.length}/{room.settings.maxPlayers} players
-                </Text>
+                {/* The design renders the room settings as a wrap
+                    of lavender chips, not a text line (Slice 6). */}
+                <View style={styles.summaryChips}>
+                  {[
+                    room.roomType === 'duel' ? 'Duel' : 'Party',
+                    GUESS_LABEL[room.settings.guessType],
+                    POOL_LABEL[room.settings.poolMode],
+                    `${room.settings.roundCount} rounds`,
+                    `${room.settings.timeLimitSeconds}s`,
+                    `${room.players.length}/${room.settings.maxPlayers} players`,
+                  ].map((label) => (
+                    <View key={label} style={styles.summaryChip}>
+                      <Text style={styles.summaryChipText}>{label}</Text>
+                    </View>
+                  ))}
+                </View>
                 {isHost ? (
                   <View style={styles.settingsBlock}>
                     <Text style={styles.fieldLabel}>Rounds</Text>
@@ -807,9 +848,12 @@ export default function QuizRoomScreen() {
 
               <View style={styles.card}>
                 <Text style={styles.fieldLabel}>
-                  Players · {room.players.length}/{room.settings.maxPlayers}
+                  Players ({room.players.length}/{room.settings.maxPlayers})
                 </Text>
                 {room.players.map((p) => playerRow(p, false))}
+                {room.players.length < room.settings.maxPlayers && (
+                  <Text style={styles.hint}>Waiting for more players…</Text>
+                )}
               </View>
 
               <Pressable
@@ -883,6 +927,76 @@ export default function QuizRoomScreen() {
 
           {phase === 'playing' && liveRound && (
             <>
+              {/* The design's in-game players strip (Slice 6):
+                  avatar + answered badge + name across the top,
+                  then the waiting line for whoever hasn't locked
+                  in yet. */}
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.stripRow}
+              >
+                {room.players.map((p) => {
+                  const answered = answeredUsers.has(p.userId);
+                  return (
+                    <View key={p.userId} style={styles.stripItem}>
+                      <View>
+                        {p.avatar ? (
+                          <Image
+                            source={{ uri: p.avatar }}
+                            style={styles.stripAvatar}
+                          />
+                        ) : (
+                          <View
+                            style={[
+                              styles.stripAvatar,
+                              styles.avatarFallback,
+                            ]}
+                          >
+                            <Text style={styles.avatarInitial}>
+                              {p.username.charAt(0).toUpperCase()}
+                            </Text>
+                          </View>
+                        )}
+                        <View
+                          style={[
+                            styles.stripBadge,
+                            answered && styles.stripBadgeOn,
+                          ]}
+                        >
+                          {answered ? (
+                            <Check
+                              size={10}
+                              color={theme.onAccent}
+                              strokeWidth={3}
+                            />
+                          ) : (
+                            <Hourglass
+                              size={9}
+                              color={theme.muted}
+                              strokeWidth={2.5}
+                            />
+                          )}
+                        </View>
+                      </View>
+                      <Text style={styles.stripName} numberOfLines={1}>
+                        {p.username}
+                        {p.userId === myId ? ' (You)' : ''}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </ScrollView>
+              {room.players.some((p) => !answeredUsers.has(p.userId)) && (
+                <Text style={styles.waitingLine}>
+                  Waiting for{' '}
+                  {room.players
+                    .filter((p) => !answeredUsers.has(p.userId))
+                    .map((p) => p.username)
+                    .join(', ')}
+                  …
+                </Text>
+              )}
               <View style={styles.roundHead}>
                 <Text style={styles.roundTitle}>
                   Round {liveRound.round} of {room.settings.roundCount}
@@ -928,8 +1042,22 @@ export default function QuizRoomScreen() {
                     : 'Not the one — scores land at round end'}
                 </Text>
               )}
+              {/* The design's Live standings card (Slice 6) —
+                  running points, ranked, with the YOU marker. */}
               <View style={styles.card}>
-                {room.players.map((p) => playerRow(p, true))}
+                <Text style={styles.fieldLabel}>Live standings</Text>
+                {standings.map((p, i) => (
+                  <View key={p.userId} style={styles.standingRow}>
+                    <Text style={styles.standingPlace}>{i + 1}</Text>
+                    <Text style={styles.standingName} numberOfLines={1}>
+                      {p.username}
+                    </Text>
+                    {p.userId === myId && (
+                      <Text style={styles.youTag}>YOU</Text>
+                    )}
+                    <Text style={styles.standingScore}>{p.totalScore}</Text>
+                  </View>
+                ))}
               </View>
             </>
           )}
@@ -1301,6 +1429,115 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.bodySmall,
       color: theme.muted,
     },
+    summaryChips: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+    },
+    summaryChip: {
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: 4,
+    },
+    summaryChipText: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.onAccentContainer,
+    },
+    hostPill: {
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: 3,
+    },
+    hostPillText: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      letterSpacing: 0.8,
+      color: theme.onAccentContainer,
+    },
+    readyPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 3,
+      backgroundColor: theme.successContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: 3,
+    },
+    readyPillText: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.success,
+    },
+    notReadyText: {
+      ...typeStyles.caption,
+      color: theme.muted,
+    },
+    stripRow: {
+      gap: spacing.md,
+      paddingVertical: spacing.xs,
+    },
+    stripItem: {
+      alignItems: 'center',
+      gap: spacing.xs,
+      width: 56,
+    },
+    stripAvatar: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: theme.raised,
+    },
+    stripBadge: {
+      position: 'absolute',
+      right: -2,
+      bottom: -2,
+      width: 18,
+      height: 18,
+      borderRadius: 9,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    stripBadgeOn: {
+      backgroundColor: theme.success,
+      borderColor: theme.success,
+    },
+    stripName: {
+      ...typeStyles.caption,
+      color: theme.text,
+      textAlign: 'center',
+    },
+    waitingLine: {
+      ...typeStyles.bodySmall,
+      color: theme.muted,
+      marginBottom: spacing.sm,
+    },
+    standingRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      paddingVertical: spacing.xs + 2,
+    },
+    standingPlace: {
+      ...typeStyles.mono,
+      color: theme.muted,
+      width: 18,
+    },
+    standingName: {
+      flex: 1,
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 14,
+      color: theme.text,
+    },
+    standingScore: {
+      ...typeStyles.mono,
+      color: theme.text,
+    },
     settingsBlock: {
       gap: spacing.sm,
     },
@@ -1381,18 +1618,6 @@ const createStyles = (theme: Theme) =>
     playerScore: {
       ...typeStyles.mono,
       color: theme.text,
-    },
-    readyDot: {
-      width: 24,
-      height: 24,
-      borderRadius: 12,
-      backgroundColor: theme.raised,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    readyDotOn: {
-      // Design: ready reads sage, not mauve.
-      backgroundColor: theme.success,
     },
     pendingDot: {
       width: 8,

@@ -52,6 +52,9 @@ describe('Rank without a database (e2e)', () => {
     const http = request(app.getHttpServer());
     await http.get('/rank/leaderboard').expect(503);
     await http.get('/rank/some-user-id').expect(503);
+    // The batched roster read routes to its own handler (not the
+    // :userId catch-all) and 503s the same way without a database.
+    await http.get('/rank/players?ids=a,b').expect(503);
   });
 
   it('rejects tokenless /rank/me with 401, then 503s with a token', async () => {

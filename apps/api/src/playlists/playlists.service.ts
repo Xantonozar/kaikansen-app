@@ -16,6 +16,7 @@ import type {
   PlaylistsResponse,
   UpdatePlaylistRequest,
 } from '@kaikansen/contracts';
+import { User, type UserDocument } from '../auth/user.schema';
 import {
   ThemeCache,
   type ThemeCacheDocument,
@@ -79,6 +80,15 @@ function iso(value: Date | string | null | undefined): string {
  *
  * The models are OPTIONAL like everywhere else in this API: booted
  * without MONGODB_URI, every method answers 503 while /health works.
+ *
+ * Owner identity (Slice 3 data gap): the detail additionally
+ * resolves the owner's displayName + username from the user
+ * document — the design's header reads "by <owner>", and the
+ * payload previously carried only the owner's id. Only the two
+ * public fields the profile endpoint projects are read; the
+ * resolution is best-effort decoration (a deleted owner, or no
+ * user model, yields nulls — the playlist read never fails over
+ * it), so the User model is NOT part of requireModels.
  */
 @Injectable()
 export class PlaylistsService {
@@ -89,6 +99,9 @@ export class PlaylistsService {
     @Optional()
     @InjectModel(ThemeCache.name)
     private readonly themeModel?: Model<ThemeCacheDocument>,
+    @Optional()
+    @InjectModel(User.name)
+    private readonly userModel?: Model<UserDocument>,
   ) {}
 
   private requireModels(): PlaylistModels {
@@ -218,11 +231,14 @@ export class PlaylistsService {
   private toDetail(
     doc: PlaylistDoc,
     themesById: Map<string, ThemeDoc>,
+    owner: { displayName: string | null; username: string | null },
   ): PlaylistDetail {
     const ids = (doc.themes ?? []).map((t) => String(t));
     return {
       ...this.toSummary(doc, themesById),
       userId: String(doc.userId),
+      ownerDisplayName: owner.displayName,
+      ownerUsername: owner.username,
       // Stored order; dangling ids drop out, like the web's populate.
       items: ids
         .map((id) => themesById.get(id))
@@ -231,12 +247,43 @@ export class PlaylistsService {
     };
   }
 
+  /**
+   * The owner's public identity (displayName + username — the
+   * profile endpoint's projection discipline, nothing private).
+   * Best-effort: no user model, an unresolvable id or a deleted
+   * owner all yield nulls rather than failing the playlist read.
+   */
+  private async resolveOwner(
+    userId: unknown,
+  ): Promise<{ displayName: string | null; username: string | null }> {
+    const none = { displayName: null, username: null };
+    if (!this.userModel) {
+      return none;
+    }
+    try {
+      const doc = await this.userModel.findById(String(userId)).lean().exec();
+      if (!doc) {
+        return none;
+      }
+      const user = doc as { displayName?: string; username?: string };
+      return {
+        displayName: user.displayName ?? null,
+        username: user.username ?? null,
+      };
+    } catch {
+      // A malformed stored id CastErrors in Mongoose — decoration
+      // must never take the read down with it.
+      return none;
+    }
+  }
+
   private async detailFor(
     models: PlaylistModels,
     doc: PlaylistDoc,
   ): Promise<PlaylistDetail> {
     const themesById = await this.resolveThemes(models, doc.themes ?? []);
-    return this.toDetail(doc, themesById);
+    const owner = await this.resolveOwner(doc.userId);
+    return this.toDetail(doc, themesById, owner);
   }
 
   /** Re-read a playlist after a write and serve its detail. */

@@ -25,7 +25,7 @@ export function currentSeason(date: Date = new Date()): {
 }
 
 /** Seasons in chronological order within one season-year. */
-const SEASON_ORDER: Season[] = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
+export const SEASON_ORDER: Season[] = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
 
 /**
  * The season immediately before the given one, chronologically:

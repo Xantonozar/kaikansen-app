@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   NotFoundException,
   Optional,
@@ -12,10 +13,14 @@ import type {
   HomeResponse,
   RelatedAnime,
   RelatedAnimeResponse,
+  SearchAnimeResult,
+  SearchArtistResult,
   SearchResponse,
   Season,
+  SeasonResponse,
   SimilarThemesResponse,
   ThemeDetail,
+  ThemeType,
 } from '@kaikansen/contracts';
 import {
   AnimeCache,
@@ -26,11 +31,13 @@ import {
   type ArtistCacheDocument,
 } from '../sync/artist-cache.schema';
 import { ThemeCache, type ThemeCacheDocument } from './theme-cache.schema';
-import { currentSeason, previousSeason } from './season';
+import { currentSeason, previousSeason, SEASON_ORDER } from './season';
 import { toRelatedAnime, type AnimeDoc } from './anime.mapper';
 import { toThemeDetail, toThemeSummary, type ThemeDoc } from './theme.mapper';
 
 const RAIL_LIMIT = 20;
+/** The web seasonal endpoint's page size (app/api/themes/seasonal). */
+const SEASON_PAGE_SIZE = 20;
 /**
  * The /home popular rail serves the full curated list: 50 entries
  * since the 2026-11-08 rebuild (30 OP + 20 ED), so its cap is
@@ -45,6 +52,7 @@ const POPULAR_LIMIT = 50;
 const SEASON_FALLBACK_STEPS = 8;
 /* Search constants — the web's own values (app/api/search/route.ts). */
 const SEARCH_PAGE_SIZE = 20; // per-type limit of the web's SONGS view
+const SEARCH_GROUP_LIMIT = 5; // per-group limit of the web's ALL view
 const SEARCH_MODIFIER_LIMIT = 50; // songs limit when an OP/ED modifier is used
 const SONG_CANDIDATE_LIMIT = 400; // stage-1 candidate cap
 const MAX_TERMS = 6;
@@ -212,6 +220,67 @@ export class ThemesService {
     };
   }
 
+  /**
+   * GET /season — one season's themes, the port of the web's
+   * GET /api/themes/seasonal (app/api/themes/seasonal/route.ts),
+   * the read behind the web's /season/[season]/[year] page. The
+   * web's semantics, mirrored: season and year are required (400
+   * without them — the web's 'Season and year required'), the
+   * filter is animeSeason/animeSeasonYear plus an optional OP/ED
+   * type, the order is sequence asc then avgRating desc, and the
+   * page size is the web's 20 with hasMore = a full page served.
+   * Season names are validated against the Season enum (the
+   * schema's own vocabulary); an unknown name is the same 400 the
+   * web's missing-parameter case produces in spirit — the web
+   * would serve an empty list for it, but an API client passing a
+   * non-season has a bug worth surfacing, and no real season's
+   * answer changes. Pages below 1 clamp to 1 (the web's parseInt
+   * would produce a negative skip and a Mongo error; the clamp is
+   * the one deliberate deviation, noted here).
+   */
+  async getSeasonThemes(
+    seasonRaw: string | undefined,
+    yearRaw: string | undefined,
+    typeRaw?: string,
+    pageRaw?: string,
+  ): Promise<SeasonResponse> {
+    const model = this.requireModel();
+    const season = (seasonRaw ?? '').toUpperCase() as Season;
+    const year = Number.parseInt(yearRaw ?? '', 10);
+    if (
+      !SEASON_ORDER.includes(season) ||
+      Number.isNaN(year) ||
+      year < 1900 ||
+      year > 2200
+    ) {
+      throw new BadRequestException('Season and year required');
+    }
+    const type = (typeRaw ?? '').toUpperCase();
+    const filter: Record<string, unknown> = {
+      animeSeason: season,
+      animeSeasonYear: year,
+    };
+    if (type === 'OP' || type === 'ED') {
+      filter.type = type as ThemeType;
+    }
+    const parsedPage = Number.parseInt(pageRaw ?? '', 10);
+    const page = Number.isNaN(parsedPage) || parsedPage < 1 ? 1 : parsedPage;
+    const docs = (await model
+      .find(filter)
+      .sort({ sequence: 1, avgRating: -1 })
+      .skip((page - 1) * SEASON_PAGE_SIZE)
+      .limit(SEASON_PAGE_SIZE)
+      .lean()
+      .exec()) as ThemeDoc[];
+    return {
+      season,
+      year,
+      themes: docs.map(toThemeSummary),
+      page,
+      hasMore: docs.length === SEASON_PAGE_SIZE,
+    };
+  }
+
   /** GET /themes/:slug — full document minus embedding/__v, or 404. */
   async getThemeBySlug(slug: string): Promise<ThemeDetail> {
     const model = this.requireModel();
@@ -250,6 +319,10 @@ export class ThemesService {
    * into type/sequence filters (and widen the page size to 50, as on the
    * web). Pagination mirrors the web's SONGS view: 20 per page, and the
    * total is counted on every search (the web counts it for that view).
+   *
+   * Alongside the songs, page 1 carries the web's ALL-view anime and
+   * artist groups (see searchGroups) — the grouped results the app's
+   * search screen renders under the Themes list.
    */
   async search(rawQuery: string, page = 1): Promise<SearchResponse> {
     const model = this.requireModel();
@@ -259,6 +332,8 @@ export class ThemesService {
       return {
         query,
         results: [],
+        anime: [],
+        artists: [],
         searchType: 'regex',
         page: safePage,
         total: 0,
@@ -334,9 +409,16 @@ export class ThemesService {
     ]);
 
     const results = (docs as ThemeDoc[]).map(toThemeSummary);
+    // The anime/artist groups are the web's ALL view: page 1 only.
+    const groups =
+      safePage === 1
+        ? await this.searchGroups(cleanWords, themeModifierUsed)
+        : { anime: [], artists: [] };
     return {
       query,
       results,
+      anime: groups.anime,
+      artists: groups.artists,
       searchType: 'regex',
       page: safePage,
       total,
@@ -344,6 +426,124 @@ export class ThemesService {
       themeTypeFilter,
       themeSeqFilter,
     };
+  }
+
+  /**
+   * The anime + artist groups of GET /search — the web's ALL-view
+   * filters (app/api/search/route.ts): every clean word must appear
+   * (escaped, case-insensitive substring) in at least one of the
+   * group's fields — anime: titleRomaji / titleEnglish / synonyms;
+   * artists: name / aliases — capped at the web's ALL-view 5 per
+   * group, in the collection's natural order (the web sorts neither
+   * group). The web skips both groups when an OP/ED modifier was
+   * parsed out of the query, and so does this port.
+   *
+   * Theme counts come from the theme collection itself (one light
+   * projection find per group, counted in memory — the groups cap
+   * at 5 and a catalogue anime/artist carries at most dozens of
+   * themes): an anime row's count is exactly what its detail page
+   * lists, and an artist's total is max(cache counter, counted) —
+   * the cache counter drifts (see getArtistDetail), so a search row
+   * never reports fewer themes than the artist page would.
+   *
+   * A cache model the service was constructed without simply yields
+   * an empty group — the themes slice never depends on them.
+   */
+  private async searchGroups(
+    cleanWords: string[],
+    themeModifierUsed: boolean,
+  ): Promise<{ anime: SearchAnimeResult[]; artists: SearchArtistResult[] }> {
+    if (themeModifierUsed || cleanWords.length === 0) {
+      return { anime: [], artists: [] };
+    }
+    const contains = (word: string) => new RegExp(escapeRegExp(word), 'i');
+    // The filters are assembled dynamically, exactly as on the web.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const groupFilter = (fields: string[]): any => {
+      const conditions = cleanWords.map((word) => ({
+        $or: fields.map((field) => ({ [field]: contains(word) })),
+      }));
+      return conditions.length === 1 ? conditions[0] : { $and: conditions };
+    };
+
+    const [anime, artists] = await Promise.all([
+      this.searchAnimeGroup(
+        groupFilter(['titleRomaji', 'titleEnglish', 'synonyms']),
+      ),
+      this.searchArtistGroup(groupFilter(['name', 'aliases'])),
+    ]);
+    return { anime, artists };
+  }
+
+  private async searchAnimeGroup(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    filter: any,
+  ): Promise<SearchAnimeResult[]> {
+    if (!this.animeModel) return [];
+    const docs = (await this.animeModel
+      .find(filter)
+      .limit(SEARCH_GROUP_LIMIT)
+      .lean()
+      .exec()) as unknown as AnimeDoc[];
+    // Rows navigate by AniList id — a document without one cannot
+    // be opened, so it is not a result.
+    const openable = docs.filter((d) => d.anilistId !== null);
+    if (openable.length === 0) return [];
+
+    const counts = new Map<number, number>();
+    const themeModel = this.requireModel();
+    const themeDocs = (await themeModel
+      .find({ anilistId: { $in: openable.map((d) => d.anilistId) } })
+      .select('anilistId')
+      .lean()
+      .exec()) as unknown as Array<{ anilistId: number | null }>;
+    for (const t of themeDocs) {
+      if (t.anilistId !== null) {
+        counts.set(t.anilistId, (counts.get(t.anilistId) ?? 0) + 1);
+      }
+    }
+
+    return openable.map((d) => ({
+      anilistId: d.anilistId as number,
+      titleRomaji: d.titleRomaji,
+      titleEnglish: d.titleEnglish ?? null,
+      coverImageLarge: d.coverImageLarge ?? null,
+      seasonYear: d.seasonYear ?? null,
+      themeCount: counts.get(d.anilistId as number) ?? 0,
+    }));
+  }
+
+  private async searchArtistGroup(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    filter: any,
+  ): Promise<SearchArtistResult[]> {
+    if (!this.artistModel) return [];
+    const docs = (await this.artistModel
+      .find(filter)
+      .limit(SEARCH_GROUP_LIMIT)
+      .lean()
+      .exec()) as unknown as ArtistCacheDocument[];
+    if (docs.length === 0) return [];
+
+    const counts = new Map<string, number>();
+    const themeModel = this.requireModel();
+    const themeDocs = (await themeModel
+      .find({ artistSlugs: { $in: docs.map((d) => d.slug) } })
+      .select('artistSlugs')
+      .lean()
+      .exec()) as unknown as Array<{ artistSlugs?: string[] }>;
+    for (const t of themeDocs) {
+      for (const slug of t.artistSlugs ?? []) {
+        counts.set(slug, (counts.get(slug) ?? 0) + 1);
+      }
+    }
+
+    return docs.map((d) => ({
+      slug: d.slug,
+      name: d.name,
+      imageUrl: d.imageUrl ?? null,
+      totalThemes: Math.max(d.totalThemes ?? 0, counts.get(d.slug) ?? 0),
+    }));
   }
 
   /**

@@ -20,15 +20,19 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import {
   Check,
   ChevronLeft,
+  Download,
   Globe,
   ListMusic,
   Lock,
   Pencil,
+  Play,
+  Shuffle,
   Trash2,
   X,
 } from 'lucide-react-native';
 import type { PlaylistDetail } from '@kaikansen/contracts';
-import { fixtureMode } from '../../../src/api';
+import { fetchThemeBySlug, fixtureMode } from '../../../src/api';
+import { downloadsSupported, useDownloads } from '../../../src/downloads';
 import { useAuth } from '../../../src/auth';
 import { useFavorites } from '../../../src/favoritesStore';
 import {
@@ -38,6 +42,11 @@ import {
   updatePlaylist,
 } from '../../../src/libraryApi';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import { formatTime } from '../../../src/playback';
+import {
+  queueItemsFromSummaries,
+  usePlaybackSession,
+} from '../../../src/playback-context';
 import {
   fontFamilies,
   radii,
@@ -61,6 +70,21 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
  * service resolves items server-side), except rename/visibility,
  * which patch the same way. Delete is a two-tap in-place confirm —
  * no modal, works identically on native and web.
+ *
+ * Header (Lavender Dusk final `95ebcfa4a4b940d5a625f5582431652b`):
+ * a white card — 2×2 cover grid from the first items' covers (a
+ * lone cover fills the square; empty cells are tinted tiles) beside
+ * the name, the owner line and the count + Public/Private pill,
+ * then a divided action row: Play All (the playlist claimed as a
+ * queue, in order), Shuffle (same queue, shuffled), Download (every
+ * item's audio through the downloads store, sequentially — items
+ * already downloaded no-op). The header's remaining design details
+ * are data-backed: the count line's runtime ("12 themes · 18 min")
+ * sums the items' summary durations (ThemeSummary.duration — the
+ * document's own field; the segment is omitted when no item's
+ * duration is known, never invented), rows carry their duration,
+ * and the "by <owner>" line renders for every playlist from the
+ * detail payload's resolved owner identity.
  */
 export default function PlaylistDetailScreen() {
   const theme = useTheme();
@@ -70,6 +94,9 @@ export default function PlaylistDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { status, user } = useAuth();
   const favorites = useFavorites();
+  const { startQueue } = usePlaybackSession();
+  const downloads = useDownloads();
+  const [dlBusy, setDlBusy] = useState(false);
 
   const [playlist, setPlaylist] = useState<PlaylistDetail | null>(null);
   const [loadState, setLoadState] = useState<
@@ -142,6 +169,108 @@ export default function PlaylistDetailScreen() {
   const owner =
     status === 'signedIn' && user !== null && playlist !== null &&
     user.id === playlist.userId;
+
+  /* Header by-line + runtime: the by-line prefers the payload's
+     resolved owner identity (so other people's playlists read
+     "by <owner>" too), falling back to the signed-in profile for
+     your own when the API could not resolve it. The runtime sums
+     the items' KNOWN durations only; with none known, the header
+     omits the segment rather than inventing a number. */
+  const ownerLine = playlist
+    ? playlist.ownerDisplayName ||
+      playlist.ownerUsername ||
+      (owner && user ? user.displayName || user.username : null)
+    : null;
+  const knownDurations = (playlist?.items ?? [])
+    .map((i) => i.duration)
+    .filter((d): d is number => d != null);
+  const runtimeMin =
+    knownDurations.length > 0
+      ? Math.round(knownDurations.reduce((a, b) => a + b, 0) / 60)
+      : null;
+
+  /* Header cover grid: the first items' distinct covers, in
+     playlist order (the design's 2×2 collage). */
+  const gridCovers = useMemo(() => {
+    if (!playlist) return [];
+    const covers: string[] = [];
+    for (const item of playlist.items) {
+      const cover = item.animeCoverImage ?? item.animeCoverImageSmall;
+      if (cover && !covers.includes(cover)) covers.push(cover);
+      if (covers.length >= 4) break;
+    }
+    return covers;
+  }, [playlist]);
+
+  /** Play All: the playlist IS the queue, in order (Slice 2.5) —
+      the mini player's Next walks it. Opens the player like a
+      row play does. */
+  const playAll = useCallback(() => {
+    if (!playlist || playlist.items.length === 0) return;
+    startQueue(queueItemsFromSummaries(playlist.items), 0, 'watch');
+    router.push({
+      pathname: '/player',
+      params: { slug: playlist.items[0].slug, mode: 'watch' },
+    });
+  }, [playlist, startQueue, router]);
+
+  /** Shuffle: the same queue claim, order shuffled first. */
+  const shufflePlay = useCallback(() => {
+    if (!playlist || playlist.items.length === 0) return;
+    const shuffled = [...playlist.items];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    startQueue(queueItemsFromSummaries(shuffled), 0, 'watch');
+    router.push({
+      pathname: '/player',
+      params: { slug: shuffled[0].slug, mode: 'watch' },
+    });
+  }, [playlist, startQueue, router]);
+
+  /** Download: every item's LISTEN file through the downloads
+      store, one at a time (the store itself skips anything
+      already downloaded or in flight, and per-item failures are
+      counted, never hidden). */
+  const downloadAll = useCallback(async () => {
+    if (!playlist || dlBusy || playlist.items.length === 0) return;
+    if (fixtureMode) {
+      setActionError('Downloads are not available in demo mode.');
+      return;
+    }
+    if (!downloadsSupported) {
+      setActionError('Downloads are not available on web.');
+      return;
+    }
+    setDlBusy(true);
+    setActionError(null);
+    let failures = 0;
+    let firstError: string | null = null;
+    for (const item of playlist.items) {
+      try {
+        const detail = await fetchThemeBySlug(item.slug);
+        const entry = detail?.entries[0] ?? null;
+        if (!detail || !entry) {
+          failures += 1;
+          continue;
+        }
+        const err = await downloads.start(detail, entry, 'listen');
+        if (err) {
+          failures += 1;
+          if (firstError === null) firstError = err;
+        }
+      } catch {
+        failures += 1;
+      }
+    }
+    setDlBusy(false);
+    if (failures === 1 && firstError) {
+      setActionError(firstError);
+    } else if (failures > 1) {
+      setActionError(`${failures} downloads could not be started.`);
+    }
+  }, [playlist, dlBusy, downloads]);
 
   const runMutation = useCallback(
     (call: () => Promise<PlaylistDetail>) => {
@@ -262,141 +391,233 @@ export default function PlaylistDetailScreen() {
           style={[styles.topRow, { paddingTop: insets.top + spacing.sm }]}
         >
           {backTile}
+          <Text style={styles.topTitle}>Playlist</Text>
+          <View style={styles.backHit} />
         </View>
 
         <View style={styles.body}>
-          <View style={styles.coverWrap}>
-            {playlist.coverImage ? (
-              <Image
-                source={{ uri: playlist.coverImage }}
-                style={styles.cover}
-              />
-            ) : (
-              <View style={[styles.cover, styles.coverEmpty]}>
-                <ListMusic size={30} color={theme.muted} strokeWidth={2} />
-              </View>
-            )}
-          </View>
-
-          {editingName ? (
-            <View style={styles.nameEdit}>
-              <TextInput
-                style={styles.input}
-                value={nameDraft}
-                onChangeText={setNameDraft}
-                placeholder="Playlist name"
-                placeholderTextColor={theme.muted}
-                autoFocus
-                maxLength={100}
-                returnKeyType="done"
-                onSubmitEditing={saveName}
-              />
-              <Pressable
-                onPress={saveName}
-                accessibilityRole="button"
-                accessibilityLabel="Save name"
-                style={({ pressed }) => [
-                  styles.iconButton,
-                  styles.iconButtonAccent,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Check size={18} color={theme.onAccent} strokeWidth={2} />
-              </Pressable>
-              <Pressable
-                onPress={() => setEditingName(false)}
-                accessibilityRole="button"
-                accessibilityLabel="Cancel rename"
-                style={({ pressed }) => [
-                  styles.iconButton,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <X size={18} color={theme.text} strokeWidth={2} />
-              </Pressable>
-            </View>
-          ) : (
-            <View style={styles.nameRow}>
-              <Text style={styles.name}>{playlist.name}</Text>
-              {owner && (
-                <Pressable
-                  onPress={() => {
-                    setNameDraft(playlist.name);
-                    setEditingName(true);
-                    setActionError(null);
+          <View style={styles.headerCard}>
+            <View style={styles.headerTop}>
+              {gridCovers.length === 1 ||
+              (gridCovers.length === 0 && playlist.coverImage) ? (
+                <Image
+                  source={{
+                    uri: gridCovers[0] ?? playlist.coverImage ?? undefined,
                   }}
-                  hitSlop={6}
-                  accessibilityRole="button"
-                  accessibilityLabel="Rename playlist"
-                  style={({ pressed }) => [
-                    styles.iconButton,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Pencil size={16} color={theme.muted} strokeWidth={2} />
-                </Pressable>
+                  style={styles.gridSingle}
+                />
+              ) : (
+                <View style={styles.grid}>
+                  {[0, 1, 2, 3].map((i) =>
+                    gridCovers[i] ? (
+                      <Image
+                        key={i}
+                        source={{ uri: gridCovers[i] }}
+                        style={styles.gridCell}
+                      />
+                    ) : (
+                      <View
+                        key={i}
+                        style={[styles.gridCell, styles.gridCellEmpty]}
+                      >
+                        {gridCovers.length === 0 && i === 0 ? (
+                          <ListMusic
+                            size={16}
+                            color={theme.muted}
+                            strokeWidth={2}
+                          />
+                        ) : null}
+                      </View>
+                    ),
+                  )}
+                </View>
               )}
+
+              <View style={styles.headerInfo}>
+                {editingName ? (
+                  <View style={styles.nameEdit}>
+                    <TextInput
+                      style={styles.editInput}
+                      value={nameDraft}
+                      onChangeText={setNameDraft}
+                      placeholder="Playlist name"
+                      placeholderTextColor={theme.muted}
+                      autoFocus
+                      maxLength={100}
+                      returnKeyType="done"
+                      onSubmitEditing={saveName}
+                    />
+                    <View style={styles.nameEditButtons}>
+                      <Pressable
+                        onPress={saveName}
+                        accessibilityRole="button"
+                        accessibilityLabel="Save name"
+                        style={({ pressed }) => [
+                          styles.iconButton,
+                          styles.iconButtonAccent,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <Check size={18} color={theme.onAccent} strokeWidth={2} />
+                      </Pressable>
+                      <Pressable
+                        onPress={() => setEditingName(false)}
+                        accessibilityRole="button"
+                        accessibilityLabel="Cancel rename"
+                        style={({ pressed }) => [
+                          styles.iconButton,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <X size={18} color={theme.text} strokeWidth={2} />
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : (
+                  <>
+                    <View style={styles.nameRow}>
+                      <Text style={styles.name}>{playlist.name}</Text>
+                      {owner && (
+                        <Pressable
+                          onPress={() => {
+                            setNameDraft(playlist.name);
+                            setEditingName(true);
+                            setActionError(null);
+                          }}
+                          hitSlop={6}
+                          accessibilityRole="button"
+                          accessibilityLabel="Rename playlist"
+                          style={({ pressed }) => [
+                            styles.iconButton,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Pencil size={16} color={theme.muted} strokeWidth={2} />
+                        </Pressable>
+                      )}
+                    </View>
+                    {ownerLine ? (
+                      <Text style={styles.byLine}>by {ownerLine}</Text>
+                    ) : null}
+                    <View style={styles.metaLine}>
+                      <Text style={styles.meta}>
+                        {playlist.themeCount}{' '}
+                        {playlist.themeCount === 1 ? 'theme' : 'themes'}
+                        {runtimeMin !== null ? ` · ${runtimeMin} min` : ''}
+                      </Text>
+                      {owner ? (
+                        <Pressable
+                          onPress={toggleVisibility}
+                          disabled={busy}
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            playlist.isPublic
+                              ? 'Make playlist private'
+                              : 'Make playlist public'
+                          }
+                          accessibilityState={{ selected: playlist.isPublic }}
+                          style={({ pressed }) => [
+                            styles.chip,
+                            playlist.isPublic && styles.chipPublic,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          {playlist.isPublic ? (
+                            <Globe size={12} color={theme.onAccentContainer} strokeWidth={2} />
+                          ) : (
+                            <Lock size={12} color={theme.muted} strokeWidth={2} />
+                          )}
+                          <Text
+                            style={[
+                              styles.chipText,
+                              playlist.isPublic && styles.chipTextPublic,
+                            ]}
+                          >
+                            {playlist.isPublic ? 'Public' : 'Private'}
+                          </Text>
+                        </Pressable>
+                      ) : (
+                        <View style={[styles.chip, playlist.isPublic && styles.chipPublic]}>
+                          {playlist.isPublic ? (
+                            <Globe size={12} color={theme.onAccentContainer} strokeWidth={2} />
+                          ) : (
+                            <Lock size={12} color={theme.muted} strokeWidth={2} />
+                          )}
+                          <Text
+                            style={[
+                              styles.chipText,
+                              playlist.isPublic && styles.chipTextPublic,
+                            ]}
+                          >
+                            {playlist.isPublic ? 'Public' : 'Private'}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  </>
+                )}
+              </View>
             </View>
-          )}
+
+            <View style={styles.actionRow}>
+              <Pressable
+                onPress={playAll}
+                disabled={playlist.items.length === 0}
+                accessibilityRole="button"
+                accessibilityLabel="Play all"
+                style={({ pressed }) => [
+                  styles.playAllButton,
+                  playlist.items.length === 0 && styles.actionDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Play
+                  size={16}
+                  color={theme.onAccent}
+                  fill={theme.onAccent}
+                  strokeWidth={2}
+                />
+                <Text style={styles.playAllText}>Play All</Text>
+              </Pressable>
+              <Pressable
+                onPress={shufflePlay}
+                disabled={playlist.items.length === 0}
+                accessibilityRole="button"
+                accessibilityLabel="Shuffle play"
+                style={({ pressed }) => [
+                  styles.roundButton,
+                  playlist.items.length === 0 && styles.actionDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Shuffle size={18} color={theme.text} strokeWidth={2} />
+              </Pressable>
+              <Pressable
+                onPress={() => void downloadAll()}
+                disabled={dlBusy || playlist.items.length === 0}
+                accessibilityRole="button"
+                accessibilityLabel="Download all themes as audio"
+                style={({ pressed }) => [
+                  styles.roundButton,
+                  playlist.items.length === 0 && styles.actionDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                {dlBusy ? (
+                  <ActivityIndicator size="small" color={theme.text} />
+                ) : (
+                  <Download size={18} color={theme.text} strokeWidth={2} />
+                )}
+              </Pressable>
+            </View>
+          </View>
 
           {playlist.description ? (
             <Text style={styles.description}>{playlist.description}</Text>
           ) : null}
 
-          <View style={styles.metaRow}>
-            <Text style={styles.meta}>
-              {playlist.themeCount}{' '}
-              {playlist.themeCount === 1 ? 'theme' : 'themes'}
-            </Text>
-            {owner ? (
-              <Pressable
-                onPress={toggleVisibility}
-                disabled={busy}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  playlist.isPublic
-                    ? 'Make playlist private'
-                    : 'Make playlist public'
-                }
-                accessibilityState={{ selected: playlist.isPublic }}
-                style={({ pressed }) => [
-                  styles.chip,
-                  playlist.isPublic && styles.chipPublic,
-                  pressed && styles.pressed,
-                ]}
-              >
-                {playlist.isPublic ? (
-                  <Globe size={12} color={theme.onAccentContainer} strokeWidth={2} />
-                ) : (
-                  <Lock size={12} color={theme.muted} strokeWidth={2} />
-                )}
-                <Text
-                  style={[
-                    styles.chipText,
-                    playlist.isPublic && styles.chipTextPublic,
-                  ]}
-                >
-                  {playlist.isPublic ? 'Public' : 'Private'}
-                </Text>
-              </Pressable>
-            ) : (
-              <View style={[styles.chip, playlist.isPublic && styles.chipPublic]}>
-                {playlist.isPublic ? (
-                  <Globe size={12} color={theme.onAccentContainer} strokeWidth={2} />
-                ) : (
-                  <Lock size={12} color={theme.muted} strokeWidth={2} />
-                )}
-                <Text
-                  style={[
-                    styles.chipText,
-                    playlist.isPublic && styles.chipTextPublic,
-                  ]}
-                >
-                  {playlist.isPublic ? 'Public' : 'Private'}
-                </Text>
-              </View>
-            )}
-            {owner && (
+          {owner && (
+            <View style={styles.ownerTools}>
               <Pressable
                 onPress={onDelete}
                 disabled={busy}
@@ -424,8 +645,8 @@ export default function PlaylistDetailScreen() {
                   {confirmDelete ? 'Tap again to delete' : 'Delete'}
                 </Text>
               </Pressable>
-            )}
-          </View>
+            </View>
+          )}
 
           {actionError && <Text style={styles.error}>{actionError}</Text>}
           {favorites.lastError && (
@@ -433,17 +654,29 @@ export default function PlaylistDetailScreen() {
           )}
 
           <View style={styles.items}>
-            {playlist.items.map((item) => (
+            {playlist.items.map((item, index) => (
               <ThemeRow
                 key={item.slug}
                 item={item}
+                durationText={
+                  item.duration != null ? formatTime(item.duration) : undefined
+                }
                 onPress={() => router.push(`/theme/${item.slug}`)}
-                onPlay={() =>
+                onPlay={() => {
+                  // The playlist IS the queue (Slice 2.5): playing a
+                  // row claims the whole list at that row, so the
+                  // mini player's Next and the player's prev/next +
+                  // Up Next walk the playlist in order.
+                  startQueue(
+                    queueItemsFromSummaries(playlist.items),
+                    index,
+                    'watch',
+                  );
                   router.push({
                     pathname: '/player',
                     params: { slug: item.slug, mode: 'watch' },
-                  })
-                }
+                  });
+                }}
                 saved={favorites.isFavorite(item.slug)}
                 savePending={favorites.isPending(item.slug)}
                 onToggleSave={() => void favorites.toggle(item.slug)}
@@ -477,6 +710,15 @@ const createStyles = (theme: Theme) =>
     paddingHorizontal: spacing.screenEdge,
     paddingBottom: spacing.sm,
     flexDirection: 'row',
+    alignItems: 'center',
+  },
+  topTitle: {
+    flex: 1,
+    ...typeStyles.body,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.muted,
+    textAlign: 'center',
+    letterSpacing: 0.4,
   },
   backHit: {
     width: 44,
@@ -508,20 +750,101 @@ const createStyles = (theme: Theme) =>
     paddingHorizontal: spacing.screenEdge,
     paddingBottom: spacing.xxxl,
   },
-  coverWrap: {
-    alignItems: 'flex-start',
+  headerCard: {
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    borderRadius: radii.card,
+    padding: spacing.md,
     marginBottom: spacing.md,
   },
-  cover: {
-    width: 112,
-    height: 112,
+  headerTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  grid: {
+    width: 100,
+    height: 100,
+    borderRadius: radii.md,
+    backgroundColor: theme.raised,
+    padding: 2,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 2,
+    overflow: 'hidden',
+  },
+  gridCell: {
+    width: 47,
+    height: 47,
+    backgroundColor: theme.surface,
+  },
+  gridCellEmpty: {
+    backgroundColor: theme.accentContainer,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gridSingle: {
+    width: 100,
+    height: 100,
     borderRadius: radii.md,
     backgroundColor: theme.surface,
   },
-  coverEmpty: {
-    backgroundColor: theme.raised,
+  headerInfo: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  byLine: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+    marginTop: 2,
+  },
+  metaLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+    flexWrap: 'wrap',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: theme.border,
+  },
+  playAllButton: {
+    flex: 1,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: spacing.sm,
+    height: 44,
+    borderRadius: radii.pill,
+    backgroundColor: theme.accent,
+  },
+  playAllText: {
+    ...typeStyles.sectionLabel,
+    color: theme.onAccent,
+  },
+  roundButton: {
+    width: 44,
+    height: 44,
+    borderRadius: radii.pill,
+    backgroundColor: theme.accentContainer,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionDisabled: {
+    opacity: 0.45,
+  },
+  ownerTools: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    flexWrap: 'wrap',
   },
   nameRow: {
     flexDirection: 'row',
@@ -535,15 +858,16 @@ const createStyles = (theme: Theme) =>
     flexShrink: 1,
   },
   nameEdit: {
-    flexDirection: 'row',
-    alignItems: 'center',
     gap: spacing.sm,
   },
-  input: {
-    flex: 1,
+  nameEditButtons: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  editInput: {
     ...typeStyles.body,
     color: theme.text,
-    backgroundColor: theme.surface,
+    backgroundColor: theme.background,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
     borderRadius: radii.base,
@@ -566,14 +890,8 @@ const createStyles = (theme: Theme) =>
     ...typeStyles.bodySmall,
     color: theme.muted,
     marginTop: spacing.xs + 2,
+    marginBottom: spacing.sm,
     lineHeight: 18,
-  },
-  metaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginTop: spacing.md,
-    flexWrap: 'wrap',
   },
   meta: {
     ...typeStyles.bodySmall,

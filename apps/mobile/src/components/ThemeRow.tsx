@@ -11,6 +11,7 @@ import { Bookmark, Play, X } from 'lucide-react-native';
 import type { ThemeSummary } from '@kaikansen/contracts';
 import { fontFamilies, radii, spacing, typeStyles, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
+import { ThemeRowMenu } from './ThemeRowMenu';
 
 /**
  * Theme row — the shared list unit for Popular Themes, search results
@@ -30,7 +31,14 @@ import { useTheme } from '../theme-context';
  *   flight (state comes from the shared favorites store);
  * - the remove (×) tile renders only with onRemove (playlist owner).
  * An optional `detail` caption sits under the meta line (watch
- * history's mode · relative time).
+ * history's mode · relative time). An optional `durationText`
+ * ("1:30") leads the right-side tile row — the playlist design's
+ * row anatomy (duration + save + play); screens pass it only when
+ * the item's duration is known.
+ * - the ⋮ menu tile (design law #8, Slice 5) closes the tile row —
+ *   duration + … + ⋮ per the design's row anatomy — and opens the
+ *   shared ThemeRowMenu (Play / View theme / Save / Add to playlist /
+ *   Download, all wired). It renders unless `menu={false}`.
  */
 export function ThemeRow({
   item,
@@ -41,6 +49,9 @@ export function ThemeRow({
   onToggleSave,
   onRemove,
   detail,
+  metaText,
+  durationText,
+  menu = true,
 }: {
   item: ThemeSummary;
   onPress?: () => void;
@@ -50,6 +61,13 @@ export function ThemeRow({
   onToggleSave?: () => void;
   onRemove?: () => void;
   detail?: string;
+  /**
+   * Replacement for the default "anime · artist" meta line — the
+   * Artist detail design shows the ANIME title alone on its rows.
+   */
+  metaText?: string;
+  durationText?: string;
+  menu?: boolean;
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -67,12 +85,18 @@ export function ThemeRow({
         <View style={[styles.thumb, styles.placeholder]} />
       )}
       <View style={styles.main}>
-        <Text style={styles.song} numberOfLines={1}>
+        {/* Design law #9: long titles wrap (2 lines), never
+            ellipsis-truncate next to the row's chips/tiles. */}
+        <Text style={styles.song} numberOfLines={2}>
           {item.songTitle}
         </Text>
         <Text style={styles.meta} numberOfLines={1}>
-          {item.animeTitle}
-          {artist ? ` · ${artist}` : ''}
+          {metaText ?? (
+            <>
+              {item.animeTitle}
+              {artist ? ` · ${artist}` : ''}
+            </>
+          )}
         </Text>
         {detail ? (
           <Text style={styles.detail} numberOfLines={1}>
@@ -92,6 +116,9 @@ export function ThemeRow({
           </Text>
         </View>
         <View style={styles.tiles}>
+          {durationText ? (
+            <Text style={styles.duration}>{durationText}</Text>
+          ) : null}
           {onRemove && (
             <Pressable
               onPress={onRemove}
@@ -144,6 +171,9 @@ export function ThemeRow({
           >
             <Play size={15} color={theme.accent} fill={theme.accent} strokeWidth={2} />
           </Pressable>
+          {menu && (
+            <ThemeRowMenu item={item} onPlay={onPlay} onOpen={onPress} />
+          )}
         </View>
       </View>
     </Pressable>
@@ -201,7 +231,13 @@ const createStyles = (theme: Theme) =>
   },
   tiles: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: spacing.xs,
+  },
+  duration: {
+    ...typeStyles.caption,
+    color: theme.muted,
+    marginRight: spacing.xs,
   },
   typeChip: {
     backgroundColor: theme.accentContainer,

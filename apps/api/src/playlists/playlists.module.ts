@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { AccessTokenGuard } from '../auth/access-token.guard';
 import { AnilistClient } from '../auth/anilist.client';
 import { AuthService } from '../auth/auth.service';
+import { User, UserSchema } from '../auth/user.schema';
 import {
   ThemeCache,
   ThemeCacheSchema,
@@ -27,8 +28,10 @@ import { PlaylistsService } from './playlists.service';
  * too, as the library e2e suite composes it: AuthService is
  * stateless, so a second instance verifies tokens identically.
  * AnilistClient is included because AuthService optionally depends
- * on it. (AuthService's User model is @Optional and unneeded here —
- * the guard only verifies tokens.)
+ * on it. The User model is registered for PlaylistsService's owner
+ * resolution (the detail's "by <owner>" line); AuthService's own
+ * User dependency stays @Optional and unneeded — the guard only
+ * verifies tokens.
  */
 @Module({})
 export class PlaylistsModule {
@@ -40,6 +43,7 @@ export class PlaylistsModule {
             MongooseModule.forFeature([
               { name: Playlist.name, schema: PlaylistSchema },
               { name: ThemeCache.name, schema: ThemeCacheSchema },
+              { name: User.name, schema: UserSchema },
             ]),
           ]
         : [],

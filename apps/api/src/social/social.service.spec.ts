@@ -348,6 +348,17 @@ function makeModels() {
       chain(themes.filter((t) => matches(t, filter))),
   };
 
+  const ranks: Record<string, unknown>[] = [];
+  const userRankModel = {
+    docs: ranks,
+    find: (filter: Record<string, unknown>) =>
+      chain(ranks.filter((r) => matches(r, filter))),
+    seed: (data: Record<string, unknown>) => {
+      ranks.push(data);
+      return data;
+    },
+  };
+
   return {
     userModel,
     followModel,
@@ -355,6 +366,7 @@ function makeModels() {
     ratingModel,
     historyModel,
     themeModel,
+    userRankModel,
   };
 }
 
@@ -384,6 +396,7 @@ function makeService(models?: Models) {
     m.ratingModel as never,
     m.historyModel as never,
     m.themeModel as never,
+    m.userRankModel as never,
   );
   return { service, models: m };
 }
@@ -496,7 +509,11 @@ describe('SocialService — network lists', () => {
       displayName: 'Bob B',
       avatarUrl: null,
       bio: '',
+      // App enrichment: no rank document → the default tier; the
+      // anonymous read carries no isFollowing field at all.
+      tier: 'academy',
     });
+    expect(network.followers[0]).not.toHaveProperty('isFollowing');
     // The projection never leaks private fields.
     const raw = JSON.stringify(network);
     expect(raw).not.toContain('@example.com');
@@ -510,6 +527,54 @@ describe('SocialService — network lists', () => {
     const { service } = makeService(models);
     const network = await service.getNetwork('alice');
     expect(network.followers).toEqual([null]);
+  });
+
+  it('enriches rows with rank tiers — the document’s tier, academy without one', async () => {
+    const models = makeModels();
+    models.followModel.seed({ followerId: BOB, followeeId: ALICE });
+    models.followModel.seed({ followerId: CAROL, followeeId: ALICE });
+    models.userRankModel.seed({ userId: CAROL, tier: 'chunin', rp: 900 });
+    const { service } = makeService(models);
+    const network = await service.getNetwork('alice');
+    expect(network.followers[0]).toMatchObject({
+      username: 'bob',
+      tier: 'academy',
+    });
+    expect(network.followers[1]).toMatchObject({
+      username: 'carol',
+      tier: 'chunin',
+    });
+    // The enrichment is a read: it never materialises rank docs.
+    expect(models.userRankModel.docs).toHaveLength(1);
+  });
+
+  it('enriches rows with the CALLER’s follow state when signed in', async () => {
+    const models = makeModels();
+    models.followModel.seed({ followerId: BOB, followeeId: ALICE });
+    models.followModel.seed({ followerId: CAROL, followeeId: ALICE });
+    models.followModel.seed({ followerId: ALICE, followeeId: BOB });
+    models.followModel.seed({ followerId: BOB, followeeId: CAROL });
+    const { service } = makeService(models);
+
+    // Bob views Alice's network: he follows Carol, not himself.
+    const asBob = await service.getNetwork('alice', bearer('tok-bob'));
+    expect(asBob.followers[0]).toMatchObject({
+      username: 'bob',
+      isFollowing: false,
+    });
+    expect(asBob.followers[1]).toMatchObject({
+      username: 'carol',
+      isFollowing: true,
+    });
+    expect(asBob.following[0]).toMatchObject({
+      username: 'bob',
+      isFollowing: false,
+    });
+
+    // A forged token is anonymous: no isFollowing field anywhere.
+    const forged = await service.getNetwork('alice', bearer('tok-forged'));
+    expect(forged.followers[0]).not.toHaveProperty('isFollowing');
+    expect(forged.followers[0]).toHaveProperty('tier');
   });
 
   it('404s unknown usernames', async () => {

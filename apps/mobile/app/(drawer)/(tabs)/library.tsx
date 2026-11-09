@@ -1,6 +1,8 @@
 import {
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
   type ComponentType,
 } from 'react';
@@ -14,7 +16,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import {
   Bookmark,
   ChevronRight,
@@ -57,6 +59,12 @@ import {
 } from '../../../src/downloads';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import {
+  queueItemFromSummary,
+  queueItemsFromSummaries,
+  usePlaybackSession,
+  type QueueItem,
+} from '../../../src/playback-context';
+import {
   fontFamilies,
   radii,
   spacing,
@@ -80,8 +88,10 @@ const SECTIONS: { key: Section; label: string; Icon: IconComponent }[] = [
   { key: 'saved', label: 'Saved', Icon: Bookmark },
   { key: 'recent', label: 'Recent', Icon: Clock },
   { key: 'playlists', label: 'Playlists', Icon: ListMusic },
-  { key: 'anilist', label: 'AniList', Icon: Link2 },
+  // The design's segment order (handoff pack §4): Offline BEFORE
+  // AniList — Slice 6 fixes the swap the fidelity audit named.
   { key: 'offline', label: 'Offline', Icon: Download },
+  { key: 'anilist', label: 'AniList', Icon: Link2 },
 ];
 
 function relativeTime(iso: string): string {
@@ -134,6 +144,30 @@ export default function LibraryScreen() {
   const downloads = useDownloads();
 
   const [section, setSection] = useState<Section>('saved');
+
+  /* Deep-link segment (Slice 4): the Profile menu's "Listening
+     History" lands here with ?segment=recent. Each distinct param
+     value is applied once — the user's own segment taps are never
+     fought by a stale param. */
+  const { segment } = useLocalSearchParams<{ segment?: string }>();
+  const appliedSegment = useRef<string | null>(null);
+  useEffect(() => {
+    const valid: Section[] = [
+      'saved',
+      'recent',
+      'playlists',
+      'anilist',
+      'offline',
+    ];
+    if (
+      segment &&
+      segment !== appliedSegment.current &&
+      valid.includes(segment as Section)
+    ) {
+      appliedSegment.current = segment;
+      setSection(segment as Section);
+    }
+  }, [segment]);
 
   const [fav, setFav] = useState<FavoritesResponse | null>(null);
   const [favPage, setFavPage] = useState(1);
@@ -254,6 +288,27 @@ export default function LibraryScreen() {
         },
       }),
     [router],
+  );
+
+  /* Queue claims (Slice 2.5): a segment's rows play as a queue —
+     the segment's loaded list becomes the provider queue at the
+     tapped row, then the player opens exactly as before. The mode
+     claimed is the mode that row would have opened with. */
+  const { startQueue } = usePlaybackSession();
+  const playWithQueue = useCallback(
+    (
+      items: QueueItem[],
+      index: number,
+      slug: string,
+      mode: 'watch' | 'listen',
+      atEntryId?: number | null,
+    ) => {
+      if (items.length > 0 && index >= 0) {
+        startQueue(items, index, mode);
+      }
+      playTheme(slug, mode, atEntryId);
+    },
+    [startQueue, playTheme],
   );
 
   const unsave = useCallback(
@@ -435,12 +490,35 @@ export default function LibraryScreen() {
     }
     return (
       <>
-        {fav.themes.map((item) => (
+        {fav.themes.length > 0 && (
+          <View style={styles.viewAllRow}>
+            <Text style={styles.viewAllCount}>
+              {fav.total} favourite {fav.total === 1 ? 'theme' : 'themes'}
+            </Text>
+            <Pressable
+              onPress={() => router.push('/favourites')}
+              accessibilityRole="button"
+              accessibilityLabel="View all favourites"
+              hitSlop={6}
+              style={({ pressed }) => pressed && styles.pressed}
+            >
+              <Text style={styles.viewAllText}>View all</Text>
+            </Pressable>
+          </View>
+        )}
+        {fav.themes.map((item, index) => (
           <ThemeRow
             key={item.slug}
             item={item}
             onPress={() => openTheme(item.slug)}
-            onPlay={() => playTheme(item.slug, 'watch')}
+            onPlay={() =>
+              playWithQueue(
+                queueItemsFromSummaries(fav.themes),
+                index,
+                item.slug,
+                'watch',
+              )
+            }
             saved
             savePending={favorites.isPending(item.slug)}
             onToggleSave={() => unsave(item.slug)}
@@ -501,9 +579,24 @@ export default function LibraryScreen() {
               item={entry.theme}
               detail={`${entry.mode === 'watch' ? 'Watched' : 'Listened'} · ${relativeTime(entry.viewedAt)}`}
               onPress={() => openTheme(entry.theme!.slug)}
-              onPlay={() =>
-                playTheme(entry.theme!.slug, entry.mode, entry.atEntryId)
-              }
+              onPlay={() => {
+                // Queue = the segment's playable history, in shown
+                // order; entries whose theme left the catalogue
+                // render as tombstones and can't be queued.
+                const playable = history.filter((e) => e.theme !== null);
+                const items = playable.map((e) => ({
+                  ...queueItemFromSummary(e.theme!),
+                  atEntryId: e.atEntryId,
+                }));
+                const index = playable.findIndex((e) => e.id === entry.id);
+                playWithQueue(
+                  items,
+                  index,
+                  entry.theme!.slug,
+                  entry.mode,
+                  entry.atEntryId,
+                );
+              }}
               saved={favorites.isFavorite(entry.theme.slug)}
               savePending={favorites.isPending(entry.theme.slug)}
               onToggleSave={() => void favorites.toggle(entry.theme!.slug)}
@@ -820,7 +913,18 @@ export default function LibraryScreen() {
                 key={item.slug}
                 item={item}
                 onPress={() => openTheme(item.slug)}
-                onPlay={() => playTheme(item.slug, 'watch')}
+                onPlay={() => {
+                  // Queue = the segment's groups flattened in
+                  // display order.
+                  const flat = anilistGroups.flatMap((g) => g.themes);
+                  const index = flat.findIndex((t) => t.slug === item.slug);
+                  playWithQueue(
+                    queueItemsFromSummaries(flat),
+                    index,
+                    item.slug,
+                    'watch',
+                  );
+                }}
                 saved={favorites.isFavorite(item.slug)}
                 savePending={favorites.isPending(item.slug)}
                 onToggleSave={() => void favorites.toggle(item.slug)}
@@ -886,7 +990,26 @@ export default function LibraryScreen() {
               <Pressable
                 onPress={() => {
                   if (record.fileMissing) return;
-                  playTheme(record.slug, record.mode, record.atEntryId);
+                  // Queue = the playable downloads, in list order;
+                  // broken records (missing files) can't be queued.
+                  const playable = items.filter((r) => !r.fileMissing);
+                  const queueItems: QueueItem[] = playable.map((r) => ({
+                    slug: r.slug,
+                    atEntryId: r.atEntryId,
+                    title: r.songTitle,
+                    artistLine: r.artistName ?? r.animeTitle,
+                    coverUrl: r.coverImage,
+                  }));
+                  const index = playable.findIndex(
+                    (r) => r.id === record.id,
+                  );
+                  playWithQueue(
+                    queueItems,
+                    index,
+                    record.slug,
+                    record.mode,
+                    record.atEntryId,
+                  );
                 }}
                 accessibilityRole="button"
                 accessibilityLabel={
@@ -1199,6 +1322,21 @@ const createStyles = (theme: Theme) =>
     ...typeStyles.bodySmall,
     fontFamily: fontFamilies.bodyStrong,
     color: theme.muted,
+  },
+  viewAllRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.xs,
+  },
+  viewAllCount: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+  },
+  viewAllText: {
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.accent,
   },
   goneRow: {
     paddingVertical: spacing.md,

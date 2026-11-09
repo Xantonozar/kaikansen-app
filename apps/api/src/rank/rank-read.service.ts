@@ -6,6 +6,8 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import type { Model } from 'mongoose';
 import type {
+  PlayerRankSummary,
+  PlayerRanksResponse,
   RankLeaderboardEntry,
   RankLeaderboardResponse,
   RankTier,
@@ -27,6 +29,9 @@ const SNAPSHOT_MAX_AGE_MS = 1000 * 60 * 15;
 
 /** The web leaderboard's cap, both paths (.slice(0, 100) / $limit 100). */
 const LEADERBOARD_LIMIT = 100;
+
+/** Cap for the batched player-rank read (rooms hold ≤ 8 players). */
+const PLAYER_RANK_LIMIT = 50;
 
 function iso(value: Date | string | null | undefined): string {
   if (value == null) return '';
@@ -173,6 +178,43 @@ export class RankReadService {
       userId: String(userId),
     })) as unknown as UserRankDoc;
     return this.toProfile(created);
+  }
+
+  /**
+   * GET /rank/players?ids=… — an APP-ONLY read (no web twin): the
+   * quiz room roster (§6.24) draws each waiting player with their
+   * tier + RP, and the room state itself carries neither. This is
+   * the batched, READ-ONLY counterpart of getRank: it never
+   * creates a rank document — a player without one reports the
+   * same defaults getUserRank would materialise (academy, 0 RP),
+   * the treatment the Network rows' tier enrichment already uses.
+   * Ids are deduped, order-preserved, and capped (a room holds at
+   * most 8 players; the cap only guards abuse).
+   */
+  async getPlayerRanks(ids: string[]): Promise<PlayerRanksResponse> {
+    const models = this.requireModels();
+    const unique = [...new Set(ids.map((id) => String(id)).filter(Boolean))]
+      .slice(0, PLAYER_RANK_LIMIT);
+    if (unique.length === 0) return { players: [] };
+    const docs = (await models.userRanks
+      .find({ userId: { $in: unique } })
+      .lean()
+      .exec()) as UserRankDoc[];
+    const byId = new Map(
+      docs.map((d) => [
+        String(d.userId),
+        {
+          userId: String(d.userId),
+          tier: (d.tier ?? 'academy') as RankTier,
+          rp: d.rp ?? 0,
+        } satisfies PlayerRankSummary,
+      ]),
+    );
+    return {
+      players: unique.map(
+        (id) => byId.get(id) ?? { userId: id, tier: 'academy', rp: 0 },
+      ),
+    };
   }
 
   /**

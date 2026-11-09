@@ -1,6 +1,10 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { Platform } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
+import {
+  createDownloadResumable,
+  type DownloadResumable,
+} from 'expo-file-system/legacy';
 import type {
   PlaybackMode,
   ThemeDetail,
@@ -38,7 +42,13 @@ import { plainStorage } from './storage';
  * folder that no record points at (orphans of a killed download) are
  * swept. Downloads run in the foreground only: leaving the app
  * mid-download can orphan a partial, which the next hydration sweep
- * cleans up. Pause/resume is deliberately not offered.
+ * cleans up. Pause/resume is deliberately not offered; CANCEL is
+ * (Slice 4 — the Downloads design draws a ✕ on the in-progress row):
+ * the transfer runs on the legacy DownloadResumable for exactly
+ * that handle, while all file bookkeeping stays on the SDK 58 API.
+ * An in-flight download also keeps a display snapshot in the store
+ * (`pending`), so the Downloads screen can draw its row — cover,
+ * title, artist — before any record exists.
  */
 
 export const downloadsSupported = Platform.OS !== 'web';
@@ -143,10 +153,29 @@ function fileNameFor(
 /* Store (favoritesStore.ts pattern: module state + external store)    */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Display snapshot of a download still in flight (Slice 4): what
+ * the Downloads screen's progress row renders. Set when a download
+ * starts, cleared when it settles — success replaces it with a
+ * record, failure with an error, cancel with nothing.
+ */
+export interface PendingDownload {
+  id: string;
+  slug: string;
+  mode: PlaybackMode;
+  songTitle: string;
+  animeTitle: string;
+  artistName: string | null;
+  version: string;
+  coverImage: string | null;
+}
+
 interface DownloadsState {
   records: DownloadRecord[];
   /** id → fraction 0..1, or null while the total size is unknown. */
   progress: ReadonlyMap<string, number | null>;
+  /** id → display snapshot for downloads still in flight. */
+  pending: ReadonlyMap<string, PendingDownload>;
   /** id → last failure message, until the next attempt clears it. */
   errors: ReadonlyMap<string, string>;
   hydrated: boolean;
@@ -155,6 +184,7 @@ interface DownloadsState {
 const EMPTY: DownloadsState = {
   records: [],
   progress: new Map(),
+  pending: new Map(),
   errors: new Map(),
   hydrated: false,
 };
@@ -189,6 +219,19 @@ function clearProgress(id: string): void {
   const progress = new Map(state.progress);
   progress.delete(id);
   emit({ progress });
+}
+
+function setPending(snapshot: PendingDownload): void {
+  const pending = new Map(state.pending);
+  pending.set(snapshot.id, snapshot);
+  emit({ pending });
+}
+
+function clearPending(id: string): void {
+  if (!state.pending.has(id)) return;
+  const pending = new Map(state.pending);
+  pending.delete(id);
+  emit({ pending });
 }
 
 function setError(id: string, message: string): void {
@@ -357,8 +400,19 @@ export async function startDownload(
   }
 
   const fileName = fileNameFor(detail.slug, entry.atEntryId, mode, url);
+  const artists = detail.artistName ?? detail.allArtists.join(', ');
   clearError(id);
   setProgress(id, null);
+  setPending({
+    id,
+    slug: detail.slug,
+    mode,
+    songTitle: detail.songTitle,
+    animeTitle: detail.animeTitle,
+    artistName: artists.length > 0 ? artists : null,
+    version: entry.version,
+    coverImage: detail.animeCoverImage,
+  });
   inFlightFiles.add(fileName);
   try {
     const dir = downloadsDir();
@@ -373,27 +427,39 @@ export async function startDownload(
       // with the real error, which is what gets surfaced.
     }
     let lastPercent = -1;
-    const file = await File.downloadFileAsync(url, dest, {
-      idempotent: true,
-      onProgress: ({ bytesWritten, totalBytes }) => {
-        if (totalBytes <= 0) return;
-        const fraction = Math.min(1, Math.max(0, bytesWritten / totalBytes));
-        const percent = Math.floor(fraction * 100);
-        if (percent !== lastPercent) {
-          lastPercent = percent;
-          setProgress(id, fraction);
-        }
-      },
+    const task = createDownloadResumable(url, dest.uri, {}, (data) => {
+      if (data.totalBytesExpectedToWrite <= 0) return;
+      const fraction = Math.min(
+        1,
+        Math.max(0, data.totalBytesWritten / data.totalBytesExpectedToWrite),
+      );
+      const percent = Math.floor(fraction * 100);
+      if (percent !== lastPercent) {
+        lastPercent = percent;
+        setProgress(id, fraction);
+      }
     });
-    const artists =
-      detail.artistName ?? detail.allArtists.join(', ');
+    activeTasks.set(id, task);
+    const result = await task.downloadAsync();
+    if (result === undefined) {
+      // Cancelled (cancelDownload): not an error — the partial is
+      // removed below and nothing is recorded anywhere.
+      try {
+        if (dest.exists) dest.delete();
+      } catch {
+        // Best-effort; the hydration sweep is the backstop.
+      }
+      clearProgress(id);
+      clearPending(id);
+      return null;
+    }
     const record: DownloadRecord = {
       id,
       slug: detail.slug,
       atEntryId: entry.atEntryId,
       mode,
       fileName,
-      size: file.size,
+      size: dest.exists ? dest.size : 0,
       sourceUrl: url,
       songTitle: detail.songTitle,
       animeTitle: detail.animeTitle,
@@ -406,6 +472,7 @@ export async function startDownload(
       (a, b) => b.downloadedAt.localeCompare(a.downloadedAt),
     );
     clearProgress(id);
+    clearPending(id);
     emit({ records });
     await persist(records);
     return null;
@@ -419,12 +486,34 @@ export async function startDownload(
       // Cleanup is best-effort; the hydration sweep is the backstop.
     }
     clearProgress(id);
+    clearPending(id);
     const message =
       e instanceof Error ? e.message : 'The download failed. Try again.';
     setError(id, message);
     return message;
   } finally {
+    activeTasks.delete(id);
     inFlightFiles.delete(fileName);
+  }
+}
+
+/** In-flight transfer handles, by download id — the cancel lever. */
+const activeTasks = new Map<string, DownloadResumable>();
+
+/**
+ * Cancel a download in flight (the Downloads screen's ✕). The
+ * transfer resolves as cancelled inside startDownload, which
+ * removes the partial and clears the row without recording an
+ * error. Cancelling an id that is not downloading is a no-op.
+ */
+export async function cancelDownload(id: string): Promise<void> {
+  const task = activeTasks.get(id);
+  if (!task) return;
+  try {
+    await task.cancelAsync();
+  } catch {
+    // The transfer may have settled in the same tick — startDownload
+    // owns the cleanup either way.
   }
 }
 
@@ -455,6 +544,8 @@ export async function removeDownload(id: string): Promise<void> {
 export interface UseDownloads {
   hydrated: boolean;
   records: DownloadRecord[];
+  /** Display snapshots of downloads still in flight (start order). */
+  downloading: PendingDownload[];
   /** Bytes held by healthy (non-broken) downloads. */
   totalBytes: number;
   /** True while id is downloading (progress may still be unknown). */
@@ -473,6 +564,8 @@ export interface UseDownloads {
     mode: PlaybackMode,
   ) => Promise<string | null>;
   remove: (id: string) => Promise<void>;
+  /** Cancel a download in flight; a no-op for settled ids. */
+  cancel: (id: string) => Promise<void>;
 }
 
 export function useDownloads(): UseDownloads {
@@ -485,6 +578,7 @@ export function useDownloads(): UseDownloads {
   return {
     hydrated: snap.hydrated,
     records: snap.records,
+    downloading: [...snap.pending.values()],
     totalBytes: snap.records.reduce(
       (sum, r) => sum + (r.fileMissing ? 0 : r.size),
       0,
@@ -496,5 +590,6 @@ export function useDownloads(): UseDownloads {
       findDownload(snap.records, slug, atEntryId, mode),
     start: startDownload,
     remove: removeDownload,
+    cancel: cancelDownload,
   };
 }

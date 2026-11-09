@@ -80,10 +80,13 @@ export class SocialController {
   @Get('users/:username/network')
   @ApiOkResponse({
     description:
-      'Followers + following lists, fully populated, in the web’s unsorted, unpaginated order.',
+      'Followers + following lists, fully populated, in the web’s unsorted, unpaginated order. Rows are enriched with the user’s rank tier, plus the caller’s follow state when a Bearer <redacted> is sent.',
   })
-  network(@Param('username') username: string): Promise<NetworkResponse> {
-    return this.social.getNetwork(username);
+  network(
+    @Param('username') username: string,
+    @Headers('authorization') authorization?: string,
+  ): Promise<NetworkResponse> {
+    return this.social.getNetwork(username, authorization);
   }
 
   @Get('users/:username/activity')

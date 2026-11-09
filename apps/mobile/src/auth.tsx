@@ -8,6 +8,8 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { Platform } from 'react-native';
+import { router } from 'expo-router';
 import type {
   AuthResponse,
   RegisterRequest,
@@ -27,7 +29,15 @@ import {
   AnilistDismissedError,
   AnilistFlowError,
   openAnilistFlow,
+  type AnilistRedirect,
 } from './anilistAuth';
+import {
+  anilistHandoffCancelled,
+  beginAnilistHandoff,
+  endAnilistHandoff,
+  isAnilistHandoffScreenMounted,
+  type AnilistHandoffIntent,
+} from './anilistHandoff';
 import {
   DEMO_ACCESS_TOKEN,
   DEMO_REFRESH_TOKEN,
@@ -61,6 +71,41 @@ import { secureGet, secureRemove, secureSet } from './storage';
  */
 
 const REFRESH_KEY = 'kaikansen.refreshToken';
+
+/**
+ * Run one AniList browser round-trip behind the §6.3 handoff
+ * screen (Slice 4): the waiting route is pushed before the auth
+ * session opens and popped when it settles, and a cancel on that
+ * screen (or backing out of it) turns whatever the browser
+ * eventually answers into a dismissal — the result is discarded
+ * BEFORE any token is stored or any link code is POSTed. Web
+ * never reaches here (the callers keep the placeholder there),
+ * and a second concurrent flow runs bare: the first owns the
+ * screen. See src/anilistHandoff.ts for the state contract.
+ */
+async function withAnilistHandoff(
+  intent: AnilistHandoffIntent,
+  run: () => Promise<AnilistRedirect>,
+): Promise<AnilistRedirect> {
+  if (Platform.OS === 'web') return run();
+  const began = beginAnilistHandoff(intent);
+  if (began) router.push('/anilist-handoff');
+  try {
+    if (began && anilistHandoffCancelled()) {
+      throw new AnilistDismissedError();
+    }
+    const result = await run();
+    if (began && anilistHandoffCancelled()) {
+      throw new AnilistDismissedError();
+    }
+    return result;
+  } finally {
+    if (began) {
+      endAnilistHandoff();
+      if (isAnilistHandoffScreenMounted()) router.back();
+    }
+  }
+}
 
 type AuthStatus = 'loading' | 'signedOut' | 'signedIn';
 
@@ -227,7 +272,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    */
   const loginWithAnilist = useCallback(async () => {
     const authorizeUrl = await fetchAnilistAuthorizeUrl('login');
-    const result = await openAnilistFlow(authorizeUrl);
+    const result = await withAnilistHandoff('login', () =>
+      openAnilistFlow(authorizeUrl),
+    );
     if (result.kind !== 'tokens') {
       throw new AnilistFlowError(null);
     }
@@ -259,7 +306,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let code: string;
     try {
       const authorizeUrl = await fetchAnilistAuthorizeUrl('link');
-      const result = await openAnilistFlow(authorizeUrl);
+      const result = await withAnilistHandoff('link', () =>
+        openAnilistFlow(authorizeUrl),
+      );
       if (result.kind !== 'code') throw new AnilistFlowError(null);
       code = result.code;
     } catch (e: unknown) {

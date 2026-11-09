@@ -5,6 +5,7 @@ import { AnilistClient } from '../auth/anilist.client';
 import { AuthService } from '../auth/auth.service';
 import { User, UserSchema } from '../auth/user.schema';
 import { Rating, RatingSchema } from '../library/rating.schema';
+import { UserRank, UserRankSchema } from '../quiz/user-rank.schema';
 import {
   WatchHistory,
   WatchHistorySchema,
@@ -53,6 +54,8 @@ export class SocialModule {
               { name: Rating.name, schema: RatingSchema },
               { name: WatchHistory.name, schema: WatchHistorySchema },
               { name: ThemeCache.name, schema: ThemeCacheSchema },
+              // Read-only here: the network rows' tier enrichment.
+              { name: UserRank.name, schema: UserRankSchema },
             ]),
           ]
         : [],

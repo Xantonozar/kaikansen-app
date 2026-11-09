@@ -48,6 +48,8 @@ interface AuthedSocket extends Socket {
  * - room:create        { roomType, poolMode, guessType, roundCount, maxPlayers?, matchmaking }
  * - room:join          { roomCode }
  * - room:public        { roomType, poolMode, guessType, maxPlayers? }
+ * - room:list-public   {} — the lobby's open public rooms (Slice 5;
+ *   this API's own addition, the web has no room list)
  * - room:subscribe     { roomId } — reattach after (re)connect; members only
  * - room:leave         { roomId }
  * - room:ready         { roomId } — toggles ready (duels auto-start)
@@ -164,6 +166,17 @@ export class QuizGateway implements OnGatewayInit, OnGatewayConnection {
   ): Promise<QuizRoomAck> {
     return this.run(client, () =>
       this.roomsService!.publicMatchmaking(this.user(client).userId, body),
+    );
+  }
+
+  @SubscribeMessage('room:list-public')
+  listPublic(
+    @ConnectedSocket() client: AuthedSocket,
+  ): Promise<QuizRoomAck> {
+    return this.run(
+      client,
+      () => this.roomsService!.listPublicRooms(),
+      false,
     );
   }
 

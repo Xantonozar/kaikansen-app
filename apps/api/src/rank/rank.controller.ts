@@ -1,6 +1,7 @@
-import { Controller, Get, Param, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import type {
+  PlayerRanksResponse,
   RankLeaderboardResponse,
   UserRankProfile,
 } from '@kaikansen/contracts';
@@ -48,6 +49,15 @@ export class RankController {
   })
   leaderboard(): Promise<RankLeaderboardResponse> {
     return this.rank.getLeaderboard();
+  }
+
+  @Get('players')
+  @ApiOkResponse({
+    description:
+      'Batched player rank standings for a room roster (?ids=<csv>) — read-only: players without a rank document report the academy / 0 RP defaults, nothing is created. Declared ahead of :userId so ‘players’ is never read as a user id.',
+  })
+  players(@Query('ids') ids?: string): Promise<PlayerRanksResponse> {
+    return this.rank.getPlayerRanks((ids ?? '').split(','));
   }
 
   @Get(':userId')

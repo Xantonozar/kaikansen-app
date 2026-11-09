@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -8,7 +8,11 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import {
+  useFocusEffect,
+  useLocalSearchParams,
+  useRouter,
+} from 'expo-router';
 import { VideoView } from 'expo-video';
 import {
   Download,
@@ -17,13 +21,16 @@ import {
   Pause,
   Play,
   RotateCcw,
+  SkipBack,
+  SkipForward,
   X,
 } from 'lucide-react-native';
-import type { PlaybackMode, ThemeDetail } from '@kaikansen/contracts';
-import { fetchThemeBySlug, fixtureMode } from '../../src/api';
+import type { PlaybackMode } from '@kaikansen/contracts';
+import { fixtureMode } from '../../src/api';
 import { formatTime } from '../../src/playback';
-import { usePlayback } from '../../src/usePlayback';
+import { usePlaybackSession } from '../../src/playback-context';
 import {
+  fontFamilies,
   radii,
   spacing,
   typeStyles,
@@ -44,12 +51,27 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * resolution video for watch; the listen chain stored audio →
  * derived .ogg → the video file behind the artwork), offline-first
  * downloads, history recording, error/retry — lives in
- * src/usePlayback.ts and is shared with the detail screen. This
- * route is the presentation shell: header (song/anime, Offline +
- * mode chips), the video surface (watch) or artwork with a hidden
- * surface (listen), and custom icon-led controls — play/pause
- * (replay once ended), a tap-to-seek bar with time labels,
- * fullscreen (watch only) and close.
+ * src/usePlayback.ts, owned by the ONE PlaybackProvider instance
+ * (src/playback-context.tsx) and shared with the detail screen and
+ * the mini player. This route is the presentation shell: header
+ * (song/anime, Offline + mode chips), the video surface (watch) or
+ * artwork with a hidden surface (listen), and custom icon-led
+ * controls — play/pause (replay once ended), a tap-to-seek bar
+ * with time labels, fullscreen (watch only) and close. Closing it
+ * leaves the session playing under the mini player.
+ *
+ * On focus the route ADOPTS its params into the shared session —
+ * but only when they identify a different track than the session's
+ * current item, and only once per distinct param set: when the
+ * session runs a queue (Slice 2.5), the queue may advance the
+ * session well past the params this route was opened with, and
+ * returning here must never clobber that queue — the route renders
+ * whatever the session holds, so an advance while the route is
+ * open is FOLLOWED (header, artwork and engine all move to the
+ * now-playing theme), never hijacked back to the stale params.
+ * When the session carries a queue, the mock's Up Next card
+ * appears under the controls. The provider resolves the claimed
+ * track's detail itself; this route no longer fetches.
  *
  * A usable local download renders the player even when the
  * catalogue fetch failed (fully offline open from the Library):
@@ -65,55 +87,83 @@ export default function PlayerScreen() {
     mode?: string;
     entry?: string;
   }>();
-  const mode: PlaybackMode = params.mode === 'listen' ? 'listen' : 'watch';
+  const paramMode: PlaybackMode =
+    params.mode === 'listen' ? 'listen' : 'watch';
+  const paramEntry =
+    params.entry != null && params.entry !== '' ? Number(params.entry) : null;
 
-  const [detail, setDetail] = useState<ThemeDetail | null>(null);
-  const [loadState, setLoadState] = useState<
-    'loading' | 'ready' | 'missing' | 'error'
-  >('loading');
+  const {
+    session,
+    playback,
+    resolution,
+    hasNext,
+    hasPrev,
+    next,
+    prev,
+    nextQueueItem,
+    startSession,
+    updateSession,
+  } = usePlaybackSession();
 
-  useEffect(() => {
-    let live = true;
-    setLoadState('loading');
-    fetchThemeBySlug(params.slug)
-      .then((data) => {
-        if (!live) return;
-        if (data) {
-          setDetail(data);
-          setLoadState('ready');
-        } else {
-          setLoadState('missing');
-        }
-      })
-      .catch(() => {
-        if (live) setLoadState('error');
-      });
-    return () => {
-      live = false;
-    };
-  }, [params.slug]);
+  /* Param adoption (see the header): a distinct param set is
+     adopted at most once. When the params identify the session's
+     current track — the normal case when a list screen claimed a
+     queue and pushed this route, or the mini player reopened it —
+     the session is left exactly as it is (only its mode/active
+     flags are reconciled), so the queue survives. When they
+     identify a different track, the route claims that track as a
+     fresh single play and the provider resolves its detail. Once
+     adopted, later session movement (queue advances, another
+     screen's claim) is followed, never fought. The control row
+     always carries prev/next flanking the main button — disabled
+     at the queue bounds, and in single-track sessions (no queue),
+     where both bounds are met at once. */
+  const adoptedKeyRef = useRef<string | null>(null);
+  const adoptParams = useCallback(() => {
+    const key = `${params.slug}:${paramEntry ?? ''}:${paramMode}`;
+    if (adoptedKeyRef.current === key) return;
+    adoptedKeyRef.current = key;
+    const currentEntryId =
+      session.entry?.atEntryId ?? session.entryIdOverride ?? null;
+    const sameTrack =
+      session.slug === params.slug &&
+      (paramEntry == null || paramEntry === currentEntryId);
+    if (sameTrack) {
+      if (session.mode !== paramMode || !session.active) {
+        updateSession({ mode: paramMode, active: true });
+      }
+      return;
+    }
+    startSession({
+      slug: params.slug,
+      detail: null,
+      entry: null,
+      entryIdOverride: paramEntry,
+      mode: paramMode,
+      active: true,
+    });
+  }, [
+    params.slug,
+    paramEntry,
+    paramMode,
+    session.slug,
+    session.entry,
+    session.entryIdOverride,
+    session.mode,
+    session.active,
+    startSession,
+    updateSession,
+  ]);
+  useFocusEffect(adoptParams);
 
-  const entry = useMemo(() => {
-    if (!detail) return null;
-    const wanted = Number(params.entry);
-    return (
-      detail.entries.find((e) => e.atEntryId === wanted) ??
-      detail.entries[0] ??
-      null
-    );
-  }, [detail, params.entry]);
-
-  const playback = usePlayback({
-    slug: params.slug,
-    detail,
-    entry,
-    entryIdOverride:
-      params.entry != null && params.entry !== ''
-        ? Number(params.entry)
-        : null,
-    mode,
-    active: true,
-  });
+  /* Everything renders from the shared session: its detail (the
+     provider resolves claimed tracks), its entry (for the header's
+     version line) and its mode (a queue keeps its claimed mode
+     across tracks, so the chips follow the session, not the
+     possibly-stale params). */
+  const detail = session.detail;
+  const entry = session.entry;
+  const mode = session.mode;
   const {
     player,
     localUsable,
@@ -147,20 +197,24 @@ export default function PlayerScreen() {
   // catalogue fetch failed (fully offline open from the Library):
   // header and artwork fall back to the download's stored snapshot.
   if (!detail && !localUsable) {
+    const resolutionFailed =
+      resolution !== null &&
+      resolution.slug === session.slug &&
+      (resolution.status === 'missing' || resolution.status === 'error');
     return (
       <View style={styles.screen}>
         <View style={[styles.topRow, { paddingTop: insets.top + spacing.sm }]}>
           {closeTile}
         </View>
         <View style={styles.center}>
-          {loadState === 'loading' ? (
-            <ActivityIndicator color={theme.accent} />
-          ) : (
+          {resolutionFailed ? (
             <Text style={styles.message}>
-              {loadState === 'missing'
+              {resolution.status === 'missing'
                 ? 'That theme could not be found.'
                 : 'Could not load this theme.'}
             </Text>
+          ) : (
+            <ActivityIndicator color={theme.accent} />
           )}
         </View>
       </View>
@@ -302,7 +356,23 @@ export default function PlayerScreen() {
                 </Text>
               </View>
               <View style={styles.buttonRow}>
-                <View style={styles.buttonSide} />
+                <View style={[styles.buttonSide, styles.buttonSideStart]}>
+                  <Pressable
+                    onPress={prev}
+                    disabled={!hasPrev}
+                    hitSlop={6}
+                    accessibilityRole="button"
+                    accessibilityLabel="Previous track"
+                    accessibilityState={{ disabled: !hasPrev }}
+                    style={({ pressed }) => [
+                      styles.sideButton,
+                      !hasPrev && styles.navDisabled,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <SkipBack size={24} color={theme.text} strokeWidth={2} />
+                  </Pressable>
+                </View>
                 <Pressable
                   onPress={playback.toggleMain}
                   accessibilityRole="button"
@@ -322,7 +392,26 @@ export default function PlayerScreen() {
                     <Play size={26} color={theme.onAccent} strokeWidth={2} />
                   )}
                 </Pressable>
-                <View style={styles.buttonSide}>
+                <View style={[styles.buttonSide, styles.buttonSideEnd]}>
+                  <Pressable
+                    onPress={next}
+                    disabled={!hasNext}
+                    hitSlop={6}
+                    accessibilityRole="button"
+                    accessibilityLabel="Next track"
+                    accessibilityState={{ disabled: !hasNext }}
+                    style={({ pressed }) => [
+                      styles.sideButton,
+                      !hasNext && styles.navDisabled,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <SkipForward
+                      size={24}
+                      color={theme.text}
+                      strokeWidth={2}
+                    />
+                  </Pressable>
                   {mode === 'watch' && (
                     <Pressable
                       onPress={() => {
@@ -341,6 +430,44 @@ export default function PlayerScreen() {
             </>
           )}
         </View>
+
+        {/* Up Next (the mock's card): the queue's next item, when
+            there is one. Tapping it — or its play disc — skips to
+            it, same as the Next control. */}
+        {hasNext && nextQueueItem && (
+          <Pressable
+            onPress={next}
+            accessibilityRole="button"
+            accessibilityLabel={`Up next: ${nextQueueItem.title}. Play it next`}
+            style={({ pressed }) => [
+              styles.upNext,
+              pressed && styles.pressed,
+            ]}
+          >
+            {nextQueueItem.coverUrl ? (
+              <Image
+                source={{ uri: nextQueueItem.coverUrl }}
+                style={styles.upNextCover}
+              />
+            ) : (
+              <View
+                style={[styles.upNextCover, styles.artworkPlaceholder]}
+              />
+            )}
+            <View style={styles.upNextText}>
+              <Text style={styles.upNextEyebrow}>UP NEXT</Text>
+              <Text style={styles.upNextTitle} numberOfLines={1}>
+                {nextQueueItem.title}
+              </Text>
+              <Text style={styles.upNextArtist} numberOfLines={1}>
+                {nextQueueItem.artistLine}
+              </Text>
+            </View>
+            <View style={styles.upNextDisc}>
+              <Play size={16} color={theme.onAccent} strokeWidth={2} />
+            </View>
+          </Pressable>
+        )}
       </View>
     </View>
   );
@@ -490,6 +617,61 @@ const createStyles = (theme: Theme) =>
     buttonSide: {
       flex: 1,
       alignItems: 'flex-end',
+    },
+    buttonSideStart: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'flex-start',
+    },
+    buttonSideEnd: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'flex-end',
+    },
+    navDisabled: {
+      opacity: 0.3,
+    },
+    upNext: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: theme.surface,
+      borderRadius: radii.card,
+      padding: spacing.md,
+      marginHorizontal: spacing.screenEdge,
+      marginTop: spacing.xl,
+    },
+    upNextCover: {
+      width: 44,
+      height: 44,
+      borderRadius: radii.base,
+      backgroundColor: theme.raised,
+    },
+    upNextText: {
+      flex: 1,
+    },
+    upNextEyebrow: {
+      ...typeStyles.caption,
+      color: theme.secondary,
+    },
+    upNextTitle: {
+      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
+      marginTop: 1,
+    },
+    upNextArtist: {
+      ...typeStyles.bodySmall,
+      color: theme.muted,
+      marginTop: 1,
+    },
+    upNextDisc: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: theme.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     sideButton: {
       width: 44,

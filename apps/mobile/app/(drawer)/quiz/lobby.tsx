@@ -1,40 +1,31 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type ComponentType,
+  type ElementRef,
 } from 'react';
 import {
   ActivityIndicator,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
+  type TextInputInstance,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
-  ChevronLeft,
-  Globe,
-  Hash,
-  Library,
-  Lock,
-  Mic,
-  Music,
-  Plus,
-  Shuffle,
-  Swords,
-  Tv,
-  Users,
-} from 'lucide-react-native';
+  useFocusEffect,
+  useLocalSearchParams,
+  useRouter,
+} from 'expo-router';
+import { ChevronLeft, Plus } from 'lucide-react-native';
 import type {
-  CreateRoomRequest,
-  QuizMatchmaking,
-  QuizPoolMode,
-  QuizRoomType,
+  PublicRoomListItem,
   RoomGuessType,
 } from '@kaikansen/contracts';
 import {
@@ -46,48 +37,54 @@ import {
   subscribeQuizSocketStatus,
   type QuizSocketStatus,
 } from '../../../src/quizSocket';
+import { Avatar } from '../../../src/components/Avatar';
 import {
+  fontFamilies,
   radii,
   spacing,
   typeStyles,
-  withOpacity,
   type Theme,
 } from '../../../src/theme';
 import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH, FORM_MAX_WIDTH } from '../../../src/layout';
 
-type Intent = 'create' | 'join' | 'public';
-type IconComponent = ComponentType<{
-  size?: number;
-  color?: string;
-  strokeWidth?: number;
-}>;
+const GUESS_LABEL: Record<RoomGuessType, string> = {
+  anime: 'Guess the Anime',
+  song: 'Guess the Song',
+  artist: 'Guess the Artist',
+};
 
-const GUESS_OPTIONS: { key: RoomGuessType; label: string; Icon: IconComponent }[] = [
-  { key: 'anime', label: 'Anime', Icon: Tv },
-  { key: 'song', label: 'Song', Icon: Music },
-  { key: 'artist', label: 'Artist', Icon: Mic },
-];
-
-const POOL_OPTIONS: { key: QuizPoolMode; label: string; Icon: IconComponent }[] = [
-  { key: 'random', label: 'Random', Icon: Shuffle },
-  { key: 'watched', label: 'Watched', Icon: Library },
-  { key: 'common', label: 'Common', Icon: Users },
-];
+const PUBLIC_REFRESH_MS = 20_000;
 
 /**
- * Multiplayer lobby (Slice M4) — the socket entry point: create a
- * room, join by 6-char code, or take a public match. All three are
- * `room:*` emits on the shared gateway connection (quizSocket.ts);
- * a success ack hands the socket to the room screen
- * (markRoomOwnership) and replaces this route with it, so the
- * connection outlives the navigation. Leaving without a room
- * disconnects.
+ * Multiplayer lobby (Slice 5 rebuild, design §6.22) — the single
+ * designed screen replacing the old Create/Join/Public tabs:
  *
- * Create mirrors the web's create body — rounds run 30s by the
- * server's create rule; the host can change the timer inside the
- * room. Errors from acks are shown verbatim (the API's room errors
- * are user-facing sentences, as on the web).
+ * - Create card → the Create Room screen (§6.23) — creation no
+ *   longer lives in the lobby;
+ * - Join with a code — the design's six single-character boxes over
+ *   one hidden input (so typing auto-advances, paste fills all six,
+ *   and backspace steps back naturally); incomplete codes keep Join
+ *   disabled with the hint showing, a rejected code marks the boxes
+ *   in the error colour with the server's message verbatim;
+ * - Public rooms — the discovery list served by the gateway's
+ *   `room:list-public` event (this API's addition; the web has no
+ *   room list). Rows join through the same `room:join` flow as a
+ *   typed code; full rooms render disabled, as designed. The list
+ *   refreshes on focus, on a 20s interval, and on pull-to-refresh.
+ *
+ * Quick match (the old `room:public` join-or-create card) was
+ * removed by owner decision 2026-11-09 — strict design only. The
+ * gateway capability itself is untouched; only the UI card is
+ * gone. The hub's Public entry now lands on the Public rooms
+ * section below instead.
+ *
+ * Socket lifecycle is unchanged from the tabbed lobby: the lobby
+ * owns the shared connection, a success ack hands it to the room
+ * screen (markRoomOwnership) and replaces this route, and leaving
+ * without a room disconnects. The hub's `intent` param is still
+ * accepted — 'join' focuses the code boxes, 'public' scrolls to
+ * the Public rooms section.
  */
 export default function QuizLobbyScreen() {
   const theme = useTheme();
@@ -95,25 +92,24 @@ export default function QuizLobbyScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ intent?: string }>();
 
-  const [intent, setIntent] = useState<Intent>(
-    params.intent === 'join' || params.intent === 'public'
-      ? params.intent
-      : 'create',
-  );
   const [connStatus, setConnStatus] = useState<QuizSocketStatus>('connecting');
   const [connError, setConnError] = useState<string | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
-  const [busy, setBusy] = useState<Intent | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Create / public form state.
-  const [roomType, setRoomType] = useState<QuizRoomType>('party');
-  const [guessType, setGuessType] = useState<RoomGuessType>('anime');
-  const [poolMode, setPoolMode] = useState<QuizPoolMode>('random');
-  const [roundCount, setRoundCount] = useState(10);
-  const [maxPlayers, setMaxPlayers] = useState(6);
-  const [matchmaking, setMatchmaking] = useState<QuizMatchmaking>('invite');
-  const [joinCode, setJoinCode] = useState('');
+  // Join-by-code state.
+  const [code, setCode] = useState('');
+  const [codeError, setCodeError] = useState<string | null>(null);
+  const [joining, setJoining] = useState<'code' | 'list' | null>(null);
+  const [joiningCode, setJoiningCode] = useState<string | null>(null);
+  const codeInputRef = useRef<TextInputInstance | null>(null);
+  const scrollRef = useRef<ElementRef<typeof ScrollView> | null>(null);
+  const publicSectionY = useRef<number | null>(null);
+
+  // Public rooms list state.
+  const [rooms, setRooms] = useState<PublicRoomListItem[] | null>(null);
+  const [roomsError, setRoomsError] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const handedOffRef = useRef(false);
 
@@ -124,7 +120,9 @@ export default function QuizLobbyScreen() {
     });
     void ensureQuizSocket().catch((e: unknown) => {
       setFatal(
-        e instanceof Error ? e.message : 'Could not connect to the quiz server.',
+        e instanceof Error
+          ? e.message
+          : 'Could not connect to the quiz server.',
       );
     });
     return () => {
@@ -137,6 +135,54 @@ export default function QuizLobbyScreen() {
 
   const connected = connStatus === 'connected';
 
+  const fetchRooms = useCallback(async () => {
+    try {
+      const ack = await emitRoomEvent('room:list-public', {});
+      if (ack.success && ack.rooms) {
+        setRooms(ack.rooms);
+        setRoomsError(false);
+      } else {
+        setRoomsError(true);
+      }
+    } catch {
+      setRoomsError(true);
+    }
+  }, []);
+
+  /* Fetch the public list when the screen focuses and keep it warm
+     on an interval while mounted (only over a live connection). */
+  useFocusEffect(
+    useCallback(() => {
+      if (!connected) return;
+      void fetchRooms();
+      const timer = setInterval(() => void fetchRooms(), PUBLIC_REFRESH_MS);
+      return () => clearInterval(timer);
+    }, [connected, fetchRooms]),
+  );
+
+  /* The hub's Join entry focuses the code boxes. */
+  useEffect(() => {
+    if (params.intent === 'join' && connected) {
+      const timer = setTimeout(() => codeInputRef.current?.focus(), 350);
+      return () => clearTimeout(timer);
+    }
+  }, [params.intent, connected]);
+
+  /* The hub's Public entry lands on the Public rooms section
+     (it used to rely on the Quick match card, removed 2026-11-09). */
+  useEffect(() => {
+    if (params.intent !== 'public') return;
+    const timer = setTimeout(() => {
+      if (publicSectionY.current !== null) {
+        scrollRef.current?.scrollTo({
+          y: Math.max(0, publicSectionY.current - spacing.sm),
+          animated: true,
+        });
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [params.intent]);
+
   const enterRoom = (roomId: string | undefined) => {
     if (!roomId) {
       setError('The server did not return a room. Please try again.');
@@ -147,52 +193,38 @@ export default function QuizLobbyScreen() {
     router.replace({ pathname: '/quiz/room', params: { roomId } });
   };
 
-  const run = async (kind: Intent, event: string, payload: Record<string, unknown>) => {
-    if (busy) return;
-    setBusy(kind);
+  const joinByCode = async (roomCode: string, via: 'code' | 'list') => {
+    if (joining) return;
+    setJoining(via);
+    setJoiningCode(roomCode);
+    if (via === 'code') setCodeError(null);
     setError(null);
     try {
-      const ack = await emitRoomEvent(event, payload);
+      const ack = await emitRoomEvent('room:join', { roomCode });
       if (!ack.success) {
-        setError(ack.error ?? 'The room action failed.');
+        const message = ack.error ?? 'Could not join that room.';
+        if (via === 'code') setCodeError(message);
+        else setError(message);
+        // A listed room may have filled or closed since the fetch.
+        if (via === 'list') void fetchRooms();
         return;
       }
       enterRoom(ack.roomId ?? ack.room?.roomId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'The room action failed.');
+      const message =
+        e instanceof Error ? e.message : 'Could not join that room.';
+      if (via === 'code') setCodeError(message);
+      else setError(message);
     } finally {
-      setBusy(null);
+      setJoining(null);
+      setJoiningCode(null);
     }
   };
 
-  const onCreate = () => {
-    const body: CreateRoomRequest = {
-      roomType,
-      poolMode,
-      guessType,
-      roundCount,
-      matchmaking,
-      ...(roomType === 'party' ? { maxPlayers } : {}),
-    };
-    void run('create', 'room:create', { ...body });
-  };
-
-  const onJoin = () => {
-    const code = joinCode.trim().toUpperCase();
-    if (code.length !== 6) {
-      setError('Room codes are 6 characters.');
-      return;
-    }
-    void run('join', 'room:join', { roomCode: code });
-  };
-
-  const onPublic = () => {
-    void run('public', 'room:public', {
-      roomType,
-      poolMode,
-      guessType,
-      ...(roomType === 'party' ? { maxPlayers: 6 } : {}),
-    });
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await fetchRooms();
+    setRefreshing(false);
   };
 
   const goBack = () => {
@@ -200,114 +232,12 @@ export default function QuizLobbyScreen() {
     else router.replace('/(tabs)/quiz');
   };
 
-  const chip = (
-    active: boolean,
-    label: string,
-    Icon: IconComponent | null,
-    onPress: () => void,
-  ) => (
-    <Pressable
-      key={label}
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-      style={({ pressed }) => [
-        styles.chip,
-        active && styles.chipActive,
-        pressed && styles.pressed,
-      ]}
-    >
-      {Icon && (
-        <Icon
-          size={15}
-          color={active ? theme.onAccent : theme.muted}
-          strokeWidth={2}
-        />
-      )}
-      <Text style={[styles.chipText, active && styles.chipTextActive]}>
-        {label}
-      </Text>
-    </Pressable>
-  );
+  const onCodeChange = (text: string) => {
+    setCode(text.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6));
+    setCodeError(null);
+  };
 
-  const fieldLabel = (text: string) => (
-    <Text style={styles.fieldLabel}>{text}</Text>
-  );
-
-  const roomTypeSegment = (
-    <View style={styles.segmentRow}>
-      <Pressable
-        onPress={() => setRoomType('party')}
-        accessibilityRole="button"
-        accessibilityState={{ selected: roomType === 'party' }}
-        style={[styles.segment, roomType === 'party' && styles.segmentActive]}
-      >
-        <Users
-          size={15}
-          color={roomType === 'party' ? theme.onAccent : theme.muted}
-          strokeWidth={2}
-        />
-        <Text
-          style={[
-            styles.segmentText,
-            roomType === 'party' && styles.segmentTextActive,
-          ]}
-        >
-          Party
-        </Text>
-      </Pressable>
-      <Pressable
-        onPress={() => setRoomType('duel')}
-        accessibilityRole="button"
-        accessibilityState={{ selected: roomType === 'duel' }}
-        style={[styles.segment, roomType === 'duel' && styles.segmentActive]}
-      >
-        <Swords
-          size={15}
-          color={roomType === 'duel' ? theme.onAccent : theme.muted}
-          strokeWidth={2}
-        />
-        <Text
-          style={[
-            styles.segmentText,
-            roomType === 'duel' && styles.segmentTextActive,
-          ]}
-        >
-          Duel
-        </Text>
-      </Pressable>
-    </View>
-  );
-
-  const actionButton = (
-    kind: Intent,
-    label: string,
-    Icon: IconComponent,
-    onPress: () => void,
-    disabled: boolean,
-  ) => (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ disabled, busy: busy === kind }}
-      style={({ pressed }) => [
-        styles.primaryButton,
-        disabled && styles.buttonDisabled,
-        pressed && styles.pressed,
-      ]}
-    >
-      {busy === kind ? (
-        <ActivityIndicator color={theme.onAccent} size="small" />
-      ) : (
-        <Icon size={17} color={theme.onAccent} strokeWidth={2} />
-      )}
-      <Text style={styles.primaryButtonText}>
-        {busy === kind ? 'Working…' : label}
-      </Text>
-    </Pressable>
-  );
+  const openCount = rooms?.filter((r) => !r.isFull).length ?? 0;
 
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -326,13 +256,7 @@ export default function QuizLobbyScreen() {
         <View style={styles.headerMain}>
           <Text style={styles.headerTitle}>Multiplayer</Text>
           <Text style={styles.headerSub}>
-            {connStatus === 'connected'
-              ? 'Connected'
-              : connStatus === 'connecting'
-                ? 'Connecting…'
-                : connStatus === 'error'
-                  ? 'Connection problem'
-                  : 'Offline'}
+            Play quizzes live with friends or anyone.
           </Text>
         </View>
         <View
@@ -345,9 +269,17 @@ export default function QuizLobbyScreen() {
       </View>
 
       <ScrollView
+        ref={scrollRef}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void onRefresh()}
+            tintColor={theme.accent}
+          />
+        }
       >
         <View style={styles.column}>
           {fatal ? (
@@ -356,178 +288,193 @@ export default function QuizLobbyScreen() {
             </View>
           ) : (
             <>
-              <View style={styles.segmentRow}>
-                {(
-                  [
-                    { key: 'create', label: 'Create', Icon: Plus },
-                    { key: 'join', label: 'Join', Icon: Hash },
-                    { key: 'public', label: 'Public', Icon: Globe },
-                  ] as { key: Intent; label: string; Icon: IconComponent }[]
-                ).map((tab) => (
-                  <Pressable
-                    key={tab.key}
-                    onPress={() => {
-                      setIntent(tab.key);
-                      setError(null);
-                    }}
-                    accessibilityRole="tab"
-                    accessibilityState={{ selected: intent === tab.key }}
-                    style={[
-                      styles.segment,
-                      intent === tab.key && styles.segmentActive,
-                    ]}
-                  >
-                    <tab.Icon
-                      size={15}
-                      color={
-                        intent === tab.key ? theme.onAccent : theme.muted
-                      }
-                      strokeWidth={2}
-                    />
-                    <Text
-                      style={[
-                        styles.segmentText,
-                        intent === tab.key && styles.segmentTextActive,
-                      ]}
-                    >
-                      {tab.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-
               {connStatus === 'error' && connError && (
                 <Text style={styles.errorText}>{connError}</Text>
               )}
               {error && <Text style={styles.errorText}>{error}</Text>}
 
-              {intent === 'create' && (
-                <View style={styles.card}>
-                  {fieldLabel('Room')}
-                  {roomTypeSegment}
-                  {fieldLabel('Guess the')}
-                  <View style={styles.chipRow}>
-                    {GUESS_OPTIONS.map((o) =>
-                      chip(guessType === o.key, o.label, o.Icon, () =>
-                        setGuessType(o.key),
-                      ),
-                    )}
-                  </View>
-                  {fieldLabel('Theme pool')}
-                  <View style={styles.chipRow}>
-                    {POOL_OPTIONS.map((o) =>
-                      chip(poolMode === o.key, o.label, o.Icon, () =>
-                        setPoolMode(o.key),
-                      ),
-                    )}
-                  </View>
-                  {fieldLabel('Rounds')}
-                  <View style={styles.chipRow}>
-                    {[5, 10, 15, 20].map((n) =>
-                      chip(roundCount === n, `${n}`, null, () =>
-                        setRoundCount(n),
-                      ),
-                    )}
-                  </View>
-                  {roomType === 'party' && (
-                    <>
-                      {fieldLabel('Max players')}
-                      <View style={styles.chipRow}>
-                        {[4, 6, 8].map((n) =>
-                          chip(maxPlayers === n, `${n}`, null, () =>
-                            setMaxPlayers(n),
-                          ),
-                        )}
-                      </View>
-                    </>
-                  )}
-                  {fieldLabel('Who can join')}
-                  <View style={styles.chipRow}>
-                    {chip(matchmaking === 'invite', 'By code', Lock, () =>
-                      setMatchmaking('invite'),
-                    )}
-                    {chip(matchmaking === 'public', 'Public', Globe, () =>
-                      setMatchmaking('public'),
-                    )}
-                  </View>
-                  <Text style={styles.hint}>
-                    Rounds run 30 seconds each — as host you can change the
-                    timer inside the room.
-                    {roomType === 'duel'
-                      ? ' Duels are 1v1 and start when both players are ready.'
-                      : ''}
-                  </Text>
-                  {actionButton(
-                    'create',
-                    'Create room',
-                    Plus,
-                    onCreate,
-                    !connected || busy !== null,
-                  )}
-                </View>
-              )}
+              {/* Create card (§6.22) */}
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Create a room</Text>
+                <Text style={styles.cardBody}>
+                  Host a Party of 3 to 8 players, or a 1v1 Duel.
+                </Text>
+                <Pressable
+                  onPress={() => router.push('/quiz/create')}
+                  disabled={!connected}
+                  accessibilityRole="button"
+                  accessibilityLabel="Create a room"
+                  accessibilityState={{ disabled: !connected }}
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    !connected && styles.buttonDisabled,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Plus size={17} color={theme.onAccent} strokeWidth={2} />
+                  <Text style={styles.primaryButtonText}>Create Room</Text>
+                </Pressable>
+              </View>
 
-              {intent === 'join' && (
-                <View style={styles.card}>
-                  {fieldLabel('Room code')}
+              {/* Join with a code (§6.22) */}
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Join with a code</Text>
+                <Pressable
+                  onPress={() => codeInputRef.current?.focus()}
+                  accessibilityRole="button"
+                  accessibilityLabel="Room code, 6 characters"
+                  style={styles.boxesPressable}
+                >
+                  <View style={styles.boxesRow} pointerEvents="none">
+                    {[0, 1, 2, 3, 4, 5].map((i) => (
+                      <View
+                        key={i}
+                        style={[
+                          styles.box,
+                          i === code.length &&
+                            !codeError &&
+                            styles.boxActive,
+                          codeError && styles.boxError,
+                          code[i] && styles.boxFilled,
+                        ]}
+                      >
+                        <Text style={styles.boxChar}>{code[i] ?? ''}</Text>
+                      </View>
+                    ))}
+                  </View>
                   <TextInput
-                    value={joinCode}
-                    onChangeText={(t) =>
-                      setJoinCode(t.toUpperCase().replace(/[^A-Z0-9]/g, ''))
-                    }
-                    placeholder="ABC123"
-                    placeholderTextColor={theme.muted}
+                    ref={codeInputRef}
+                    value={code}
+                    onChangeText={onCodeChange}
+                    onSubmitEditing={() => {
+                      if (code.length === 6) void joinByCode(code, 'code');
+                    }}
                     autoCapitalize="characters"
                     autoCorrect={false}
+                    caretHidden
                     maxLength={6}
-                    style={styles.codeInput}
+                    style={styles.hiddenInput}
                     accessibilityLabel="Room code"
                   />
+                </Pressable>
+                {codeError ? (
+                  <Text style={styles.errorText}>{codeError}</Text>
+                ) : (
                   <Text style={styles.hint}>
-                    Codes are 6 characters — ask the host for theirs.
+                    {code.length < 6
+                      ? `Codes are 6 characters — ${6 - code.length} to go. Ask the host for theirs.`
+                      : 'Ready — tap Join.'}
                   </Text>
-                  {actionButton(
-                    'join',
-                    'Join room',
-                    Hash,
-                    onJoin,
-                    !connected || busy !== null || joinCode.length !== 6,
-                  )}
-                </View>
-              )}
+                )}
+                <Pressable
+                  onPress={() => void joinByCode(code, 'code')}
+                  disabled={!connected || joining !== null || code.length !== 6}
+                  accessibilityRole="button"
+                  accessibilityLabel="Join room"
+                  accessibilityState={{
+                    disabled:
+                      !connected || joining !== null || code.length !== 6,
+                    busy: joining === 'code',
+                  }}
+                  style={({ pressed }) => [
+                    styles.joinButton,
+                    (!connected || joining !== null || code.length !== 6) &&
+                      styles.buttonDisabled,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  {joining === 'code' ? (
+                    <ActivityIndicator color={theme.accent} size="small" />
+                  ) : null}
+                  <Text style={styles.joinButtonText}>
+                    {joining === 'code' ? 'Joining…' : 'Join'}
+                  </Text>
+                </Pressable>
+              </View>
 
-              {intent === 'public' && (
-                <View style={styles.card}>
-                  {fieldLabel('Room')}
-                  {roomTypeSegment}
-                  {fieldLabel('Guess the')}
-                  <View style={styles.chipRow}>
-                    {GUESS_OPTIONS.map((o) =>
-                      chip(guessType === o.key, o.label, o.Icon, () =>
-                        setGuessType(o.key),
-                      ),
-                    )}
-                  </View>
-                  {fieldLabel('Theme pool')}
-                  <View style={styles.chipRow}>
-                    {POOL_OPTIONS.map((o) =>
-                      chip(poolMode === o.key, o.label, o.Icon, () =>
-                        setPoolMode(o.key),
-                      ),
-                    )}
-                  </View>
-                  <Text style={styles.hint}>
-                    Joins an open public room with these settings, or starts
-                    a new one (10 rounds) if none is waiting.
-                  </Text>
-                  {actionButton(
-                    'public',
-                    'Find a match',
-                    Globe,
-                    onPublic,
-                    !connected || busy !== null,
-                  )}
+              {/* Public rooms (§6.22) */}
+              <View
+                style={styles.sectionHead}
+                onLayout={(e) => {
+                  publicSectionY.current = e.nativeEvent.layout.y;
+                }}
+              >
+                <Text style={styles.sectionTitle}>Public rooms</Text>
+                {rooms !== null && (
+                  <Text style={styles.sectionMeta}>{openCount} open</Text>
+                )}
+              </View>
+              {rooms === null && !roomsError ? (
+                <View style={styles.cardCenter}>
+                  <ActivityIndicator color={theme.accent} />
                 </View>
+              ) : roomsError && rooms === null ? (
+                <Text style={styles.hint}>
+                  Could not load public rooms. Pull to retry.
+                </Text>
+              ) : rooms !== null && rooms.length === 0 ? (
+                <Text style={styles.hint}>
+                  No open rooms right now — create one above.
+                </Text>
+              ) : (
+                rooms?.map((room) => (
+                  <View key={room.roomId} style={styles.roomRow}>
+                    <Avatar
+                      url={room.hostAvatar}
+                      name={room.hostUsername}
+                      size={44}
+                    />
+                    <View style={styles.roomMain}>
+                      <Text style={styles.roomHost} numberOfLines={1}>
+                        {room.hostUsername}
+                      </Text>
+                      <Text style={styles.roomMeta} numberOfLines={1}>
+                        {room.roomType === 'party' ? 'Party' : 'Duel'} ·{' '}
+                        {GUESS_LABEL[room.guessType]} · {room.roundCount}{' '}
+                        rounds
+                      </Text>
+                    </View>
+                    <Text style={styles.roomCount}>
+                      {room.playerCount}/{room.maxPlayers}
+                    </Text>
+                    {room.isFull ? (
+                      <View
+                        style={[styles.joinPill, styles.joinPillDisabled]}
+                      >
+                        <Text style={styles.joinPillTextDisabled}>Full</Text>
+                      </View>
+                    ) : (
+                      <Pressable
+                        onPress={() => void joinByCode(room.roomCode, 'list')}
+                        disabled={!connected || joining !== null}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Join ${room.hostUsername}'s room`}
+                        accessibilityState={{
+                          disabled: !connected || joining !== null,
+                          busy:
+                            joining === 'list' &&
+                            joiningCode === room.roomCode,
+                        }}
+                        style={({ pressed }) => [
+                          styles.joinPill,
+                          (!connected || joining !== null) &&
+                            styles.buttonDisabled,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        {joining === 'list' &&
+                        joiningCode === room.roomCode ? (
+                          <ActivityIndicator
+                            color={theme.onAccent}
+                            size="small"
+                          />
+                        ) : (
+                          <Text style={styles.joinPillText}>Join</Text>
+                        )}
+                      </Pressable>
+                    )}
+                  </View>
+                ))
               )}
             </>
           )}
@@ -564,7 +511,9 @@ const createStyles = (theme: Theme) =>
       width: 38,
       height: 38,
       borderRadius: radii.base,
-      backgroundColor: theme.raised,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
       alignItems: 'center',
       justifyContent: 'center',
     },
@@ -572,7 +521,8 @@ const createStyles = (theme: Theme) =>
       flex: 1,
     },
     headerTitle: {
-      ...typeStyles.sectionLabel,
+      ...typeStyles.heading,
+      fontSize: 20,
       color: theme.text,
     },
     headerSub: {
@@ -603,87 +553,31 @@ const createStyles = (theme: Theme) =>
       alignSelf: 'center',
       gap: spacing.md,
     },
-    segmentRow: {
-      flexDirection: 'row',
-      gap: spacing.xs,
-      backgroundColor: theme.surface,
-      borderRadius: radii.base,
-      padding: spacing.xs,
-    },
-    segment: {
-      flex: 1,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: spacing.xs,
-      minHeight: 38,
-      borderRadius: radii.sm + 2,
-    },
-    segmentActive: {
-      backgroundColor: theme.accent,
-    },
-    segmentText: {
-      ...typeStyles.bodySmall,
-      color: theme.muted,
-    },
-    segmentTextActive: {
-      color: theme.onAccent,
-    },
     card: {
       backgroundColor: theme.surface,
       borderRadius: radii.card,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
       padding: spacing.lg,
       gap: spacing.md,
     },
-    fieldLabel: {
-      ...typeStyles.caption,
-      color: theme.muted,
-      textTransform: 'uppercase',
-      letterSpacing: 0.6,
-    },
-    chipRow: {
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      gap: spacing.sm,
-    },
-    chip: {
-      flexDirection: 'row',
+    cardCenter: {
+      backgroundColor: theme.surface,
+      borderRadius: radii.card,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      padding: spacing.xl,
       alignItems: 'center',
-      gap: spacing.xs + 2,
-      minHeight: 38,
-      paddingHorizontal: spacing.md,
-      borderRadius: radii.pill,
-      backgroundColor: theme.raised,
-      borderWidth: 1,
-      borderColor: theme.border,
     },
-    chipActive: {
-      backgroundColor: theme.accent,
-      borderColor: theme.accent,
+    cardTitle: {
+      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
     },
-    chipText: {
+    cardBody: {
       ...typeStyles.bodySmall,
-      color: theme.text,
-    },
-    chipTextActive: {
-      color: theme.onAccent,
-    },
-    hint: {
-      ...typeStyles.caption,
       color: theme.muted,
-    },
-    codeInput: {
-      ...typeStyles.mono,
-      fontSize: 22,
-      letterSpacing: 6,
-      color: theme.text,
-      backgroundColor: theme.raised,
-      borderRadius: radii.base,
-      borderWidth: 1,
-      borderColor: theme.border,
-      paddingHorizontal: spacing.lg,
-      paddingVertical: spacing.md,
-      textAlign: 'center',
+      lineHeight: 17,
     },
     primaryButton: {
       flexDirection: 'row',
@@ -699,8 +593,132 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.sectionLabel,
       color: theme.onAccent,
     },
+    joinButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: spacing.sm,
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.base,
+      minHeight: 48,
+      paddingHorizontal: spacing.lg,
+    },
+    joinButtonText: {
+      ...typeStyles.sectionLabel,
+      color: theme.accent,
+    },
     buttonDisabled: {
       opacity: 0.45,
+    },
+    boxesPressable: {
+      position: 'relative',
+    },
+    boxesRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+    },
+    box: {
+      flex: 1,
+      height: 56,
+      borderRadius: radii.base,
+      backgroundColor: theme.background,
+      borderWidth: 1,
+      borderColor: theme.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    boxFilled: {
+      backgroundColor: theme.surface,
+      borderColor: theme.muted,
+    },
+    boxActive: {
+      borderColor: theme.accent,
+      borderWidth: 1.5,
+    },
+    boxError: {
+      borderColor: theme.secondary,
+    },
+    boxChar: {
+      ...typeStyles.mono,
+      fontSize: 20,
+      color: theme.text,
+    },
+    hiddenInput: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      opacity: 0,
+    },
+    sectionHead: {
+      flexDirection: 'row',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      marginTop: spacing.sm,
+    },
+    sectionTitle: {
+      ...typeStyles.sectionLabel,
+      color: theme.text,
+    },
+    sectionMeta: {
+      ...typeStyles.caption,
+      color: theme.muted,
+    },
+    roomRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: theme.surface,
+      borderRadius: radii.card,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      padding: spacing.md,
+    },
+    roomMain: {
+      flex: 1,
+      gap: 2,
+    },
+    roomHost: {
+      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
+    },
+    roomMeta: {
+      ...typeStyles.caption,
+      color: theme.muted,
+    },
+    roomCount: {
+      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
+    },
+    joinPill: {
+      minWidth: 64,
+      minHeight: 36,
+      borderRadius: radii.pill,
+      backgroundColor: theme.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: spacing.md,
+    },
+    joinPillDisabled: {
+      backgroundColor: theme.accentContainer,
+    },
+    joinPillText: {
+      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.onAccent,
+    },
+    joinPillTextDisabled: {
+      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.muted,
+    },
+    hint: {
+      ...typeStyles.caption,
+      color: theme.muted,
+      lineHeight: 16,
     },
     errorText: {
       ...typeStyles.bodySmall,

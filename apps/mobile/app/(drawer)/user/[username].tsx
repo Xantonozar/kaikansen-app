@@ -11,36 +11,27 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   ChevronLeft,
-  Headphones,
+  ChevronRight,
   Pencil,
-  Play,
-  Star,
   UserCheck,
   UserPlus,
 } from 'lucide-react-native';
 import type {
-  NetworkResponse,
-  UserActivityItem,
   UserHistoryResponse,
   UserPublicProfile,
   UserRankProfile,
   UserRatingsResponse,
-  UserStats,
 } from '@kaikansen/contracts';
 import { fixtureMode } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
-import { PersonRow } from '../../../src/components/PersonRow';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import {
   fetchFollowState,
-  fetchUserActivity,
   fetchUserHistory,
-  fetchUserNetwork,
   fetchUserProfile,
   fetchUserRank,
   fetchUserRatings,
-  fetchUserStats,
   followUser,
   unfollowUser,
 } from '../../../src/socialApi';
@@ -57,25 +48,27 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
 const PREVIEW_COUNT = 8;
 
-function formatListened(totalSeconds: number): string {
-  const mins = Math.floor(totalSeconds / 60);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 48) return `${hours}h ${mins % 60}m`;
-  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
-}
-
 /**
  * Public profile (Slice M5) — GET /users/:username and its satellite
- * reads: stats, network, activity, ratings, history, the rank chip
- * (GET /rank/:userId via the profile's id) and the caller's follow
- * state. Sections degrade independently: a failed satellite hides or
- * notes itself instead of taking the whole screen down.
+ * reads: ratings, history, the rank chip (GET /rank/:userId via the
+ * profile's id) and the caller's follow state. Sections degrade
+ * independently: a failed satellite hides or notes itself instead
+ * of taking the whole screen down.
  *
- * Activity is privacy-gated server-side (owner, or someone the owner
- * follows — everyone else gets an empty list). An empty list on
- * someone else's profile is therefore phrased as "isn't visible",
- * never filled in; on your own profile it is an honest "none yet".
+ * The follower/following lists are NOT expanded here any more:
+ * since layout-fidelity Slice 4 the stat blocks open the standalone
+ * Network screen (§6.17), like the web's separate network page.
+ *
+ * Layout-fidelity Slice 6 aligned the composition to the §6.16
+ * design: the identity block is one white card (identity, bio,
+ * follow/edit action, then the stats row in the design's order —
+ * Ratings · Followers · Following), "Top ratings" previews the
+ * first ratings, and the design's "See all ratings and history"
+ * row expands the full ratings + the history list in place (there
+ * is no separate all-ratings route in the app or the web). The
+ * Recent activity section the pre-fidelity build carried is NOT
+ * in the design and is removed — the activity read itself is
+ * untouched server-side and still powers nothing here.
  *
  * Follow/unfollow is optimistic (state + follower count flip
  * immediately, the response reconciles, an error reverts and shows
@@ -91,16 +84,11 @@ export default function UserProfileScreen() {
 
   const [profile, setProfile] = useState<UserPublicProfile | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [stats, setStats] = useState<UserStats | null>(null);
   const [rank, setRank] = useState<UserRankProfile | null>(null);
-  const [network, setNetwork] = useState<NetworkResponse | null>(null);
-  const [listTab, setListTab] = useState<'followers' | 'following' | null>(
-    null,
-  );
-  const [activity, setActivity] = useState<UserActivityItem[] | null>(null);
-  const [activityError, setActivityError] = useState(false);
   const [ratings, setRatings] = useState<UserRatingsResponse | null>(null);
   const [history, setHistory] = useState<UserHistoryResponse | null>(null);
+  /** The design's "See all ratings and history" expansion (Slice 6). */
+  const [expanded, setExpanded] = useState(false);
 
   const [isFollowing, setIsFollowing] = useState(false);
   const [followersCount, setFollowersCount] = useState(0);
@@ -116,14 +104,10 @@ export default function UserProfileScreen() {
     let live = true;
     setProfile(null);
     setLoadError(null);
-    setStats(null);
     setRank(null);
-    setNetwork(null);
-    setListTab(null);
-    setActivity(null);
-    setActivityError(false);
     setRatings(null);
     setHistory(null);
+    setExpanded(false);
     setIsFollowing(false);
     setFollowError(null);
     fetchUserProfile(username)
@@ -132,18 +116,9 @@ export default function UserProfileScreen() {
         setProfile(p);
         setFollowersCount(p.totalFollowers);
         // Satellites — each settles on its own.
-        fetchUserStats(p.username)
-          .then((s) => live && setStats(s))
-          .catch(() => {});
         fetchUserRank(p.id)
           .then((r) => live && setRank(r))
           .catch(() => {});
-        fetchUserNetwork(p.username)
-          .then((n) => live && setNetwork(n))
-          .catch(() => {});
-        fetchUserActivity(p.username)
-          .then((a) => live && setActivity(a.activity))
-          .catch(() => live && setActivityError(true));
         fetchUserRatings(p.username)
           .then((r) => live && setRatings(r))
           .catch(() => live && setRatings({ ratings: [] }));
@@ -220,7 +195,6 @@ export default function UserProfileScreen() {
       .finally(() => setFollowBusy(false));
   };
 
-  const openProfile = (name: string) => router.push(`/user/${name}`);
   const openTheme = (slug: string) => router.push(`/theme/${slug}`);
 
   const statBlock = (
@@ -229,27 +203,20 @@ export default function UserProfileScreen() {
     tab: 'followers' | 'following' | null,
   ) => (
     <Pressable
-      onPress={() => tab && setListTab((t) => (t === tab ? null : tab))}
+      onPress={() =>
+        tab &&
+        profile &&
+        router.push(`/network/${profile.username}?tab=${tab}`)
+      }
       disabled={!tab}
       accessibilityRole="button"
       accessibilityLabel={`${label}: ${value}`}
-      accessibilityState={{ selected: tab !== null && listTab === tab }}
       style={styles.statBlock}
     >
-      <Text
-        style={[
-          styles.statValue,
-          tab !== null && listTab === tab && styles.statValueActive,
-        ]}
-      >
-        {value}
-      </Text>
+      <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
     </Pressable>
   );
-
-  const listUsers = listTab ? (network?.[listTab] ?? []) : [];
-  const visibleList = listUsers.filter((u) => u !== null);
 
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -280,51 +247,41 @@ export default function UserProfileScreen() {
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
-          <View style={styles.identity}>
-            <Avatar
-              url={profile.avatarUrl}
-              name={profile.displayName || profile.username}
-              size={64}
-            />
-            <View style={styles.identityText}>
-              <Text style={styles.displayName} numberOfLines={1}>
-                {profile.displayName || profile.username}
-              </Text>
-              <Text style={styles.handle}>@{profile.username}</Text>
-              {rank && (
-                <View style={styles.rankChip}>
-                  <Text style={styles.rankChipText}>
-                    {rank.tier.charAt(0).toUpperCase() + rank.tier.slice(1)}
-                    {rank.division ? ` ${rank.division}` : ''} · {rank.rp} RP
-                  </Text>
-                </View>
-              )}
+          {/* Identity card (§6.16): identity, bio, the follow/edit
+              action and the stats row in ONE white card; the stats
+              run in the design's order — Ratings · Followers ·
+              Following. (The pre-fidelity build's Joined/Listened
+              line under the bio is not in the design.) */}
+          <View style={styles.identityCard}>
+            <View style={styles.identity}>
+              <Avatar
+                url={profile.avatarUrl}
+                name={profile.displayName || profile.username}
+                size={64}
+              />
+              <View style={styles.identityText}>
+                <Text style={styles.displayName} numberOfLines={1}>
+                  {profile.displayName || profile.username}
+                </Text>
+                <Text style={styles.handle}>@{profile.username}</Text>
+                {rank && (
+                  <View style={styles.rankChip}>
+                    <Text style={styles.rankChipText}>
+                      {rank.tier.charAt(0).toUpperCase() + rank.tier.slice(1)}
+                      {rank.division ? ` ${rank.division}` : ''} · {rank.rp} RP
+                    </Text>
+                  </View>
+                )}
+              </View>
             </View>
-          </View>
 
-          {profile.bio.length > 0 && (
-            <Text style={styles.bio}>{profile.bio}</Text>
-          )}
-          <Text style={styles.joined}>
-            Joined{' '}
-            {new Date(profile.createdAt).toLocaleDateString(undefined, {
-              month: 'short',
-              year: 'numeric',
-            })}
-            {stats && stats.totalTime > 0
-              ? ` · Listened ${formatListened(stats.totalTime)}`
-              : ''}
-          </Text>
+            {profile.bio.length > 0 && (
+              <Text style={styles.bio}>{profile.bio}</Text>
+            )}
 
-          <View style={styles.statRow}>
-            {statBlock('Followers', followersCount, 'followers')}
-            {statBlock('Following', profile.totalFollowing, 'following')}
-            {statBlock('Ratings', profile.totalRatings, null)}
-          </View>
-
-          {isOwn ? (
+            {isOwn ? (
             <Pressable
-              onPress={() => router.push('/settings')}
+              onPress={() => router.push('/edit-profile')}
               accessibilityRole="button"
               accessibilityLabel="Edit profile"
               style={({ pressed }) => [
@@ -382,99 +339,22 @@ export default function UserProfileScreen() {
               <Text style={styles.actionAccentText}>Log in to follow</Text>
             </Pressable>
           )}
-          {followError && <Text style={styles.errorText}>{followError}</Text>}
+            {followError && <Text style={styles.errorText}>{followError}</Text>}
 
-          {listTab && (
-            <View style={styles.listSection}>
-              <Text style={styles.sectionHeading}>
-                {listTab === 'followers' ? 'Followers' : 'Following'}
-              </Text>
-              {network === null ? (
-                <View style={styles.center}>
-                  <ActivityIndicator color={theme.accent} />
-                </View>
-              ) : visibleList.length === 0 ? (
-                <Text style={styles.note}>
-                  {listTab === 'followers'
-                    ? 'No followers yet.'
-                    : 'Not following anyone yet.'}
-                </Text>
-              ) : (
-                visibleList.map(
-                  (person) =>
-                    person && (
-                      <PersonRow
-                        key={person.id}
-                        displayName={person.displayName}
-                        username={person.username}
-                        avatarUrl={person.avatarUrl}
-                        onPress={() => openProfile(person.username)}
-                      />
-                    ),
-                )
-              )}
+            <View style={styles.statRow}>
+              {statBlock('Ratings', profile.totalRatings, null)}
+              {statBlock('Followers', followersCount, 'followers')}
+              {statBlock('Following', profile.totalFollowing, 'following')}
             </View>
-          )}
-
-          <Text style={styles.sectionHeading}>Recent activity</Text>
-          {activity === null && !activityError ? (
-            <View style={styles.center}>
-              <ActivityIndicator color={theme.accent} />
-            </View>
-          ) : activityError ? (
-            <Text style={styles.note}>Could not load activity.</Text>
-          ) : activity && activity.length > 0 ? (
-            activity.slice(0, PREVIEW_COUNT).map((item) => {
-              const Icon =
-                item.activityType === 'rating'
-                  ? Star
-                  : item.mode === 'listen'
-                    ? Headphones
-                    : Play;
-              const line =
-                item.activityType === 'rating'
-                  ? `Rated ${item.score ?? '?'}/10`
-                  : item.mode === 'listen'
-                    ? 'Listened'
-                    : 'Watched';
-              return (
-                <Pressable
-                  key={item.id}
-                  onPress={() => openTheme(item.themeSlug)}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Open ${item.theme?.songTitle ?? item.themeSlug}`}
-                  style={({ pressed }) => [
-                    styles.activityRow,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <View style={styles.activityIcon}>
-                    <Icon size={15} color={theme.muted} strokeWidth={2} />
-                  </View>
-                  <View style={styles.activityMain}>
-                    <Text style={styles.activityTitle} numberOfLines={1}>
-                      {item.theme?.songTitle ?? item.themeSlug}
-                    </Text>
-                    <Text style={styles.activityMeta} numberOfLines={1}>
-                      {line} · {relativeTime(item.date)}
-                      {item.theme ? ` · ${item.theme.animeTitle}` : ''}
-                    </Text>
-                  </View>
-                </Pressable>
-              );
-            })
-          ) : (
-            <Text style={styles.note}>
-              {isOwn
-                ? 'No watches or ratings yet.'
-                : 'Their recent activity isn’t visible.'}
-            </Text>
-          )}
+          </View>
 
           {ratings && ratings.ratings.length > 0 && (
             <>
-              <Text style={styles.sectionHeading}>Ratings</Text>
-              {ratings.ratings.slice(0, PREVIEW_COUNT).map((entry) =>
+              <Text style={styles.sectionHeading}>Top ratings</Text>
+              {(expanded
+                ? ratings.ratings
+                : ratings.ratings.slice(0, PREVIEW_COUNT)
+              ).map((entry) =>
                 entry.theme ? (
                   <ThemeRow
                     key={entry.id}
@@ -503,10 +383,32 @@ export default function UserProfileScreen() {
             </>
           )}
 
-          {history && history.entries.length > 0 && (
+          {/* The design's "See all ratings and history" row: it
+              expands the full ratings list and reveals History in
+              place (no separate route exists in app or web). */}
+          {!expanded &&
+            ((ratings && ratings.ratings.length > PREVIEW_COUNT) ||
+              (history && history.entries.length > 0)) && (
+              <Pressable
+                onPress={() => setExpanded(true)}
+                accessibilityRole="button"
+                accessibilityLabel="See all ratings and history"
+                style={({ pressed }) => [
+                  styles.seeAllRow,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.seeAllText}>
+                  See all ratings and history
+                </Text>
+                <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
+              </Pressable>
+            )}
+
+          {expanded && history && history.entries.length > 0 && (
             <>
               <Text style={styles.sectionHeading}>History</Text>
-              {history.entries.slice(0, PREVIEW_COUNT).map((entry) =>
+              {history.entries.map((entry) =>
                 entry.theme ? (
                   <ThemeRow
                     key={entry.id}
@@ -584,11 +486,20 @@ const createStyles = (theme: Theme) =>
       paddingHorizontal: spacing.screenEdge,
       paddingBottom: spacing.xxxl,
     },
+    identityCard: {
+      // §6.16: the identity block is one white card.
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.cardLg,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.lg,
+      marginTop: spacing.sm,
+    },
     identity: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
-      marginTop: spacing.sm,
     },
     identityText: {
       flex: 1,
@@ -622,19 +533,30 @@ const createStyles = (theme: Theme) =>
       lineHeight: 20,
       marginTop: spacing.md,
     },
-    joined: {
-      ...typeStyles.caption,
-      color: theme.muted,
-      marginTop: spacing.sm,
-    },
     statRow: {
+      // Inside the identity card now, divided by a hairline.
       flexDirection: 'row',
       marginTop: spacing.lg,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: theme.border,
+      paddingTop: spacing.md,
+    },
+    seeAllRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
       backgroundColor: theme.surface,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.border,
-      borderRadius: radii.md,
-      paddingVertical: spacing.sm,
+      borderRadius: radii.card,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.md,
+      marginTop: spacing.md,
+    },
+    seeAllText: {
+      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
     },
     statBlock: {
       flex: 1,
@@ -646,9 +568,6 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.body,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.text,
-    },
-    statValueActive: {
-      color: theme.accent,
     },
     statLabel: {
       ...typeStyles.caption,
@@ -690,9 +609,6 @@ const createStyles = (theme: Theme) =>
       marginTop: spacing.sm,
       lineHeight: 18,
     },
-    listSection: {
-      marginTop: spacing.sm,
-    },
     sectionHeading: {
       ...typeStyles.heading,
       fontSize: 16,
@@ -714,15 +630,6 @@ const createStyles = (theme: Theme) =>
       paddingVertical: 6,
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: theme.border,
-    },
-    activityIcon: {
-      width: 32,
-      height: 32,
-      borderRadius: 10,
-      backgroundColor: theme.raised,
-      alignItems: 'center',
-      justifyContent: 'center',
-      flexShrink: 0,
     },
     activityMain: {
       flex: 1,

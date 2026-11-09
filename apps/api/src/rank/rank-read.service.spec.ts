@@ -262,6 +262,48 @@ describe('RankReadService.getRank', () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* getPlayerRanks — the app-only batched read (never creates)          */
+/* ------------------------------------------------------------------ */
+
+describe('RankReadService.getPlayerRanks', () => {
+  it('returns tier + RP for ranked players, in request order', async () => {
+    const world = makeWorld();
+    const service = makeService(world);
+    const res = await service.getPlayerRanks(['carol-id', 'alice-id']);
+    expect(res.players).toEqual([
+      { userId: 'carol-id', tier: 'academy', rp: 100 },
+      { userId: 'alice-id', tier: 'genin', rp: 900 },
+    ]);
+    expect(world.createCalls()).toBe(0);
+  });
+
+  it('reports the materialised defaults for a player with no rank document — and creates NOTHING', async () => {
+    const world = makeWorld();
+    const service = makeService(world);
+    const res = await service.getPlayerRanks(['alice-id', 'new-player']);
+    expect(res.players).toEqual([
+      { userId: 'alice-id', tier: 'genin', rp: 900 },
+      { userId: 'new-player', tier: 'academy', rp: 0 },
+    ]);
+    // The whole point of the endpoint: unlike getRank, no write.
+    expect(world.createCalls()).toBe(0);
+    expect(world.ranks.some((r) => r.userId === 'new-player')).toBe(false);
+  });
+
+  it('dedupes repeated ids and answers an empty list for no ids', async () => {
+    const world = makeWorld();
+    const service = makeService(world);
+    const res = await service.getPlayerRanks(['bob-id', 'bob-id', '']);
+    expect(res.players).toEqual([
+      { userId: 'bob-id', tier: 'genin', rp: 500 },
+    ]);
+    await expect(service.getPlayerRanks([])).resolves.toEqual({
+      players: [],
+    });
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* getLeaderboard                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -412,6 +454,9 @@ describe('RankReadService without models', () => {
       ServiceUnavailableException,
     );
     await expect(service.getLeaderboard()).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+    await expect(service.getPlayerRanks(['alice-id'])).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
   });

@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -11,27 +12,30 @@ import {
   Modal,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import {
+  useFocusEffect,
+  useLocalSearchParams,
+  useRouter,
+} from 'expo-router';
 import { VideoView } from 'expo-video';
 import {
-  Bookmark,
   Check,
   ChevronLeft,
   Download,
   Headphones,
+  Heart,
   LayoutGrid,
-  ListMusic,
+  ListPlus,
   Maximize,
   Music,
   Pause,
   Play,
-  Plus,
   RotateCcw,
   Share2,
   Star,
@@ -41,7 +45,6 @@ import {
 } from 'lucide-react-native';
 import type {
   PlaybackMode,
-  PlaylistSummary,
   ThemeDetail,
   ThemeRatingState,
   ThemeSummary,
@@ -53,18 +56,15 @@ import {
 } from '../../../src/api';
 import { ThemeComments } from '../../../src/components/ThemeComments';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import { AddToPlaylistSheet } from '../../../src/components/AddToPlaylistSheet';
 import { useAuth } from '../../../src/auth';
 import {
   applyFavoriteState,
   useFavorites,
 } from '../../../src/favoritesStore';
 import {
-  addPlaylistItem,
   clearRating as deleteRating,
-  createPlaylist,
   fetchFavoriteState,
-  fetchPlaylist,
-  fetchPlaylists,
   fetchRatingState,
   setRating as putRating,
 } from '../../../src/libraryApi';
@@ -74,7 +74,12 @@ import {
   isPlausibleUrl,
   resolvePlaybackUrl,
 } from '../../../src/playback';
-import { usePlayback } from '../../../src/usePlayback';
+import {
+  queueItemFromSummary,
+  queueItemsFromSummaries,
+  usePlaybackSession,
+  type QueueItem,
+} from '../../../src/playback-context';
 import {
   downloadId,
   downloadsSupported,
@@ -110,30 +115,42 @@ type IconComponent = ComponentType<{
  *      the hero itself into the player (video surface for watch,
  *      artwork + hidden surface for listen) with the control
  *      strip inside the hero — the page never navigates away.
- *      Playback runs on src/usePlayback.ts, shared with the
- *      player route the Library/playlists still open.
- *   2. Info header — anime title as a small accent eyebrow, the
- *      song title large, the artists line, one muted meta line
- *      (type/sequence · season · moods).
- *   3. Action bar — Watch/Listen segmented toggle (starts inline
- *      playback in that mode; Listen disabled when the selected
- *      entry has no audio, like the web's), then Download
- *      (primary, opens the download sheet) + add-to-playlist and
- *      share squares.
- *   4. Version Select — pill switcher, only when entries > 1.
+ *      Playback runs on the shared session (src/playback-context
+ *      .tsx): Watch/Listen claims it, and it keeps playing under
+ *      the mini player after leaving — the player route the
+ *      Library/playlists still open binds to the same session.
+ *   2. Watch/Listen segmented toggle — directly under the hero
+ *      (starts inline playback in that mode; Listen disabled when
+ *      the selected entry has no audio, like the web's).
+ *   3. Info header — the song title large, the artists line, then
+ *      the meta row: anime title · season pill ("FALL 1995").
+ *   4. Action row — the design's four lavender discs (design law
+ *      #6): favourite (heart — the shared favorites store, the
+ *      hero-overlay bookmark's replacement), add-to-playlist,
+ *      download (opens the download sheet; shows % while a
+ *      download runs and a check once downloaded), share (the
+ *      system share sheet with the theme's web URL — the web
+ *      copies that same link).
+ *   5. Version Select — pill switcher, only when entries > 1.
  *      Like the web's VersionSwitcher it SELECTS the entry the
  *      Watch/Listen/download actions target — and while playing
  *      it switches the inline player's source, as the web's does.
  *      The default selection mirrors the web: the 'Standard'
  *      version when one exists, else the first entry.
- *   5. Stats bar — Score · Rates · Views · Plays, counts compacted
- *      with the web's formatCount.
- *   6. Rating card — the caller's own 1–10 rating (Slice M2).
- *   7. Comments — the shared ThemeComments section (Slice M5).
- *   8. Related themes — the web's categorised lists (Same Anime
+ *   6. Rating card — one white card per the v7 design: the
+ *      Community score (big, with its star) + Rates + Plays on
+ *      top (counts compacted with the web's formatCount), a
+ *      divider, then "Your rating" with the caller's score as a
+ *      mauve "N / 10" pill and 10 tappable stars (design law #5;
+ *      Slice M2's rating behaviour). The old separate stats bar's
+ *      Views cell is not in the v7 card — totalWatches stays in
+ *      the payload, just not drawn here (Slice 6, measured).
+ *   7. Related themes — the web's categorised lists (Same Anime
  *      Themes / Franchise & Seasons / More by this Artist /
  *      Recommended for You) as ThemeRow lists, with the web's
- *      empty state when there is nothing related.
+ *      empty state when there is nothing related. (v7 order:
+ *      Similar before Comments — Slice 6 swapped the sections.)
+ *   8. Comments — the shared ThemeComments section (Slice M5).
  *
  * Loading (the fix): every read this screen needs is keyed by the
  * slug alone, so ALL of them fire in parallel the moment the slug
@@ -160,6 +177,15 @@ export default function ThemeDetailScreen() {
   const { status: authStatus } = useAuth();
   const favorites = useFavorites();
   const downloads = useDownloads();
+  /* Shared playback session (src/playback-context.tsx): this screen
+     claims it via Watch/Listen; `playback` below is the provider's
+     one engine, not a private hook instance. */
+  const { playback, session, startSession, updateSession, endSession } =
+    usePlaybackSession();
+  const sessionSlugRef = useRef<string | null>(session.slug);
+  useEffect(() => {
+    sessionSlugRef.current = session.slug;
+  }, [session.slug]);
   const signedIn = authStatus === 'signedIn';
   const [selectedEntryIndex, setSelectedEntryIndex] = useState(0);
   const [detail, setDetail] = useState<ThemeDetail | null>(null);
@@ -174,23 +200,14 @@ export default function ThemeDetailScreen() {
   );
   const [ratingBusy, setRatingBusy] = useState(false);
   const [ratingError, setRatingError] = useState<string | null>(null);
+  /* The add-to-playlist picker is the shared AddToPlaylistSheet
+     (Slice 5 extraction) — this screen only tracks its visibility. */
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [sheetLoading, setSheetLoading] = useState(false);
-  const [sheetError, setSheetError] = useState<string | null>(null);
-  const [sheetMessage, setSheetMessage] = useState<string | null>(null);
-  const [myPlaylists, setMyPlaylists] = useState<PlaylistSummary[] | null>(
-    null,
-  );
-  const [containedIds, setContainedIds] = useState<ReadonlySet<string>>(
-    new Set(),
-  );
-  const [sheetBusyId, setSheetBusyId] = useState<string | null>(null);
-  const [newPlaylistName, setNewPlaylistName] = useState('');
-  const [creatingInSheet, setCreatingInSheet] = useState(false);
   const [dlSheetOpen, setDlSheetOpen] = useState(false);
 
   /* Inline playback: null until the user presses Watch/Listen —
-     the hero then becomes the player (see usePlayback). */
+     the hero then becomes the player (the shared session, see
+     src/playback-context.tsx). */
   const [playMode, setPlayMode] = useState<PlaybackMode | null>(null);
   const [barWidth, setBarWidth] = useState(0);
   const videoRef = useRef<VideoView>(null);
@@ -206,6 +223,10 @@ export default function ThemeDetailScreen() {
   /* The detail read — fires immediately on slug, in parallel with
      everything below. */
   useEffect(() => {
+    /* Landing on a different theme ends any live session held for
+       another slug — the old per-screen hook unloaded on slug
+       change; the shared session keeps that reset deliberately. */
+    if (sessionSlugRef.current !== slug) endSession();
     let live = true;
     setState('loading');
     setDetail(null);
@@ -297,20 +318,13 @@ export default function ThemeDetailScreen() {
     selectedEntry !== null &&
     entryHasAudio(detail, selectedEntry);
 
-  /* Inline playback engine (src/usePlayback) — inactive until the
-     user presses Watch/Listen; then the hero below is the player.
-     Switching the selected entry while playing switches the source,
-     like the web's VersionSwitcher driving its inline player. */
-  const playback = usePlayback({
-    slug: detail?.slug ?? slug,
-    detail,
-    entry: selectedEntry,
-    mode: playMode ?? 'watch',
-    active: playMode !== null && detail !== null,
-  });
-
   /** Start (or switch to) inline playback in a mode, for an entry
-      (defaults to the selected one). */
+      (defaults to the selected one) — claims the shared session;
+      the hero below then renders the provider's engine, and the
+      session keeps playing under the mini player after leaving.
+      Switching the selected entry while playing switches the
+      session's entry (see the Version Select tiles), like the
+      web's VersionSwitcher driving its inline player. */
   const startPlayback = (
     mode: PlaybackMode,
     entryIndex = selectedEntryIndex,
@@ -320,7 +334,68 @@ export default function ThemeDetailScreen() {
     if (!entry) return;
     setSelectedEntryIndex(entryIndex);
     setPlayMode(mode);
+    /* Queue claim (Slice 2.5): [this theme, ...the similar/
+       related themes already fetched for this screen], current
+       theme at index 0 carrying its selected entry; similar
+       items are entry-less (each resolves to its first entry).
+       If similar hasn't loaded yet — or came back empty — the
+       queue is just this theme, and Next simply has nowhere to
+       go. The similar list is snapshotted at press time; a list
+       that lands later does not rewrite a live queue. */
+    const currentItem: QueueItem = {
+      ...queueItemFromSummary(detail),
+      atEntryId: entry.atEntryId,
+    };
+    const seen = new Set<string>([detail.slug]);
+    const related: QueueItem[] = [];
+    for (const item of queueItemsFromSummaries(similar)) {
+      if (seen.has(item.slug)) continue;
+      seen.add(item.slug);
+      related.push(item);
+    }
+    startSession(
+      {
+        slug: detail.slug,
+        detail,
+        entry,
+        entryIdOverride: null,
+        mode,
+        active: true,
+      },
+      { items: [currentItem, ...related], index: 0 },
+    );
   };
+
+  /* Re-attach on focus: if the shared session is live for THIS
+     theme (started here, or on the player route), the hero shows
+     it playing, with the version selection synced to the
+     session's entry; if the session moved on to another theme
+     while this screen was away, the stale playing state clears
+     back to the artwork hero. */
+  useFocusEffect(
+    useCallback(() => {
+      if (session.active && session.slug === slug) {
+        if (playMode === null) setPlayMode(session.mode);
+        if (detail && session.entry) {
+          const entryId = session.entry.atEntryId;
+          const idx = detail.entries.findIndex(
+            (e) => e.atEntryId === entryId,
+          );
+          if (idx >= 0) setSelectedEntryIndex(idx);
+        }
+      } else if (playMode !== null) {
+        setPlayMode(null);
+      }
+    }, [
+      session.active,
+      session.slug,
+      session.mode,
+      session.entry,
+      slug,
+      detail,
+      playMode,
+    ]),
+  );
 
   /** Rounded-square back button; `glass` floats it over the artwork. */
   const backTile = (glass: boolean) => (
@@ -364,14 +439,6 @@ export default function ThemeDetailScreen() {
       ? detail.allArtists.join(' / ')
       : (detail.artistName ?? '')
     : '';
-  const metaParts: string[] = detail ? [`${detail.type} ${detail.sequence}`] : [];
-  if (detail?.animeSeason && detail?.animeSeasonYear) {
-    metaParts.push(`${detail.animeSeason} ${detail.animeSeasonYear}`);
-  }
-  if (detail) {
-    for (const mood of detail.mood) metaParts.push(mood);
-  }
-
   const hasMultipleVersions = (detail?.entries.length ?? 0) > 1;
 
   /* ---------------- Slice M2: save / rating / playlists ---------------- */
@@ -385,6 +452,23 @@ export default function ThemeDetailScreen() {
     void favorites.toggle(detail.slug).then((err) => {
       if (err) setActionError(err);
     });
+  };
+
+  /**
+   * Share (Slice 6) — the design's fourth action disc, made real:
+   * the system share sheet carrying the theme's WEB page URL. The
+   * web's own share affordance copies exactly this link
+   * (kaiseen.vercel.app/theme/<slug> — the web theme route), so
+   * the app shares what the web would. A dismissed sheet resolves
+   * (no error); a genuine failure is swallowed quietly — sharing
+   * is best-effort chrome, never an error surface.
+   */
+  const onShare = () => {
+    if (!detail) return;
+    void Share.share({
+      title: `${detail.songTitle} — ${detail.animeTitle}`,
+      message: `${detail.songTitle} (${detail.animeTitle}) on Kaikansen: https://kaiseen.vercel.app/theme/${detail.slug}`,
+    }).catch(() => {});
   };
 
   const onRate = (score: number) => {
@@ -417,90 +501,8 @@ export default function ThemeDetailScreen() {
 
   const openSheet = () => {
     if (!detail) return;
-    if (fixtureMode) {
-      setActionError('Playlists are not available in demo mode.');
-      return;
-    }
-    if (!signedIn) {
-      setActionError('Log in to add themes to playlists.');
-      return;
-    }
     setActionError(null);
     setSheetOpen(true);
-    setSheetMessage(null);
-    setSheetError(null);
-    setSheetLoading(true);
-    setMyPlaylists(null);
-    setContainedIds(new Set());
-    fetchPlaylists()
-      .then(async (res) => {
-        setMyPlaylists(res.playlists);
-        // Membership lives on each playlist's items, so resolve the
-        // details in parallel; a failed detail leaves that row
-        // addable (the API's add is a no-op for duplicates anyway).
-        const details = await Promise.all(
-          res.playlists.map((p) => fetchPlaylist(p.id).catch(() => null)),
-        );
-        const contained = new Set<string>();
-        for (const d of details) {
-          if (d && d.items.some((i) => i.slug === detail.slug)) {
-            contained.add(d.id);
-          }
-        }
-        setContainedIds(contained);
-      })
-      .catch((e: unknown) =>
-        setSheetError(
-          e instanceof Error ? e.message : 'Could not load your playlists.',
-        ),
-      )
-      .finally(() => setSheetLoading(false));
-  };
-
-  const addToPlaylist = (playlist: PlaylistSummary) => {
-    if (!detail || sheetBusyId) return;
-    if (containedIds.has(playlist.id)) {
-      setSheetMessage(`Already in “${playlist.name}”.`);
-      return;
-    }
-    setSheetBusyId(playlist.id);
-    setSheetMessage(null);
-    addPlaylistItem(playlist.id, detail.slug)
-      .then(() => {
-        setContainedIds((prev) => new Set(prev).add(playlist.id));
-        setSheetMessage(`Added to “${playlist.name}”.`);
-      })
-      .catch((e: unknown) =>
-        setSheetMessage(
-          e instanceof Error ? e.message : 'Could not add the theme.',
-        ),
-      )
-      .finally(() => setSheetBusyId(null));
-  };
-
-  const createAndAdd = () => {
-    if (!detail || creatingInSheet) return;
-    const name = newPlaylistName.trim();
-    if (name.length === 0) {
-      setSheetMessage('Give the playlist a name.');
-      return;
-    }
-    setCreatingInSheet(true);
-    setSheetMessage(null);
-    createPlaylist({ name })
-      .then(async (created) => {
-        setMyPlaylists((prev) => [created, ...(prev ?? [])]);
-        setNewPlaylistName('');
-        await addPlaylistItem(created.id, detail.slug);
-        setContainedIds((prev) => new Set(prev).add(created.id));
-        setSheetMessage(`Added to “${created.name}”.`);
-      })
-      .catch((e: unknown) =>
-        setSheetMessage(
-          e instanceof Error ? e.message : 'Could not create the playlist.',
-        ),
-      )
-      .finally(() => setCreatingInSheet(false));
   };
 
   /** Aggregates shown in the stats bar — the rating state's copy is
@@ -586,13 +588,6 @@ export default function ThemeDetailScreen() {
     setActionError(null);
     setDlSheetOpen(true);
   };
-
-  const statCell = (value: string, label: string) => (
-    <View key={label} style={styles.statCell}>
-      <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
-    </View>
-  );
 
   const onStripSeek = (locationX: number) => {
     if (barWidth <= 0) return;
@@ -733,125 +728,37 @@ export default function ThemeDetailScreen() {
                 style={[styles.overlay, { top: insets.top + spacing.sm }]}
               >
                 {backTile(true)}
-                <View style={styles.overlayActions}>
+              </View>
+              {playMode === null && (
+                <>
+                  {/* The v7 hero's bottom-left type chip ("OP 1",
+                      plum-deep glass pill) — paused state only;
+                      while playing, the control strip owns the
+                      hero's bottom edge. */}
+                  <View style={styles.heroChip}>
+                    <Text style={styles.heroChipText}>
+                      {detail.type} {detail.sequence}
+                    </Text>
+                  </View>
                   <Pressable
-                    onPress={onToggleSave}
+                    onPress={() => startPlayback('watch')}
                     accessibilityRole="button"
-                    accessibilityLabel={saved ? 'Unsave theme' : 'Save theme'}
-                    accessibilityState={{ selected: saved }}
+                    accessibilityLabel="Play"
                     style={({ pressed }) => [
-                      styles.backHit,
+                      styles.fab,
                       pressed && styles.pressed,
                     ]}
                   >
-                    <View style={[styles.tile, styles.tileGlass]}>
-                      {savePending ? (
-                        <ActivityIndicator size="small" color={theme.text} />
-                      ) : (
-                        <Bookmark
-                          size={19}
-                          color={saved ? theme.accent : theme.text}
-                          fill={saved ? theme.accent : 'transparent'}
-                          strokeWidth={2}
-                        />
-                      )}
-                    </View>
+                    <Play size={24} color={theme.onAccent} strokeWidth={2} />
                   </Pressable>
-                </View>
-              </View>
-              {playMode === null && (
-                <Pressable
-                  onPress={() => startPlayback('watch')}
-                  accessibilityRole="button"
-                  accessibilityLabel="Play"
-                  style={({ pressed }) => [
-                    styles.fab,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Play size={24} color={theme.onAccent} strokeWidth={2} />
-                </Pressable>
+                </>
               )}
             </View>
 
             <View style={styles.body}>
-              {/* 2 — Info header. The anime eyebrow opens the Anime
-                  detail screen (§6.8) and each artist name opens the
-                  Artist detail screen (§6.9) when its slug is known. */}
-              <Pressable
-                onPress={() =>
-                  detail.anilistId != null &&
-                  router.push(`/anime/${detail.anilistId}`)
-                }
-                disabled={detail.anilistId == null}
-                accessibilityRole="button"
-                accessibilityLabel={`Open ${detail.animeTitle}`}
-                hitSlop={4}
-              >
-                <Text style={styles.eyebrow} numberOfLines={1}>
-                  {detail.animeTitle.toUpperCase()}
-                </Text>
-              </Pressable>
-              <Text style={styles.song}>{detail.songTitle}</Text>
-              {detail.allArtists.length > 0 &&
-              detail.artistSlugs.length === detail.allArtists.length ? (
-                <View style={styles.artistsRow}>
-                  {detail.allArtists.map((name, i) => (
-                    <View key={name} style={styles.artistItem}>
-                      {i > 0 && <Text style={styles.artists}> / </Text>}
-                      <Pressable
-                        onPress={() =>
-                          router.push(`/artist/${detail.artistSlugs[i]}`)
-                        }
-                        accessibilityRole="button"
-                        accessibilityLabel={`Open ${name}`}
-                        hitSlop={4}
-                      >
-                        <Text style={styles.artists}>{name}</Text>
-                      </Pressable>
-                    </View>
-                  ))}
-                </View>
-              ) : (
-                artists.length > 0 && (
-                  <Text style={styles.artists} numberOfLines={2}>
-                    {artists}
-                  </Text>
-                )
-              )}
-              <Text style={styles.meta} numberOfLines={1}>
-                {metaParts.join(' · ')}
-              </Text>
-
-              {/* Inline playback problems surface here, under the
-                  hero — the strip stays clean. */}
-              {playMode !== null && playback.unavailable ? (
-                <Text style={styles.playerNote}>
-                  {fixtureMode
-                    ? 'Playback is not available in demo mode for this theme.'
-                    : 'No playable source is available for this version.'}
-                </Text>
-              ) : playMode !== null && playback.playerError ? (
-                <View style={styles.playerErrorRow}>
-                  <Text style={[styles.playerNote, styles.playerNoteFlex]}>
-                    {playback.playerError}
-                  </Text>
-                  <Pressable
-                    onPress={playback.retry}
-                    accessibilityRole="button"
-                    accessibilityLabel="Try again"
-                    style={({ pressed }) => [
-                      styles.retryChip,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <RotateCcw size={13} color={theme.onAccent} strokeWidth={2} />
-                    <Text style={styles.retryChipText}>Try again</Text>
-                  </Pressable>
-                </View>
-              ) : null}
-
-              {/* 3 — Action bar */}
+              {/* 2 — Watch/Listen toggle: directly under the hero,
+                  as the v7 design orders it (hero → toggle → title
+                  block → action row → rating card). */}
               <View style={styles.modeToggle}>
                 <Pressable
                   onPress={() => startPlayback('watch')}
@@ -865,9 +772,9 @@ export default function ThemeDetailScreen() {
                   ]}
                 >
                   <Play
-                    size={17}
+                    size={15}
                     color={
-                      playMode !== 'listen' ? theme.onAccent : theme.text
+                      playMode !== 'listen' ? theme.onAccent : theme.secondary
                     }
                     strokeWidth={2}
                   />
@@ -898,13 +805,13 @@ export default function ThemeDetailScreen() {
                   ]}
                 >
                   <Headphones
-                    size={17}
+                    size={15}
                     color={
                       !listenAvailable
                         ? theme.muted
                         : playMode === 'listen'
                           ? theme.onAccent
-                          : theme.text
+                          : theme.secondary
                     }
                     strokeWidth={2}
                   />
@@ -921,7 +828,140 @@ export default function ThemeDetailScreen() {
                 </Pressable>
               </View>
 
+              {/* 3 — Info header (v7 TitleBlock): song title, the
+                  artists line, then the meta row. The anime title
+                  opens the Anime detail screen (§6.8) and each
+                  artist name opens the Artist detail screen (§6.9)
+                  when its slug is known. */}
+              <Text style={styles.song}>{detail.songTitle}</Text>
+              {detail.allArtists.length > 0 &&
+              detail.artistSlugs.length === detail.allArtists.length ? (
+                <View style={styles.artistsRow}>
+                  {detail.allArtists.map((name, i) => (
+                    <View key={name} style={styles.artistItem}>
+                      {i > 0 && <Text style={styles.artists}> / </Text>}
+                      <Pressable
+                        onPress={() =>
+                          router.push(`/artist/${detail.artistSlugs[i]}`)
+                        }
+                        accessibilityRole="button"
+                        accessibilityLabel={`Open ${name}`}
+                        hitSlop={4}
+                      >
+                        <Text style={styles.artists}>{name}</Text>
+                      </Pressable>
+                    </View>
+                  ))}
+                </View>
+              ) : (
+                artists.length > 0 && (
+                  <Text style={styles.artists} numberOfLines={2}>
+                    {artists}
+                  </Text>
+                )
+              )}
+              {/* Meta row (v7): anime title · season pill. The
+                  title flexes and wraps rather than truncating
+                  next to the pill (design law #9); the OP/ED +
+                  sequence the old meta line led with now lives on
+                  the hero's type chip, and the mood tags the old
+                  line trailed are not part of the v7 header. */}
+              <View style={styles.metaRow}>
+                <Pressable
+                  onPress={() =>
+                    detail.anilistId != null &&
+                    router.push(`/anime/${detail.anilistId}`)
+                  }
+                  disabled={detail.anilistId == null}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open ${detail.animeTitle}`}
+                  hitSlop={4}
+                  style={styles.metaAnime}
+                >
+                  <Text style={styles.metaAnimeText}>
+                    {detail.animeTitle}
+                  </Text>
+                </Pressable>
+                {detail.animeSeason && detail.animeSeasonYear && (
+                  <>
+                    <View style={styles.metaDot} />
+                    <View style={styles.seasonPill}>
+                      <Text style={styles.seasonPillText}>
+                        {detail.animeSeason} {detail.animeSeasonYear}
+                      </Text>
+                    </View>
+                  </>
+                )}
+              </View>
+
+              {/* Inline playback problems surface here, under the
+                  hero — the strip stays clean. */}
+              {playMode !== null && playback.unavailable ? (
+                <Text style={styles.playerNote}>
+                  {fixtureMode
+                    ? 'Playback is not available in demo mode for this theme.'
+                    : 'No playable source is available for this version.'}
+                </Text>
+              ) : playMode !== null && playback.playerError ? (
+                <View style={styles.playerErrorRow}>
+                  <Text style={[styles.playerNote, styles.playerNoteFlex]}>
+                    {playback.playerError}
+                  </Text>
+                  <Pressable
+                    onPress={playback.retry}
+                    accessibilityRole="button"
+                    accessibilityLabel="Try again"
+                    style={({ pressed }) => [
+                      styles.retryChip,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <RotateCcw size={13} color={theme.onAccent} strokeWidth={2} />
+                    <Text style={styles.retryChipText}>Try again</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
+              {/* 4 — Action row (design law #6): four 48px lavender
+                  discs spread across the row — favourite, add to
+                  playlist, download, share. Every disc is wired:
+                  the heart is the favorites store (the hero-overlay
+                  bookmark's replacement), download opens the sheet
+                  and reports % / downloaded state in place, share
+                  opens the system sheet with the web URL. */}
               <View style={styles.actions}>
+                <Pressable
+                  onPress={onToggleSave}
+                  accessibilityRole="button"
+                  accessibilityLabel={saved ? 'Unsave theme' : 'Save theme'}
+                  accessibilityState={{ selected: saved }}
+                  style={({ pressed }) => [
+                    styles.actionDisc,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  {savePending ? (
+                    <ActivityIndicator size="small" color={theme.secondary} />
+                  ) : (
+                    <Heart
+                      size={24}
+                      color={theme.secondary}
+                      fill={saved ? theme.secondary : 'transparent'}
+                      strokeWidth={2}
+                    />
+                  )}
+                </Pressable>
+                <Pressable
+                  onPress={openSheet}
+                  accessibilityRole="button"
+                  accessibilityLabel="Add to playlist"
+                  style={({ pressed }) => [
+                    styles.actionDisc,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <ListPlus size={24} color={theme.text} strokeWidth={2} />
+                </Pressable>
                 <Pressable
                   onPress={openDlSheet}
                   accessibilityRole="button"
@@ -933,63 +973,34 @@ export default function ThemeDetailScreen() {
                         : 'Download for offline playback'
                   }
                   style={({ pressed }) => [
-                    styles.downloadButton,
+                    styles.actionDisc,
                     pressed && styles.pressed,
                   ]}
                 >
                   {anyDlProgress !== undefined ? (
                     anyDlProgress !== null ? (
-                      <Text style={styles.downloadButtonText}>
+                      <Text style={styles.discPercent}>
                         {Math.floor(anyDlProgress * 100)}%
                       </Text>
                     ) : (
-                      <ActivityIndicator
-                        size="small"
-                        color={theme.onAccent}
-                      />
+                      <ActivityIndicator size="small" color={theme.text} />
                     )
+                  ) : anyDlDownloaded ? (
+                    <Check size={24} color={theme.secondary} strokeWidth={2} />
                   ) : (
-                    <>
-                      {anyDlDownloaded ? (
-                        <Check
-                          size={19}
-                          color={theme.onAccent}
-                          strokeWidth={2}
-                        />
-                      ) : (
-                        <Download
-                          size={19}
-                          color={theme.onAccent}
-                          strokeWidth={2}
-                        />
-                      )}
-                      <Text style={styles.downloadButtonText}>Download</Text>
-                    </>
+                    <Download size={24} color={theme.text} strokeWidth={2} />
                   )}
                 </Pressable>
                 <Pressable
-                  onPress={openSheet}
-                  accessibilityRole="button"
-                  accessibilityLabel="Add to playlist"
-                  style={({ pressed }) => [
-                    styles.squareAction,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <ListMusic size={20} color={theme.text} strokeWidth={2} />
-                </Pressable>
-                {/* Share stays visual-only, exactly as before — no
-                    share behaviour exists in the app yet; the web
-                    copies the page link. */}
-                <Pressable
+                  onPress={onShare}
                   accessibilityRole="button"
                   accessibilityLabel="Share theme"
                   style={({ pressed }) => [
-                    styles.squareAction,
+                    styles.actionDisc,
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Share2 size={19} color={theme.text} strokeWidth={2} />
+                  <Share2 size={22} color={theme.text} strokeWidth={2} />
                 </Pressable>
               </View>
 
@@ -997,7 +1008,7 @@ export default function ThemeDetailScreen() {
                 <Text style={styles.actionError}>{actionError}</Text>
               )}
 
-              {/* 4 — Version Select (web VersionSwitcher semantics:
+              {/* 5 — Version Select (web VersionSwitcher semantics:
                   selects the entry the actions above target) */}
               {hasMultipleVersions && (
                 <View style={styles.versionSection}>
@@ -1006,7 +1017,22 @@ export default function ThemeDetailScreen() {
                     {detail.entries.map((entry, i) => (
                       <Pressable
                         key={`${entry.atEntryId}-${i}`}
-                        onPress={() => setSelectedEntryIndex(i)}
+                        onPress={() => {
+                          setSelectedEntryIndex(i);
+                          /* While this screen owns the live session,
+                             switching versions switches its source —
+                             the old private hook took the entry
+                             straight from this selection. */
+                          if (
+                            playMode !== null &&
+                            session.active &&
+                            session.slug === detail.slug
+                          ) {
+                            updateSession({
+                              entry: detail.entries[i] ?? null,
+                            });
+                          }
+                        }}
                         accessibilityRole="button"
                         accessibilityLabel={`Select version ${entry.version}`}
                         accessibilityState={{
@@ -1035,21 +1061,48 @@ export default function ThemeDetailScreen() {
                 </View>
               )}
 
-              {/* 5 — Stats bar */}
-              <View style={styles.statsBar}>
-                {statCell(aggAvg.toFixed(1), 'Score')}
-                {statCell(formatCount(aggTotal), 'Rates')}
-                {statCell(formatCount(detail.totalWatches), 'Views')}
-                {statCell(formatCount(detail.totalListens), 'Plays')}
-              </View>
-
-              {/* 6 — Rating card */}
+              {/* 6 — Rating card (v7 composition): Community score
+                  + Rates + Plays across the top, a divider, then
+                  Your rating — the score as a mauve pill and 10
+                  tappable stars (design law #5). */}
               <View style={styles.ratingCard}>
+                <View style={styles.communityRow}>
+                  <View style={styles.communityMain}>
+                    <View style={styles.communityScoreRow}>
+                      <Text style={styles.communityScore}>
+                        {aggAvg.toFixed(1)}
+                      </Text>
+                      <Star
+                        size={20}
+                        color="#FBBF24"
+                        fill="#FBBF24"
+                        strokeWidth={2}
+                      />
+                    </View>
+                    <Text style={styles.communityLabel}>Community</Text>
+                  </View>
+                  <View style={styles.communityStats}>
+                    <View style={styles.communityStat}>
+                      <Text style={styles.communityStatValue}>
+                        {formatCount(aggTotal)}
+                      </Text>
+                      <Text style={styles.communityStatLabel}>Rates</Text>
+                    </View>
+                    <View style={styles.communityStat}>
+                      <Text style={styles.communityStatValue}>
+                        {formatCount(detail.totalListens)}
+                      </Text>
+                      <Text style={styles.communityStatLabel}>Plays</Text>
+                    </View>
+                  </View>
+                </View>
+                <View style={styles.cardDivider} />
                 <View style={styles.ratingHeader}>
-                  <Star size={16} color={theme.muted} strokeWidth={2} />
                   <Text style={styles.ratingLabel}>Your rating</Text>
                   {myScore !== null && (
-                    <Text style={styles.ratingValue}>{myScore} / 10</Text>
+                    <View style={styles.scorePill}>
+                      <Text style={styles.scorePillText}>{myScore} / 10</Text>
+                    </View>
                   )}
                   {myScore !== null && signedIn && !fixtureMode && (
                     <Pressable
@@ -1090,31 +1143,28 @@ export default function ThemeDetailScreen() {
                     </Pressable>
                   </View>
                 ) : (
-                  <View style={styles.scoreRow}>
+                  <View style={styles.starRow}>
                     {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => {
-                      const active = myScore === n;
+                      const filled = myScore !== null && n <= myScore;
                       return (
                         <Pressable
                           key={n}
                           onPress={() => onRate(n)}
                           disabled={ratingBusy}
                           accessibilityRole="button"
-                          accessibilityState={{ selected: active }}
+                          accessibilityState={{ selected: filled }}
                           accessibilityLabel={`Rate ${n} out of 10`}
                           style={({ pressed }) => [
-                            styles.scoreChip,
-                            active && styles.scoreChipActive,
+                            styles.starHit,
                             pressed && styles.pressed,
                           ]}
                         >
-                          <Text
-                            style={[
-                              styles.scoreChipText,
-                              active && styles.scoreChipTextActive,
-                            ]}
-                          >
-                            {n}
-                          </Text>
+                          <Star
+                            size={24}
+                            color={theme.secondary}
+                            fill={filled ? theme.secondary : 'transparent'}
+                            strokeWidth={2}
+                          />
                         </Pressable>
                       );
                     })}
@@ -1128,13 +1178,13 @@ export default function ThemeDetailScreen() {
           </>
         )}
 
-        {/* 7 — Comments (mounted eagerly: its fetch fires in
-            parallel with the detail read, and the component
-            carries its own loading state) */}
+        {/* 7 — Related themes, then 8 — Comments (the v7 order:
+            Similar before Comments; Slice 6 swapped them. The
+            comments component still mounts eagerly in the same
+            pass — its fetch fires in parallel with the detail
+            read, and it carries its own loading state.) */}
         <View style={styles.lowerBody}>
-          <ThemeComments slug={slug} />
-
-          {/* 8 — Related themes, the web's categorised lists */}
+          {/* 7 — Related themes, the web's categorised lists */}
           {!fixtureMode && (
             <View style={styles.relatedSection}>
               {!ready || similarState === 'loading' ? (
@@ -1170,139 +1220,21 @@ export default function ThemeDetailScreen() {
               )}
             </View>
           )}
+
+          {/* 8 — Comments */}
+          <ThemeComments slug={slug} />
         </View>
       </View>
     </ScrollView>
 
     {detail && (
       <>
-    <Modal
+    <AddToPlaylistSheet
+      slug={detail.slug}
+      title={detail.songTitle}
       visible={sheetOpen}
-      transparent
-      animationType="slide"
-      onRequestClose={() => setSheetOpen(false)}
-    >
-      <View style={styles.sheetBackdrop}>
-        <Pressable
-          style={styles.sheetDismiss}
-          onPress={() => setSheetOpen(false)}
-          accessibilityRole="button"
-          accessibilityLabel="Close"
-        />
-        <View style={styles.sheet}>
-          <View style={styles.sheetHeader}>
-            <Text style={styles.sheetTitle}>Add to playlist</Text>
-            <Pressable
-              onPress={() => setSheetOpen(false)}
-              hitSlop={6}
-              accessibilityRole="button"
-              accessibilityLabel="Close"
-              style={({ pressed }) => [
-                styles.sheetClose,
-                pressed && styles.pressed,
-              ]}
-            >
-              <X size={18} color={theme.text} strokeWidth={2} />
-            </Pressable>
-          </View>
-
-          {sheetLoading ? (
-            <View style={styles.sheetCenter}>
-              <ActivityIndicator color={theme.accent} />
-            </View>
-          ) : sheetError ? (
-            <Text style={styles.sheetNote}>{sheetError}</Text>
-          ) : (
-            <ScrollView
-              style={styles.sheetList}
-              showsVerticalScrollIndicator={false}
-            >
-              {(myPlaylists ?? []).map((p) => {
-                const contained = containedIds.has(p.id);
-                const busyRow = sheetBusyId === p.id;
-                return (
-                  <Pressable
-                    key={p.id}
-                    onPress={() => addToPlaylist(p)}
-                    disabled={busyRow}
-                    accessibilityRole="button"
-                    accessibilityLabel={
-                      contained
-                        ? `${p.name}, already contains this theme`
-                        : `Add to ${p.name}`
-                    }
-                    style={({ pressed }) => [
-                      styles.sheetRow,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <View style={styles.sheetRowIcon}>
-                      <ListMusic size={17} color={theme.muted} strokeWidth={2} />
-                    </View>
-                    <View style={styles.sheetRowMain}>
-                      <Text style={styles.sheetRowName} numberOfLines={1}>
-                        {p.name}
-                      </Text>
-                      <Text style={styles.sheetRowMeta} numberOfLines={1}>
-                        {p.themeCount}{' '}
-                        {p.themeCount === 1 ? 'theme' : 'themes'}
-                      </Text>
-                    </View>
-                    {busyRow ? (
-                      <ActivityIndicator size="small" color={theme.muted} />
-                    ) : contained ? (
-                      <Check size={18} color={theme.accent} strokeWidth={2} />
-                    ) : (
-                      <Plus size={18} color={theme.muted} strokeWidth={2} />
-                    )}
-                  </Pressable>
-                );
-              })}
-              {(myPlaylists ?? []).length === 0 && (
-                <Text style={styles.sheetNote}>
-                  No playlists yet — create one below and this theme goes
-                  straight in.
-                </Text>
-              )}
-            </ScrollView>
-          )}
-
-          <View style={styles.sheetCreate}>
-            <TextInput
-              style={styles.sheetInput}
-              value={newPlaylistName}
-              onChangeText={setNewPlaylistName}
-              placeholder="New playlist name"
-              placeholderTextColor={theme.muted}
-              maxLength={100}
-              returnKeyType="done"
-              onSubmitEditing={createAndAdd}
-            />
-            <Pressable
-              onPress={createAndAdd}
-              disabled={creatingInSheet}
-              accessibilityRole="button"
-              accessibilityLabel="Create playlist and add theme"
-              style={({ pressed }) => [
-                styles.sheetCreateButton,
-                pressed && styles.pressed,
-                creatingInSheet && styles.disabledButton,
-              ]}
-            >
-              {creatingInSheet ? (
-                <ActivityIndicator size="small" color={theme.onAccent} />
-              ) : (
-                <Text style={styles.sheetCreateText}>Create & add</Text>
-              )}
-            </Pressable>
-          </View>
-
-          {sheetMessage && (
-            <Text style={styles.sheetMessage}>{sheetMessage}</Text>
-          )}
-        </View>
-      </View>
-    </Modal>
+      onClose={() => setSheetOpen(false)}
+    />
 
     <Modal
       visible={dlSheetOpen}
@@ -1542,24 +1474,41 @@ const createStyles = (theme: Theme) =>
     alignItems: 'center',
     zIndex: 5,
   },
-  overlayActions: {
-    flexDirection: 'row',
-    gap: spacing.xs,
-  },
   fab: {
+    // The v7 hero's centre play disc: 56px, mauveDeep, centred on
+    // the artwork (it straddled the hero's bottom-right corner in
+    // the pre-fidelity build).
     position: 'absolute',
-    right: spacing.screenEdge,
-    bottom: -26,
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    left: '50%',
+    top: '50%',
+    marginLeft: -28,
+    marginTop: -28,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     backgroundColor: theme.accent,
-    borderWidth: 4,
-    borderColor: theme.background,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 6,
     elevation: 6,
+  },
+  heroChip: {
+    // v7: plum-deep glass pill, bottom-left of the hero.
+    position: 'absolute',
+    left: spacing.md,
+    bottom: spacing.md,
+    backgroundColor: withOpacity(theme.accent, 0.85),
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 1,
+    zIndex: 5,
+  },
+  heroChipText: {
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 11,
+    letterSpacing: 0.8,
+    color: theme.onAccent,
+    textTransform: 'uppercase',
   },
   heroPlayer: {
     position: 'relative',
@@ -1666,29 +1615,23 @@ const createStyles = (theme: Theme) =>
   },
   body: {
     paddingHorizontal: spacing.screenEdge,
-    paddingTop: spacing.xl + 6, // clears the straddling FAB
+    paddingTop: spacing.lg,
   },
   lowerBody: {
     paddingHorizontal: spacing.screenEdge,
     paddingBottom: spacing.xxxl,
   },
-  eyebrow: {
-    ...typeStyles.caption,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.accent,
-    letterSpacing: 1.6,
-  },
   song: {
     ...typeStyles.display,
     fontSize: 26,
     color: theme.text,
-    marginTop: spacing.xs,
+    marginTop: spacing.md,
   },
   artists: {
     ...typeStyles.body,
     fontFamily: fontFamilies.bodyStrong,
-    color: theme.text,
-    marginTop: spacing.sm,
+    color: theme.secondary,
+    marginTop: spacing.xs + 2,
   },
   artistsRow: {
     flexDirection: 'row',
@@ -1699,20 +1642,51 @@ const createStyles = (theme: Theme) =>
     flexDirection: 'row',
     alignItems: 'center',
   },
-  meta: {
-    ...typeStyles.bodySmall,
-    color: theme.muted,
-    marginTop: spacing.xs + 2,
-  },
-  modeToggle: {
+  metaRow: {
     flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  metaAnime: {
+    flexShrink: 1,
+  },
+  metaAnimeText: {
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
+  },
+  metaDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: withOpacity(theme.secondary, 0.5),
+    flexShrink: 0,
+  },
+  seasonPill: {
     backgroundColor: theme.surface,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
-    borderRadius: 14,
-    padding: 3,
-    gap: 3,
-    marginTop: spacing.lg,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: 2,
+    flexShrink: 0,
+  },
+  seasonPillText: {
+    fontSize: 10,
+    fontFamily: fontFamilies.bodyStrong,
+    letterSpacing: 0.6,
+    color: theme.secondary,
+    textTransform: 'uppercase',
+  },
+  modeToggle: {
+    // v7: full-width pill track in disc lavender, segments are
+    // pills themselves (active = mauveDeep fill, white bold text).
+    flexDirection: 'row',
+    backgroundColor: theme.raised,
+    borderRadius: radii.pill,
+    padding: 4,
+    gap: 4,
   },
   modeSegment: {
     flex: 1,
@@ -1720,8 +1694,8 @@ const createStyles = (theme: Theme) =>
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.sm,
-    minHeight: 40,
-    borderRadius: 11,
+    minHeight: 36,
+    borderRadius: radii.pill,
   },
   modeSegmentActive: {
     backgroundColor: theme.accent,
@@ -1730,44 +1704,36 @@ const createStyles = (theme: Theme) =>
     opacity: 0.45,
   },
   modeSegmentText: {
-    ...typeStyles.sectionLabel,
-    fontSize: 13,
-    color: theme.text,
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.secondary,
   },
   modeSegmentTextActive: {
-    ...typeStyles.sectionLabel,
-    fontSize: 13,
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
     color: theme.onAccent,
   },
   actions: {
     flexDirection: 'row',
-    alignItems: 'stretch',
-    gap: spacing.sm,
-    marginTop: spacing.sm + 2,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: spacing.lg,
+    paddingHorizontal: spacing.xs,
   },
-  downloadButton: {
-    flex: 1,
-    flexDirection: 'row',
+  actionDisc: {
+    // v7 action discs: 48px, disc-lavender fill (the `raised`
+    // token), 24px icons.
+    width: 48,
+    height: 48,
+    borderRadius: radii.pill,
+    backgroundColor: theme.raised,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: spacing.sm,
-    backgroundColor: theme.accent,
-    borderRadius: 14,
-    minHeight: 46,
   },
-  downloadButtonText: {
-    ...typeStyles.sectionLabel,
-    color: theme.onAccent,
-  },
-  squareAction: {
-    width: 46,
-    height: 46,
-    borderRadius: 14,
-    backgroundColor: theme.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.border,
-    alignItems: 'center',
-    justifyContent: 'center',
+  discPercent: {
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
   },
   pressed: {
     opacity: 0.85,
@@ -1812,40 +1778,61 @@ const createStyles = (theme: Theme) =>
   versionTextActive: {
     color: theme.onAccentContainer,
   },
-  statsBar: {
-    flexDirection: 'row',
+  ratingCard: {
+    // v7: one white card, radius ~24, generous padding.
     marginTop: spacing.lg,
     backgroundColor: theme.surface,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
-    borderRadius: radii.md,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.sm,
+    borderRadius: radii.cardLg,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.lg,
+    gap: spacing.md,
   },
-  statCell: {
-    flex: 1,
-    alignItems: 'center',
+  communityRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+  },
+  communityMain: {
     gap: 2,
   },
-  statValue: {
-    ...typeStyles.heading,
+  communityScoreRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs + 2,
+  },
+  communityScore: {
+    fontFamily: fontFamilies.display,
+    fontSize: 30,
     color: theme.text,
   },
-  statLabel: {
-    ...typeStyles.caption,
+  communityLabel: {
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
     color: theme.muted,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
   },
-  ratingCard: {
-    marginTop: spacing.md,
-    backgroundColor: theme.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.border,
-    borderRadius: radii.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    gap: spacing.md,
+  communityStats: {
+    flexDirection: 'row',
+    gap: spacing.xl,
+  },
+  communityStat: {
+    alignItems: 'flex-end',
+    gap: 2,
+  },
+  communityStatValue: {
+    ...typeStyles.body,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
+  },
+  communityStatLabel: {
+    fontSize: 11,
+    fontFamily: fontFamilies.caption,
+    color: theme.muted,
+  },
+  cardDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: theme.raised,
   },
   ratingHeader: {
     flexDirection: 'row',
@@ -1853,13 +1840,20 @@ const createStyles = (theme: Theme) =>
     gap: spacing.sm + 2,
   },
   ratingLabel: {
-    ...typeStyles.bodySmall,
+    ...typeStyles.body,
+    fontFamily: fontFamilies.bodyStrong,
     color: theme.muted,
   },
-  ratingValue: {
+  scorePill: {
+    backgroundColor: theme.accent,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: 2,
+  },
+  scorePillText: {
     ...typeStyles.bodySmall,
     fontFamily: fontFamilies.bodyStrong,
-    color: theme.text,
+    color: theme.onAccent,
   },
   clearRating: {
     flexDirection: 'row',
@@ -1900,31 +1894,14 @@ const createStyles = (theme: Theme) =>
     fontFamily: fontFamilies.bodyStrong,
     color: theme.onAccent,
   },
-  scoreRow: {
+  starRow: {
+    // v7: the 10 stars spread across the card's full width.
     flexDirection: 'row',
-    gap: spacing.xs,
-  },
-  scoreChip: {
-    flex: 1,
-    minHeight: 38,
-    borderRadius: radii.base,
-    backgroundColor: theme.background,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.border,
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'space-between',
   },
-  scoreChipActive: {
-    backgroundColor: theme.accent,
-    borderColor: 'transparent',
-  },
-  scoreChipText: {
-    ...typeStyles.bodySmall,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.muted,
-  },
-  scoreChipTextActive: {
-    color: theme.onAccent,
+  starHit: {
+    padding: 2,
   },
   relatedSection: {
     marginTop: spacing.xl,
@@ -1992,13 +1969,6 @@ const createStyles = (theme: Theme) =>
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sheetCenter: {
-    paddingVertical: spacing.xxl,
-    alignItems: 'center',
-  },
-  sheetList: {
-    flexGrow: 0,
-  },
   sheetRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2027,52 +1997,6 @@ const createStyles = (theme: Theme) =>
   sheetRowMeta: {
     ...typeStyles.caption,
     color: theme.muted,
-  },
-  sheetNote: {
-    ...typeStyles.bodySmall,
-    color: theme.muted,
-    lineHeight: 18,
-    paddingVertical: spacing.md,
-  },
-  sheetCreate: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginTop: spacing.md,
-  },
-  sheetInput: {
-    flex: 1,
-    ...typeStyles.body,
-    color: theme.text,
-    backgroundColor: theme.background,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.border,
-    borderRadius: radii.base,
-    paddingHorizontal: spacing.md,
-    minHeight: 44,
-    paddingVertical: 0,
-  },
-  sheetCreateButton: {
-    backgroundColor: theme.accent,
-    borderRadius: radii.base,
-    minHeight: 44,
-    paddingHorizontal: spacing.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sheetCreateText: {
-    ...typeStyles.bodySmall,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.onAccent,
-  },
-  disabledButton: {
-    opacity: 0.5,
-  },
-  sheetMessage: {
-    ...typeStyles.bodySmall,
-    color: theme.onAccentContainer,
-    marginTop: spacing.md,
-    lineHeight: 18,
   },
   dlPercent: {
     ...typeStyles.caption,

@@ -1,6 +1,7 @@
 import { useMemo, useState, type ComponentType, type ReactNode } from 'react';
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -15,6 +16,8 @@ import { useRouter } from 'expo-router';
 import {
   AtSign,
   ChevronLeft,
+  Eye,
+  EyeOff,
   Lock,
   Mail,
   User,
@@ -30,11 +33,23 @@ type IconComponent = ComponentType<{
   strokeWidth?: number;
 }>;
 
+// The brand glyph (the splash asset) — the same asset file the
+// AniList handoff screen draws.
+const GLYPH = require('../../assets/splash-icon.png');
+
 /**
- * Login / Register form (DESIGN.md §6.1/§6.2): wordmark block, the
+ * Login / Register form (DESIGN.md §6.1/§6.2): the mocks' brand
+ * header (real glyph + tracked KAIKANSEN + tagline, Slice 6), the
  * web-pattern fields, one primary action, the AniList entry point, and
  * the cross-link to the sibling screen. Inputs follow §7 — surface
  * fill, radius base, muted placeholder, accent border on focus.
+ *
+ * NO Forgot password link: the design draws one, but the web has
+ * NO password-reset capability at all — its LoginForm links to a
+ * /forgot-password page that does not exist, there is no API
+ * route and no email pipeline anywhere in the web codebase
+ * (verified in kaisen-src, Slice 6). A dead link is not drawn;
+ * flagged for ozar's decision in the Slice 6 report.
  *
  * Compact/icon-led chrome (approved mockup v1): a tile back button,
  * a leading glyph inside each field, pill-shaped actions, and the
@@ -59,6 +74,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [focused, setFocused] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -106,12 +122,14 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
     label: string,
     Icon: IconComponent,
     input: ReactNode,
+    trailing?: ReactNode,
   ) => (
     <>
       <Text style={styles.label}>{label}</Text>
       <View style={fieldBoxStyle(name)}>
         <Icon size={18} color={theme.muted} strokeWidth={2} />
         {input}
+        {trailing}
       </View>
     </>
   );
@@ -163,9 +181,21 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
             </View>
           </Pressable>
 
-          <Text style={styles.wordmark}>Kaikansen</Text>
+          {/* Brand header (Login/Register mocks, Slice 6): the
+              real glyph, the tracked KAIKANSEN wordmark and the
+              tagline — replacing the plain wordmark text. */}
+          <View style={styles.brand}>
+            <Image source={GLYPH} style={styles.glyph} resizeMode="contain" />
+            <Text style={styles.brandName}>KAIKANSEN</Text>
+            <Text style={styles.tagline}>Anime openings &amp; endings</Text>
+          </View>
           <Text style={styles.heading}>
             {isLogin ? 'Welcome back' : 'Create your account'}
+          </Text>
+          <Text style={styles.subheading}>
+            {isLogin
+              ? 'Log in to keep listening.'
+              : 'Join Kaikansen to save themes and play quizzes.'}
           </Text>
 
           {!isLogin && (
@@ -237,12 +267,28 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
               onBlur={() => setFocused(null)}
               placeholder="Your password"
               placeholderTextColor={theme.muted}
-              secureTextEntry
+              secureTextEntry={!showPassword}
               autoCapitalize="none"
               autoCorrect={false}
               returnKeyType="go"
               onSubmitEditing={() => void submit()}
             />,
+            // The mocks' visibility eye — a real toggle.
+            <Pressable
+              onPress={() => setShowPassword((v) => !v)}
+              hitSlop={6}
+              accessibilityRole="button"
+              accessibilityLabel={
+                showPassword ? 'Hide password' : 'Show password'
+              }
+              style={styles.eyeHit}
+            >
+              {showPassword ? (
+                <EyeOff size={18} color={theme.muted} strokeWidth={2} />
+              ) : (
+                <Eye size={18} color={theme.muted} strokeWidth={2} />
+              )}
+            </Pressable>,
           )}
 
           {error !== null && <Text style={styles.error}>{error}</Text>}
@@ -261,6 +307,13 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
               </Text>
             )}
           </Pressable>
+
+          {/* The mocks' 'or' divider between the form and AniList. */}
+          <View style={styles.orRow}>
+            <View style={styles.orLine} />
+            <Text style={styles.orText}>or</Text>
+            <View style={styles.orLine} />
+          </View>
 
           <Pressable
             onPress={() => void onAnilist()}
@@ -344,18 +397,60 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
     },
-    wordmark: {
-      ...typeStyles.wordmark,
-      fontSize: 34,
-      color: theme.wordmark,
-      textAlign: 'center',
+    brand: {
+      alignItems: 'center',
+      marginBottom: spacing.xl,
+    },
+    glyph: {
+      width: 84,
+      height: 84,
+    },
+    brandName: {
+      fontFamily: 'Outfit_800ExtraBold',
+      fontSize: 17,
+      letterSpacing: 4,
+      color: theme.text,
+      marginTop: spacing.sm,
+    },
+    tagline: {
+      ...typeStyles.bodySmall,
+      fontFamily: 'Inter_500Medium',
+      color: theme.secondary,
+      marginTop: spacing.xs,
     },
     heading: {
       ...typeStyles.heading,
+      fontSize: 24,
       color: theme.text,
       textAlign: 'center',
-      marginTop: spacing.sm,
-      marginBottom: spacing.xl,
+    },
+    subheading: {
+      ...typeStyles.body,
+      color: theme.muted,
+      textAlign: 'center',
+      marginTop: spacing.xs,
+      marginBottom: spacing.lg,
+    },
+    eyeHit: {
+      width: 32,
+      height: 32,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    orRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      marginTop: spacing.lg,
+    },
+    orLine: {
+      flex: 1,
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: theme.border,
+    },
+    orText: {
+      ...typeStyles.bodySmall,
+      color: theme.muted,
     },
     label: {
       ...typeStyles.caption,
@@ -412,7 +507,7 @@ const createStyles = (theme: Theme) =>
       minHeight: 50,
       alignItems: 'center',
       justifyContent: 'center',
-      marginTop: spacing.md,
+      marginTop: spacing.lg,
     },
     ghostLabel: {
       ...typeStyles.body,

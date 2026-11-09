@@ -36,10 +36,18 @@ import type {
   QuizGuessType,
   QuizLeaderboardEntry,
   QuizSource,
+  RankLeaderboardEntry,
+  UserRankProfile,
 } from '@kaikansen/contracts';
 import { fixtureMode } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { fetchQuizLeaderboard } from '../../../src/quizApi';
+import {
+  fetchMyRank,
+  fetchRankLeaderboard,
+} from '../../../src/socialApi';
+import { RankCard } from '../../../src/components/RankCard';
+import { RankRow } from '../../../src/components/RankRow';
 import {
   fontFamilies,
   radii,
@@ -76,6 +84,14 @@ const TYPE_LABEL: Record<QuizGuessType, string> = {
  * all in the lobby route), and a live preview of the API's
  * leaderboard (top attempts; the board itself is public).
  *
+ * Layout-fidelity slice: the Lavender Dusk hub's rank card (the
+ * signed-in caller's /rank/me document) now sits on top, and an
+ * RP leaderboard preview (GET /rank/leaderboard, "View all" →
+ * the leaderboard route) sits above the top-attempts board. The
+ * web's quiz hub carries the same top-attempts section fed by
+ * /api/quiz/leaderboard — it stays; the web shows RP ranks on
+ * its own /leaderboard page, which the preview + route port.
+ *
  * Honest states: signed-out gets a log-in prompt in place of the
  * play cards (the quiz API requires auth — solo games are per-user
  * and rooms have no anonymous sockets); fixture mode labels demo
@@ -94,6 +110,11 @@ export default function QuizScreen() {
   const [board, setBoard] = useState<QuizLeaderboardEntry[] | null>(null);
   const [boardError, setBoardError] = useState<string | null>(null);
   const [boardLoading, setBoardLoading] = useState(false);
+  const [myRank, setMyRank] = useState<UserRankProfile | null>(null);
+  const [rankBoard, setRankBoard] = useState<RankLeaderboardEntry[] | null>(
+    null,
+  );
+  const [rankError, setRankError] = useState<string | null>(null);
 
   const loadBoard = useCallback(async () => {
     setBoardLoading(true);
@@ -117,6 +138,36 @@ export default function QuizScreen() {
   );
 
   const signedIn = status === 'signedIn';
+
+  // Rank card + RP preview: the board is public; /rank/me only
+  // exists for a signed-in caller (its failure just hides the
+  // card and the YOU highlight — never an error surface here).
+  const loadRank = useCallback(async () => {
+    setRankError(null);
+    try {
+      const res = await fetchRankLeaderboard();
+      setRankBoard(res.leaderboard);
+    } catch (e) {
+      setRankError(
+        e instanceof Error ? e.message : 'Could not load the rankings.',
+      );
+    }
+    if (signedIn) {
+      try {
+        setMyRank(await fetchMyRank());
+      } catch {
+        setMyRank(null);
+      }
+    } else {
+      setMyRank(null);
+    }
+  }, [signedIn]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadRank();
+    }, [loadRank]),
+  );
   const canPlay = signedIn && !fixtureMode;
 
   const chip = (
@@ -220,6 +271,8 @@ export default function QuizScreen() {
           </View>
         ) : (
           <>
+            {myRank && <RankCard profile={myRank} />}
+
             <View style={styles.card}>
               <View style={styles.cardHead}>
                 <View style={styles.iconSlot}>
@@ -325,7 +378,7 @@ export default function QuizScreen() {
                   }
                   disabled={!canPlay}
                   accessibilityRole="button"
-                  accessibilityLabel="Find a public match"
+                  accessibilityLabel="Browse public rooms"
                   accessibilityState={{ disabled: !canPlay }}
                   style={({ pressed }) => [
                     styles.mpButton,
@@ -347,13 +400,66 @@ export default function QuizScreen() {
           </>
         )}
 
+        <View>
+          <View style={styles.sectionHead}>
+            <Text style={styles.sectionTitle}>Leaderboard</Text>
+            <Pressable
+              onPress={() => router.push('/quiz/leaderboard')}
+              accessibilityRole="button"
+              accessibilityLabel="View the full leaderboard"
+              style={({ pressed }) => [pressed && styles.pressed]}
+            >
+              <Text style={styles.viewAllText}>View all</Text>
+            </Pressable>
+          </View>
+          <View style={styles.previewCard}>
+            {rankBoard === null && !rankError ? (
+              <ActivityIndicator
+                color={theme.accent}
+                style={styles.boardSpin}
+              />
+            ) : rankError ? (
+              <View style={styles.boardState}>
+                <Text style={styles.errorText}>{rankError}</Text>
+                <Pressable
+                  onPress={() => void loadRank()}
+                  accessibilityRole="button"
+                  accessibilityLabel="Retry loading the rankings"
+                  style={styles.retryLink}
+                >
+                  <Text style={styles.retryText}>Retry</Text>
+                </Pressable>
+              </View>
+            ) : rankBoard && rankBoard.length > 0 ? (
+              rankBoard
+                .slice(0, 5)
+                .map((entry, i) => (
+                  <RankRow
+                    key={entry.userId}
+                    position={i + 1}
+                    entry={entry}
+                    isYou={
+                      myRank !== null && entry.userId === myRank.userId
+                    }
+                  />
+                ))
+            ) : (
+              <Text style={styles.emptyText}>
+                {fixtureMode
+                  ? 'No rankings in demo mode.'
+                  : 'No ranked players yet — play a game to earn RP.'}
+              </Text>
+            )}
+          </View>
+        </View>
+
         <View style={styles.card}>
           <View style={styles.cardHead}>
             <View style={styles.iconSlot}>
               <Trophy size={17} color={theme.accent} strokeWidth={2} />
             </View>
-            <Text style={styles.cardTitle}>Leaderboard</Text>
-            <Text style={styles.cardHint}>Top attempts</Text>
+            <Text style={styles.cardTitle}>Top attempts</Text>
+            <Text style={styles.cardHint}>Solo scores</Text>
           </View>
           <View style={styles.chipRow}>
             <Pressable
@@ -555,6 +661,29 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.caption,
       color: theme.muted,
       flex: 1,
+    },
+    sectionHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: spacing.sm,
+      paddingHorizontal: spacing.xs,
+    },
+    sectionTitle: {
+      ...typeStyles.caption,
+      color: theme.muted,
+      textTransform: 'uppercase',
+      letterSpacing: 0.8,
+    },
+    viewAllText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 13,
+      color: theme.accent,
+    },
+    previewCard: {
+      backgroundColor: theme.surface,
+      borderRadius: radii.card,
+      padding: spacing.sm,
     },
     boardSpin: {
       paddingVertical: spacing.lg,

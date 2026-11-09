@@ -299,6 +299,32 @@ describe('Auth flow with a mocked model (e2e)', () => {
     expect(res.body.displayName).toBe('Edited Name');
   });
 
+  it('PATCH /auth/me toggles isPublic (the Edit Profile switch) and GET /auth/me reflects it', async () => {
+    const http = request(app.getHttpServer());
+    const off = await http
+      .patch('/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ isPublic: false })
+      .expect(200);
+    expect(off.body.isPublic).toBe(false);
+    expect(off.body.displayName).toBe('Edited Name');
+
+    const after = await http
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    expect(after.body.isPublic).toBe(false);
+
+    const bad = await http
+      .patch('/auth/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ isPublic: 'yes' })
+      .expect(400);
+    expect(bad.body.message).toBe(
+      'Invalid input: expected boolean, received string',
+    );
+  });
+
   it('POST /auth/refresh rotates the pair (200, new refresh token)', async () => {
     const res = await request(app.getHttpServer())
       .post('/auth/refresh')

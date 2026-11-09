@@ -22,6 +22,7 @@ import {
 import { JetBrainsMono_500Medium } from '@expo-google-fonts/jetbrains-mono';
 import { ThemeProvider, useTheme, useThemeMode } from '../src/theme-context';
 import { AuthProvider } from '../src/auth';
+import { PlaybackProvider } from '../src/playback-context';
 
 /**
  * Root layout. Loads the DESIGN.md font families (Outfit / Inter /
@@ -30,8 +31,11 @@ import { AuthProvider } from '../src/auth';
  *
  * Providers (Slice 2): ThemeProvider owns the dark/light mode (Gate 4:
  * dark by default, persisted choice), AuthProvider owns the session.
- * The Shell below consumes the theme so the navigator chrome and the
- * status bar re-skin with the mode.
+ * PlaybackProvider (layout-fidelity Slice 1) owns the ONE shared
+ * playback session + engine, so playback survives navigation and the
+ * mini player can float over tab and pushed screens. The Shell below
+ * consumes the theme so the navigator chrome and the status bar
+ * re-skin with the mode.
  */
 export default function RootLayout() {
   const [fontsLoaded, fontError] = useFonts({
@@ -58,7 +62,9 @@ export default function RootLayout() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <Shell />
+        <PlaybackProvider>
+          <Shell />
+        </PlaybackProvider>
       </AuthProvider>
     </ThemeProvider>
   );
@@ -82,6 +88,7 @@ function Shell() {
         <Stack.Screen name="(drawer)" />
         <Stack.Screen name="login" />
         <Stack.Screen name="register" />
+        <Stack.Screen name="anilist-handoff" />
       </Stack>
     </GestureHandlerRootView>
   );

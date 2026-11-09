@@ -130,6 +130,9 @@ export async function demoUpdateProfile(
   if (input.avatarUrl !== undefined) {
     profile.avatarUrl = input.avatarUrl;
   }
+  if (input.isPublic !== undefined) {
+    profile.isPublic = input.isPublic;
+  }
   account.profile = profile;
   await plainStorage.set(ACCOUNT_KEY, JSON.stringify(account));
   return profile;

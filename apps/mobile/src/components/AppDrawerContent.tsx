@@ -153,7 +153,7 @@ export function AppDrawerContent({
     <DrawerContentScrollView contentContainerStyle={styles.panel}>
       {signedIn ? (
         <Pressable
-          onPress={() => go(`/user/${user.username}`)}
+          onPress={() => go('/profile')}
           accessibilityRole="button"
           accessibilityLabel="Open your profile"
           style={styles.profile}

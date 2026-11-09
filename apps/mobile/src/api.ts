@@ -5,6 +5,7 @@ import type {
   RecordWatchRequest,
   SearchResponse,
   Season,
+  SeasonResponse,
   SimilarThemesResponse,
   ThemeDetail,
   ThemeSummary,
@@ -166,6 +167,7 @@ function toSummary(theme: ThemeDetail): ThemeSummary {
     totalRatings: theme.totalRatings,
     totalWatches: theme.totalWatches,
     totalListens: theme.totalListens,
+    duration: theme.duration,
     isPopular: theme.isPopular,
     popularRank: theme.popularRank,
   };
@@ -213,6 +215,12 @@ function fixtureSearch(query: string): SearchResponse {
   const base: SearchResponse = {
     query: trimmed,
     results: [],
+    // The bundled snapshot holds no AnimeCache/ArtistCache data, so
+    // fixture mode honestly serves empty groups — the search screen
+    // renders its Themes group alone, as it does for a live search
+    // with no anime/artist matches.
+    anime: [],
+    artists: [],
     searchType: 'regex',
     page: 1,
     total: 0,
@@ -295,6 +303,32 @@ function fixtureSearch(query: string): SearchResponse {
 export async function fetchHome(): Promise<HomeResponse> {
   if (fixtureMode) return fixtureHome();
   return getJson<HomeResponse>('/home');
+}
+
+/**
+ * One season's themes (GET /season — the web's seasonal read,
+ * ported in layout-fidelity Slice 6 for the Season browse screen's
+ * season chips). Fixture mode answers from the bundled snapshot
+ * with the endpoint's own semantics (season filter, sequence then
+ * avgRating order): the snapshot holds few seasons, so most
+ * answers are honestly empty, and it never paginates (hasMore is
+ * always false — the whole snapshot fits one page by construction).
+ */
+export async function fetchSeason(
+  season: Season,
+  year: number,
+  page = 1,
+): Promise<SeasonResponse> {
+  if (fixtureMode) {
+    const themes = popularThemesFixture
+      .filter((t) => t.animeSeason === season && t.animeSeasonYear === year)
+      .sort((a, b) => a.sequence - b.sequence || b.avgRating - a.avgRating)
+      .map(toSummary);
+    return { season, year, themes, page: 1, hasMore: false };
+  }
+  return getJson<SeasonResponse>(
+    `/season?season=${season}&year=${year}&page=${page}`,
+  );
 }
 
 /** Resolves null when the theme does not exist (API 404 / not in fixture). */

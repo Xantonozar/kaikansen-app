@@ -1,9 +1,11 @@
 import {
+  BadRequestException,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import type { Model } from 'mongoose';
 import type { AnimeCacheDocument } from '../sync/anime-cache.schema';
+import type { ArtistCacheDocument } from '../sync/artist-cache.schema';
 import type { ThemeCacheDocument } from './theme-cache.schema';
 import { ThemesService } from './themes.service';
 
@@ -269,6 +271,98 @@ describe('ThemesService.getHome', () => {
       ([filter]) => 'animeSeason' in filter,
     );
     expect(railQueries).toHaveLength(9);
+  });
+});
+
+describe('ThemesService.getSeasonThemes', () => {
+  it('serves the season in the contract shape, querying the web seasonal filter', async () => {
+    const doc = makeDoc({ slug: 'spring-theme', animeSeason: 'SPRING' });
+    const find = jest.fn(() => queryOf([doc]));
+    const service = serviceWith({ find });
+
+    const res = await service.getSeasonThemes('spring', '2026');
+
+    expect(find).toHaveBeenCalledWith({
+      animeSeason: 'SPRING',
+      animeSeasonYear: 2026,
+    });
+    expect(res).toMatchObject({ season: 'SPRING', year: 2026, page: 1 });
+    expect(res.themes).toHaveLength(1);
+    expect(res.themes[0].slug).toBe('spring-theme');
+    expect(res.themes[0]).not.toHaveProperty('entries');
+    // One partial page: no more pages behind it.
+    expect(res.hasMore).toBe(false);
+  });
+
+  it('sorts sequence asc then avgRating desc, pages by 20, and reports hasMore on a full page', async () => {
+    const sorts: Record<string, number>[] = [];
+    const skips: number[] = [];
+    const docs = Array.from({ length: 20 }, (_, i) =>
+      makeDoc({ slug: `t-${i}` }),
+    );
+    const chain: Record<string, unknown> = {};
+    chain.sort = (spec: Record<string, number>) => {
+      sorts.push(spec);
+      return chain;
+    };
+    chain.skip = (n: number) => {
+      skips.push(n);
+      return chain;
+    };
+    chain.limit = () => chain;
+    chain.lean = () => chain;
+    chain.exec = async () => docs;
+    const find = jest.fn(() => chain);
+    const service = serviceWith({ find });
+
+    const res = await service.getSeasonThemes('FALL', '2026', undefined, '2');
+
+    expect(sorts).toEqual([{ sequence: 1, avgRating: -1 }]);
+    expect(skips).toEqual([20]);
+    expect(res.page).toBe(2);
+    expect(res.hasMore).toBe(true);
+  });
+
+  it('applies the OP/ED type filter only for a real type (the web’s rule)', async () => {
+    const find = jest.fn(() => queryOf([]));
+    const service = serviceWith({ find });
+
+    await service.getSeasonThemes('SUMMER', '2026', 'ed');
+    expect(find).toHaveBeenCalledWith({
+      animeSeason: 'SUMMER',
+      animeSeasonYear: 2026,
+      type: 'ED',
+    });
+
+    find.mockClear();
+    await service.getSeasonThemes('SUMMER', '2026', 'banana');
+    expect(find).toHaveBeenCalledWith({
+      animeSeason: 'SUMMER',
+      animeSeasonYear: 2026,
+    });
+  });
+
+  it('answers 400 when season or year is missing or not a season (the web’s ‘Season and year required’)', async () => {
+    const service = serviceWith({ find: jest.fn(() => queryOf([])) });
+    await expect(
+      service.getSeasonThemes(undefined, '2026'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.getSeasonThemes('SPRING', undefined),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.getSeasonThemes('RAINY', '2026'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.getSeasonThemes('SPRING', 'not-a-year'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('answers 503 without a database', async () => {
+    const service = new ThemesService(undefined);
+    await expect(
+      service.getSeasonThemes('SPRING', '2026'),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 });
 
@@ -595,6 +689,8 @@ describe('ThemesService.search', () => {
     await expect(service.search('   ')).resolves.toEqual({
       query: '',
       results: [],
+      anime: [],
+      artists: [],
       searchType: 'regex',
       page: 1,
       total: 0,
@@ -604,6 +700,238 @@ describe('ThemesService.search', () => {
     });
     expect(find).not.toHaveBeenCalled();
     expect(countDocuments).not.toHaveBeenCalled();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Grouped search — the web's ALL-view anime + artist groups           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Three-model stand-in for grouped-search tests. The theme model's
+ * `find` dispatches by filter shape: the two group count projections
+ * (an `anilistId` / `artistSlugs` key), the stage-1 prefix query
+ * ($or whose first value is a ^-anchored RegExp), and stage 2
+ * (anything else). Every call's query object is recorded.
+ */
+function groupedSearchModels(opts: {
+  candidates?: unknown[];
+  results?: unknown[];
+  total?: number;
+  animeDocs?: unknown[];
+  artistDocs?: unknown[];
+  animeThemeDocs?: unknown[];
+  artistThemeDocs?: unknown[];
+}) {
+  const themeQueries: ReturnType<typeof queryOf>[] = [];
+  const themeFind = jest.fn((filter: Record<string, unknown>) => {
+    let docs: unknown[] = opts.results ?? [];
+    if (filter && 'anilistId' in filter) docs = opts.animeThemeDocs ?? [];
+    else if (filter && 'artistSlugs' in filter) {
+      docs = opts.artistThemeDocs ?? [];
+    } else {
+      const orClauses = filter?.$or as Record<string, RegExp>[] | undefined;
+      const firstValue = orClauses?.[0]
+        ? Object.values(orClauses[0])[0]
+        : undefined;
+      if (firstValue instanceof RegExp && firstValue.source.startsWith('^')) {
+        docs = opts.candidates ?? [];
+      }
+    }
+    const q = queryOf(docs);
+    themeQueries.push(q);
+    return q;
+  });
+  const animeQueries: ReturnType<typeof queryOf>[] = [];
+  const animeFind = jest.fn((_filter: Record<string, unknown>) => {
+    const q = queryOf(opts.animeDocs ?? []);
+    animeQueries.push(q);
+    return q;
+  });
+  const artistQueries: ReturnType<typeof queryOf>[] = [];
+  const artistFind = jest.fn((_filter: Record<string, unknown>) => {
+    const q = queryOf(opts.artistDocs ?? []);
+    artistQueries.push(q);
+    return q;
+  });
+  const service = new ThemesService(
+    {
+      find: themeFind,
+      countDocuments: jest.fn(() => queryOf(opts.total ?? 0)),
+    } as unknown as Model<ThemeCacheDocument>,
+    { find: animeFind } as unknown as Model<AnimeCacheDocument>,
+    { find: artistFind } as unknown as Model<ArtistCacheDocument>,
+  );
+  return { service, themeFind, themeQueries, animeFind, animeQueries, artistFind, artistQueries };
+}
+
+describe('ThemesService.search — anime/artist groups', () => {
+  it('serves both groups, projected, with theme counts from the theme collection', async () => {
+    const { service, animeFind, animeQueries, artistFind, artistQueries } =
+      groupedSearchModels({
+        results: [makeDoc({ slug: 'song-hit' })],
+        total: 1,
+        animeDocs: [
+          makeAnimeDoc({ anilistId: 42, titleRomaji: 'Test Anime', seasonYear: 2026 }),
+          makeAnimeDoc({
+            _id: 'anime-2',
+            anilistId: 77,
+            titleRomaji: 'Test Anime 2',
+            titleEnglish: null,
+            coverImageLarge: null,
+            seasonYear: null,
+          }),
+          // No AniList id: the row could not navigate anywhere.
+          makeAnimeDoc({ _id: 'anime-3', anilistId: null, titleRomaji: 'Unopenable' }),
+        ],
+        animeThemeDocs: [{ anilistId: 42 }, { anilistId: 42 }, { anilistId: 77 }],
+        artistDocs: [
+          {
+            slug: 'test_artist',
+            name: 'Test Artist',
+            aliases: [],
+            imageUrl: 'https://example.com/artist.jpg',
+            totalThemes: 1,
+          },
+          {
+            slug: 'other_artist',
+            name: 'Other Artist',
+            aliases: [],
+            imageUrl: null,
+            totalThemes: 9,
+          },
+        ],
+        artistThemeDocs: [
+          { artistSlugs: ['test_artist'] },
+          { artistSlugs: ['test_artist', 'other_artist'] },
+        ],
+      });
+
+    const res = await service.search('test');
+
+    // The themes slice is untouched by the groups.
+    expect(res.results.map((r) => r.slug)).toEqual(['song-hit']);
+
+    // Anime filter: the web's three fields, one word → a bare $or.
+    const animeFilter = animeFind.mock.calls[0][0] as {
+      $or: Record<string, RegExp>[];
+    };
+    expect(animeFilter.$or.map((c) => Object.keys(c)[0])).toEqual([
+      'titleRomaji',
+      'titleEnglish',
+      'synonyms',
+    ]);
+    expect(animeFilter.$or[0].titleRomaji.source).toBe('test');
+    expect(animeQueries[0].limit).toHaveBeenCalledWith(5);
+
+    expect(res.anime).toEqual([
+      {
+        anilistId: 42,
+        titleRomaji: 'Test Anime',
+        titleEnglish: 'Series Anime EN',
+        coverImageLarge: 'https://example.com/large.jpg',
+        seasonYear: 2026,
+        themeCount: 2,
+      },
+      {
+        anilistId: 77,
+        titleRomaji: 'Test Anime 2',
+        titleEnglish: null,
+        coverImageLarge: null,
+        seasonYear: null,
+        themeCount: 1,
+      },
+    ]);
+
+    // Artist filter: the web's two fields.
+    const artistFilter = artistFind.mock.calls[0][0] as {
+      $or: Record<string, RegExp>[];
+    };
+    expect(artistFilter.$or.map((c) => Object.keys(c)[0])).toEqual([
+      'name',
+      'aliases',
+    ]);
+    expect(artistQueries[0].limit).toHaveBeenCalledWith(5);
+
+    // test_artist: counter says 1 but 2 themes carry the slug → 2.
+    // other_artist: counter 9 stands above the counted 1 → 9.
+    expect(res.artists).toEqual([
+      {
+        slug: 'test_artist',
+        name: 'Test Artist',
+        imageUrl: 'https://example.com/artist.jpg',
+        totalThemes: 2,
+      },
+      {
+        slug: 'other_artist',
+        name: 'Other Artist',
+        imageUrl: null,
+        totalThemes: 9,
+      },
+    ]);
+  });
+
+  it('every word must match in the groups ($and across words)', async () => {
+    const { service, animeFind, artistFind } = groupedSearchModels({});
+
+    await service.search('test anime');
+
+    const animeFilter = animeFind.mock.calls[0][0] as {
+      $and: { $or: Record<string, RegExp>[] }[];
+    };
+    expect(animeFilter.$and).toHaveLength(2);
+    expect(animeFilter.$and[1].$or[0].titleRomaji.source).toBe('anime');
+    const artistFilter = artistFind.mock.calls[0][0] as {
+      $and: { $or: Record<string, RegExp>[] }[];
+    };
+    expect(artistFilter.$and).toHaveLength(2);
+    expect(artistFilter.$and[0].$or.map((c) => Object.keys(c)[0])).toEqual([
+      'name',
+      'aliases',
+    ]);
+  });
+
+  it('an OP/ED modifier empties the groups and never queries the caches (web parity)', async () => {
+    const { service, animeFind, artistFind } = groupedSearchModels({
+      results: [makeDoc({ slug: 'op9-hit' })],
+      total: 1,
+    });
+
+    const res = await service.search('op 9 test');
+
+    expect(res.anime).toEqual([]);
+    expect(res.artists).toEqual([]);
+    expect(animeFind).not.toHaveBeenCalled();
+    expect(artistFind).not.toHaveBeenCalled();
+  });
+
+  it('the groups are page-1 only', async () => {
+    const { service, animeFind, artistFind } = groupedSearchModels({
+      candidates: [makeDoc({ _id: 'cand-a' })],
+      results: [makeDoc({ slug: 'page-2-hit' })],
+      total: 21,
+    });
+
+    const res = await service.search('test', 2);
+
+    expect(res.anime).toEqual([]);
+    expect(res.artists).toEqual([]);
+    expect(animeFind).not.toHaveBeenCalled();
+    expect(artistFind).not.toHaveBeenCalled();
+  });
+
+  it('a service without cache models serves themes with empty groups', async () => {
+    const { model } = searchModel({
+      results: [makeDoc({ slug: 'themes-only-hit' })],
+      total: 1,
+    });
+    const service = serviceWith(model);
+
+    const res = await service.search('test');
+
+    expect(res.results.map((r) => r.slug)).toEqual(['themes-only-hit']);
+    expect(res.anime).toEqual([]);
+    expect(res.artists).toEqual([]);
   });
 });
 

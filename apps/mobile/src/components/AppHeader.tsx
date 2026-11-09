@@ -3,32 +3,30 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation, usePathname, useRouter } from 'expo-router';
 import { DrawerActions } from '@react-navigation/native';
-import { Bell, Menu, Search, User } from 'lucide-react-native';
+import { Bell, Menu, Search } from 'lucide-react-native';
 import { shell, spacing, typeStyles, withOpacity, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
 import { useAuth } from '../auth';
-import { Avatar } from './Avatar';
 import {
   refreshUnreadCount,
   useUnreadNotifications,
 } from '../notificationsStore';
 
 /**
- * App shell header (DESIGN.md §5): 64px, translucent, centred "Kaikansen"
- * wordmark in Outfit black italic — no logo glyph. Compact treatment
- * (approved mockup v1): every control is a 40px icon button. Left:
- * hamburger (opens the drawer sidebar — the header renders inside the
- * tab navigator, which is nested in the drawer, and the OPEN_DRAWER
- * action bubbles up to it) + avatar. Right: Search (opens the Search
- * screen) and, signed in, the notifications Bell (Slice M5 — a real
- * button to the notifications screen, badged with the unread count
- * from the shared notifications store). Signed out the bell is not
- * rendered at all: there is nobody to notify.
+ * App shell header — the Lavender Dusk mocks' treatment (Home v3,
+ * measured in layout-fidelity Slice 6): a 56px translucent bar,
+ * hamburger left, the centred "Kaikansen ♪" wordmark (Outfit black
+ * italic + the note glyph the mock draws), Search and — signed in —
+ * the notifications Bell right (Slice M5: a real button to the
+ * notifications screen, badged with the unread count from the
+ * shared notifications store). Signed out the bell is not rendered
+ * at all: there is nobody to notify.
  *
- * The avatar is the auth entry point (Slice 2): signed out it shows the
- * User glyph and taps through to Login; signed in it shows the user's
- * initial on the accent container (avatar fallback, P-20) and taps
- * through to Settings.
+ * There is deliberately NO avatar button: the mock header has none.
+ * Profile and Login live in the drawer (its identity row opens the
+ * own-Profile screen; signed out it carries the Log in item) —
+ * the header avatar this bar used to carry was the Gate-4
+ * treatment, superseded by the mocks like the 64px height.
  */
 export function AppHeader() {
   const theme = useTheme();
@@ -66,28 +64,9 @@ export function AppHeader() {
         >
           <Menu size={22} color={theme.text} strokeWidth={2} />
         </Pressable>
-        <Pressable
-          onPress={() => router.push(signedIn ? '/settings' : '/login')}
-          hitSlop={4}
-          accessibilityRole="button"
-          accessibilityLabel={signedIn ? 'Open settings' : 'Log in'}
-          style={styles.iconButton}
-        >
-          {signedIn ? (
-            <Avatar
-              url={user.avatarUrl}
-              name={user.displayName || user.username}
-              size={32}
-            />
-          ) : (
-            <View style={styles.avatar}>
-              <User size={16} color={theme.muted} strokeWidth={2} />
-            </View>
-          )}
-        </Pressable>
       </View>
 
-      <Text style={styles.wordmark}>Kaikansen</Text>
+      <Text style={styles.wordmark}>Kaikansen ♪</Text>
 
       <View style={[styles.side, styles.sideRight]}>
         <Pressable
@@ -168,14 +147,6 @@ const createStyles = (theme: Theme) =>
       fontSize: 10,
       fontFamily: 'Inter_600SemiBold',
       color: theme.onAccent,
-    },
-    avatar: {
-      width: 32,
-      height: 32,
-      borderRadius: 16,
-      backgroundColor: theme.raised,
-      alignItems: 'center',
-      justifyContent: 'center',
     },
     wordmark: {
       ...typeStyles.wordmark,

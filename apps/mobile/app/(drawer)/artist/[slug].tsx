@@ -16,7 +16,18 @@ import { fetchArtistDetail } from '../../../src/api';
 import { useFavorites } from '../../../src/favoritesStore';
 import { Avatar } from '../../../src/components/Avatar';
 import { ThemeRow } from '../../../src/components/ThemeRow';
-import { radii, spacing, typeStyles, type Theme } from '../../../src/theme';
+import {
+  queueItemsFromSummaries,
+  usePlaybackSession,
+} from '../../../src/playback-context';
+import type { ThemeSummary } from '@kaikansen/contracts';
+import {
+  fontFamilies,
+  radii,
+  spacing,
+  typeStyles,
+  type Theme,
+} from '../../../src/theme';
 import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
@@ -65,10 +76,17 @@ export default function ArtistDetailScreen() {
     (themeSlug: string) => router.push(`/theme/${themeSlug}`),
     [router],
   );
+  const { startQueue } = usePlaybackSession();
   const playTheme = useCallback(
-    (themeSlug: string) =>
-      router.push({ pathname: '/player', params: { slug: themeSlug, mode: 'watch' } }),
-    [router],
+    (themeSlug: string, list: ThemeSummary[]) => {
+      // The artist's shown list (most-watched first) is the queue.
+      const index = list.findIndex((t) => t.slug === themeSlug);
+      if (index >= 0) {
+        startQueue(queueItemsFromSummaries(list), index, 'watch');
+      }
+      router.push({ pathname: '/player', params: { slug: themeSlug, mode: 'watch' } });
+    },
+    [router, startQueue],
   );
 
   const themes = useMemo(
@@ -126,26 +144,31 @@ export default function ArtistDetailScreen() {
                 <Avatar url={null} name={data.artist.name} size={72} />
               )}
               <Text style={styles.name}>{data.artist.name}</Text>
-              {data.artist.aliases.length > 0 && (
-                <Text style={styles.aliases}>
-                  Also known as {data.artist.aliases.join(', ')}
-                </Text>
-              )}
-              <View style={styles.countChip}>
-                <Text style={styles.countChipText}>
-                  {data.artist.totalThemes}{' '}
-                  {data.artist.totalThemes === 1 ? 'theme' : 'themes'}
-                </Text>
-              </View>
+              {/* The design's subline is plain text ("24 themes ·
+                  J-Pop / Anison"), not a chip. Artist genres are
+                  NOT in the payload (ArtistCache has none), so
+                  only the theme count renders — flagged in the
+                  Slice 6 report; the aliases line the pre-fidelity
+                  build drew is not in the design either. */}
+              <Text style={styles.subline}>
+                {data.artist.totalThemes}{' '}
+                {data.artist.totalThemes === 1 ? 'theme' : 'themes'}
+              </Text>
             </View>
 
-            <Text style={styles.sectionHeading}>Themes</Text>
+            <View style={styles.headingRow}>
+              <Text style={styles.sectionHeading}>
+                Themes by {data.artist.name}
+              </Text>
+              <Text style={styles.popularCaption}>POPULAR</Text>
+            </View>
             {themes.map((item) => (
               <ThemeRow
                 key={item.slug}
                 item={item}
+                metaText={item.animeTitle}
                 onPress={() => openTheme(item.slug)}
-                onPlay={() => playTheme(item.slug)}
+                onPlay={() => playTheme(item.slug, themes)}
                 saved={favorites.isFavorite(item.slug)}
                 savePending={favorites.isPending(item.slug)}
                 onToggleSave={() => void favorites.toggle(item.slug)}
@@ -216,29 +239,30 @@ const createStyles = (theme: Theme) =>
       marginTop: spacing.sm,
       textAlign: 'center',
     },
-    aliases: {
+    subline: {
       ...typeStyles.bodySmall,
       color: theme.muted,
       textAlign: 'center',
+      marginTop: spacing.xs,
     },
-    countChip: {
-      backgroundColor: theme.accentContainer,
-      borderRadius: radii.pill,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 5,
-      marginTop: spacing.sm,
-    },
-    countChipText: {
-      ...typeStyles.caption,
-      fontFamily: 'Inter_600SemiBold',
-      color: theme.onAccentContainer,
+    headingRow: {
+      flexDirection: 'row',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      marginTop: spacing.xl,
+      marginBottom: spacing.md,
     },
     sectionHeading: {
       ...typeStyles.heading,
       fontFamily: 'Inter_600SemiBold',
       color: theme.text,
-      marginTop: spacing.xl,
-      marginBottom: spacing.md,
+      flexShrink: 1,
+    },
+    popularCaption: {
+      ...typeStyles.caption,
+      fontFamily: fontFamilies.bodyStrong,
+      letterSpacing: 1.2,
+      color: theme.muted,
     },
     center: {
       flex: 1,

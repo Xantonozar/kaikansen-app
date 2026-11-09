@@ -1,0 +1,650 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import type {
+  PlaybackMode,
+  ThemeDetail,
+  ThemeEntry,
+  ThemeSummary,
+} from '@kaikansen/contracts';
+import { fetchThemeBySlug } from './api';
+import { usePlayback } from './usePlayback';
+
+/**
+ * Shared playback session (layout-fidelity redesign, Slice 1) — the
+ * ONE usePlayback instance for the whole app, owned here instead of
+ * per-screen, so playback survives navigation and the floating
+ * MiniPlayer (src/components/MiniPlayer.tsx) can sit on tab screens
+ * and pushed screens alike, exactly as the Lavender Dusk mocks show.
+ *
+ * A consumer CLAIMS the session by writing its playback intent —
+ * { slug, detail, entry, entryIdOverride, mode, active } — through
+ * startSession/updateSession; the engine (src/usePlayback.ts, itself
+ * unchanged) simply runs on whatever the session currently holds:
+ * source resolution, the listen fallback chain, offline-first
+ * downloads and history record-once all behave exactly as they did
+ * when the two consumers owned private hook instances.
+ *
+ * Claimants today:
+ * - Theme detail: Watch/Listen claims with the selected entry;
+ *   switching the selected version updates `entry`; landing on a
+ *   different slug ends the session (the old hook unloaded on slug
+ *   change — that reset is preserved deliberately).
+ * - Player route: syncs its route params (slug/mode/entry) in and
+ *   renders from the shared engine; closing the route no longer
+ *   stops playback — the mini player is the continuation surface.
+ *
+ * `endSession` only flips `active` off (the engine pauses and
+ * unloads); the session data stays, so a screen returning to the
+ * same slug can re-attach to it.
+ *
+ * QUEUE (Slice 2.5, ozar's ruling — design elements get made
+ * workable, never dropped): list screens that open the player
+ * (Playlist, Library segments, Season / Anime / Artist rows, Home
+ * Continue Listening) claim a QUEUE alongside the session via
+ * startQueue. The provider then owns advancing: next()/prev() and
+ * auto-advance on track end move the session to the neighbouring
+ * item, resolving its ThemeDetail + entry itself (the same
+ * fetchThemeBySlug + entry resolution the player route performs),
+ * so the mini player's Next button, the player route's prev/next
+ * controls and its Up Next card all drive the real engine. The
+ * mode is the session's — advancing never flips watch/listen.
+ * A non-queue claim (startSession without a queue claim — a fresh
+ * player open) clears the queue: those plays are single-track by
+ * design. Theme detail is the exception: its Watch/Listen passes
+ * an explicit queue claim — [this theme, ...its similar themes] —
+ * alongside the session, so Next walks the related rail. And
+ * `endSession` clears the queue too: a dead session has no next.
+ *
+ * Advance failure + duplicate rules (Slice 2.5 completion):
+ * - If resolving an advanced-to item fails (fetch error / 404):
+ *   an item carrying an explicit entry id STAYS claimed with no
+ *   detail — the engine can still play that entry's downloaded
+ *   file offline, and nowPlaying falls back to the download
+ *   snapshot. An item with no entry id is skipped in the travel
+ *   direction until one resolves; if none does, the pre-advance
+ *   session and queue index are restored untouched.
+ * - If the target resolves to the SAME slug + entry the session
+ *   already held (a list containing the same theme twice), the
+ *   engine's URL never changes, so playback is restarted through
+ *   the engine's replay path (replay when ended, else seek to 0
+ *   and play) while the queue index still advances.
+ * - Race safety: each resolution carries a monotonic token; a
+ *   fetch that lands after the session/queue moved on is dropped.
+ */
+export interface PlaybackSession {
+  slug: string | null;
+  detail: ThemeDetail | null;
+  entry: ThemeEntry | null;
+  /** Download lookup key when it differs from the resolved entry
+      (the player route's explicit entry param). */
+  entryIdOverride: number | null;
+  mode: PlaybackMode;
+  active: boolean;
+}
+
+const IDLE_SESSION: PlaybackSession = {
+  slug: null,
+  detail: null,
+  entry: null,
+  entryIdOverride: null,
+  mode: 'watch',
+  active: false,
+};
+
+/**
+ * One queue entry — a light playback target. Presentation fields
+ * ride along so the mini player and the Up Next card can render
+ * the track before (or even without) its detail resolving.
+ * `atEntryId: null` means the theme's primary/first entry.
+ */
+export interface QueueItem {
+  slug: string;
+  atEntryId: number | null;
+  title: string;
+  artistLine: string;
+  coverUrl: string | null;
+}
+
+/** Build a queue item from a catalogue summary (the row data every
+    list screen already holds). */
+export function queueItemFromSummary(item: ThemeSummary): QueueItem {
+  return {
+    slug: item.slug,
+    atEntryId: null,
+    title: item.songTitle,
+    artistLine:
+      item.allArtists.length > 0
+        ? item.allArtists.join(' / ')
+        : (item.artistName ?? ''),
+    coverUrl: item.animeCoverImage ?? item.animeCoverImageSmall,
+  };
+}
+
+export function queueItemsFromSummaries(
+  items: ThemeSummary[],
+): QueueItem[] {
+  return items.map(queueItemFromSummary);
+}
+
+export interface PlaybackQueue {
+  items: QueueItem[];
+  index: number;
+}
+
+/** Status of the provider's own detail resolution for a claimed
+    track (queue advance, fresh player open). Screens that claim
+    WITH a detail never pass through here. */
+export type ResolutionStatus = 'loading' | 'ready' | 'missing' | 'error';
+export interface PlaybackResolution {
+  slug: string;
+  status: ResolutionStatus;
+}
+
+type Playback = ReturnType<typeof usePlayback>;
+
+/** What the mini player renders — title, artist line, cover. */
+export interface NowPlaying {
+  title: string;
+  artist: string;
+  cover: string | null;
+}
+
+interface PlaybackContextValue {
+  session: PlaybackSession;
+  playback: Playback;
+  nowPlaying: NowPlaying | null;
+  /** Replace the session wholesale (a consumer claiming playback).
+      With no queue claim this clears any queue — the claim is a
+      single-track play. A caller holding a queue for the claimed
+      track (theme detail: [theme, ...similar]) passes it as
+      `queueClaim` and it becomes the live queue. */
+  startSession: (
+    next: PlaybackSession,
+    queueClaim?: { items: QueueItem[]; index: number },
+  ) => void;
+  /** Merge fields into the current session. */
+  updateSession: (patch: Partial<PlaybackSession>) => void;
+  /** Deactivate: the engine pauses and unloads; data stays. The
+      queue is cleared too — a dead session has no next. */
+  endSession: () => void;
+  /** The live queue, or null for single-track sessions. */
+  queue: PlaybackQueue | null;
+  /** Index of the current item within `queue` (0 when no queue). */
+  queueIndex: number;
+  /** The queue item the session is currently on, if it is one. */
+  currentQueueItem: QueueItem | null;
+  /** The item next() would play, or null at the end / no queue. */
+  nextQueueItem: QueueItem | null;
+  hasNext: boolean;
+  hasPrev: boolean;
+  /** Alias of hasPrev (queue-spec naming). */
+  hasPrevious: boolean;
+  /** Claim playback of a list: session starts on `items[startIndex]`
+      in `mode`, and the rest becomes the queue. */
+  startQueue: (
+    items: QueueItem[],
+    startIndex: number,
+    mode: PlaybackMode,
+  ) => void;
+  /** Alias of startQueue in the session's current mode (watch when
+      the session is idle) — for claim sites that think in terms of
+      "the list this row belongs to" rather than a mode switch. */
+  setQueue: (items: QueueItem[], startIndex: number) => void;
+  /** Advance to the next queue item (no-op at the end). */
+  next: () => void;
+  /** Go back to the previous queue item (no-op at the start). */
+  prev: () => void;
+  /** Alias of prev (queue-spec naming). */
+  previous: () => void;
+  /** Provider-side detail resolution for the claimed track. */
+  resolution: PlaybackResolution | null;
+}
+
+const PlaybackContext = createContext<PlaybackContextValue | null>(null);
+
+export function PlaybackProvider({ children }: { children: ReactNode }) {
+  const [session, setSession] = useState<PlaybackSession>(IDLE_SESSION);
+  const [queue, setQueue] = useState<PlaybackQueue | null>(null);
+  const [resolution, setResolution] = useState<PlaybackResolution | null>(
+    null,
+  );
+
+  const playback = usePlayback({
+    slug: session.slug,
+    detail: session.detail,
+    entry: session.entry,
+    entryIdOverride: session.entryIdOverride,
+    mode: session.mode,
+    active: session.active,
+  });
+
+  /** Point the session at a queue item, detail unresolved — the
+      resolution effect below fetches it, exactly the fetch + entry
+      resolution the player route used to perform for itself. */
+  const claimQueueItem = useCallback(
+    (item: QueueItem, mode: PlaybackMode) => {
+      setSession({
+        slug: item.slug,
+        detail: null,
+        entry: null,
+        entryIdOverride: item.atEntryId,
+        mode,
+        active: true,
+      });
+    },
+    [],
+  );
+
+  /* Live mirrors for the async resolution path (failure skips,
+     duplicate restarts), which must read the CURRENT session and
+     queue, never the render it was scheduled from. */
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
+  const playbackRef = useRef(playback);
+  playbackRef.current = playback;
+
+  /* One in-flight advance chain: the snapshot to restore if every
+     candidate fails, the indexes already tried, the travel
+     direction for skips, and where playback came from (for the
+     duplicate restart check). Set by a fresh claim/advance,
+     extended by failure skips, cleared when a claim resolves or
+     is superseded. */
+  interface AdvanceChain {
+    snapshotSession: PlaybackSession;
+    snapshotQueue: PlaybackQueue | null;
+    tried: Set<number>;
+    direction: 1 | -1;
+    restartFrom: { slug: string; entryId: number | null } | null;
+  }
+  const chainRef = useRef<AdvanceChain | null>(null);
+
+  const startSession = useCallback(
+    (
+      next: PlaybackSession,
+      queueClaim?: { items: QueueItem[]; index: number },
+    ) => {
+      chainRef.current = null;
+      if (queueClaim && queueClaim.items.length > 0) {
+        const index = Math.min(
+          Math.max(queueClaim.index, 0),
+          queueClaim.items.length - 1,
+        );
+        setQueue({ items: queueClaim.items, index });
+      } else {
+        setQueue(null);
+      }
+      setSession(next);
+    },
+    [],
+  );
+  const updateSession = useCallback((patch: Partial<PlaybackSession>) => {
+    setSession((prev) => ({ ...prev, ...patch }));
+    // Keep the queue's current item honest when the owning screen
+    // switches the playing entry (theme detail's version tiles):
+    // returning to this item later must resolve the entry the user
+    // actually picked, not the one the queue was claimed with.
+    if (patch.entry) {
+      const entryId = patch.entry.atEntryId;
+      setQueue((prevQueue) => {
+        if (!prevQueue) return prevQueue;
+        const item = prevQueue.items[prevQueue.index];
+        if (
+          !item ||
+          item.slug !== sessionRef.current.slug ||
+          item.atEntryId === entryId
+        ) {
+          return prevQueue;
+        }
+        const items = prevQueue.items.slice();
+        items[prevQueue.index] = { ...item, atEntryId: entryId };
+        return { ...prevQueue, items };
+      });
+    }
+  }, []);
+  const endSession = useCallback(() => {
+    chainRef.current = null;
+    // A dead session has no next — the queue goes with it.
+    setQueue(null);
+    setSession((prev) => (prev.active ? { ...prev, active: false } : prev));
+  }, []);
+
+  const startQueue = useCallback(
+    (items: QueueItem[], startIndex: number, mode: PlaybackMode) => {
+      if (items.length === 0) return;
+      const index = Math.min(Math.max(startIndex, 0), items.length - 1);
+      chainRef.current = {
+        snapshotSession: sessionRef.current,
+        snapshotQueue: queueRef.current,
+        tried: new Set([index]),
+        direction: 1,
+        restartFrom: null,
+      };
+      setQueue({ items, index });
+      claimQueueItem(items[index], mode);
+    },
+    [claimQueueItem],
+  );
+
+  const setQueueClaim = useCallback(
+    (items: QueueItem[], startIndex: number) => {
+      startQueue(items, startIndex, sessionRef.current.mode);
+    },
+    [startQueue],
+  );
+
+  const goToQueueIndex = useCallback(
+    (index: number, direction: 1 | -1, continuation = false) => {
+      const currentQueue = queueRef.current;
+      if (!currentQueue) return;
+      const item = currentQueue.items[index];
+      if (!item) return;
+      if (!continuation || !chainRef.current) {
+        const prevSession = sessionRef.current;
+        chainRef.current = {
+          snapshotSession: prevSession,
+          snapshotQueue: currentQueue,
+          tried: new Set([index]),
+          direction,
+          // Duplicate candidate: the target is the theme already
+          // in the session — if it also resolves to the same
+          // entry, the engine URL won't move and playback must be
+          // restarted explicitly (checked at resolution time).
+          restartFrom:
+            item.slug === prevSession.slug
+              ? {
+                  slug: item.slug,
+                  entryId:
+                    prevSession.entry?.atEntryId ??
+                    prevSession.entryIdOverride ??
+                    null,
+                }
+              : null,
+        };
+      } else {
+        chainRef.current.tried.add(index);
+        chainRef.current.direction = direction;
+      }
+      setQueue({ items: currentQueue.items, index });
+      // The mode is whatever the session runs in — advancing
+      // never flips watch/listen.
+      setSession((prevSession) => ({
+        slug: item.slug,
+        detail: null,
+        entry: null,
+        entryIdOverride: item.atEntryId,
+        mode: prevSession.mode,
+        active: true,
+      }));
+    },
+    [],
+  );
+
+  const next = useCallback(() => {
+    const currentQueue = queueRef.current;
+    if (!currentQueue || currentQueue.index >= currentQueue.items.length - 1)
+      return;
+    goToQueueIndex(currentQueue.index + 1, 1);
+  }, [goToQueueIndex]);
+
+  const prev = useCallback(() => {
+    const currentQueue = queueRef.current;
+    if (!currentQueue || currentQueue.index <= 0) return;
+    goToQueueIndex(currentQueue.index - 1, -1);
+  }, [goToQueueIndex]);
+
+  /* Detail resolution: a claimed track with no detail in hand (a
+     queue claim, or the player route's fresh open) is resolved
+     here — fetchThemeBySlug, then the entry the player route has
+     always picked: the explicit entry id when it exists in the
+     payload, else the first entry. A token guards the race where
+     the session moves on before a slow fetch lands: a superseded
+     fetch never applies. Claims that arrive WITH a detail (theme
+     detail) skip this entirely.
+     Failure handling follows the advance rules in the header:
+     entry-specific queue claims stay claimed (offline download
+     fallback); entry-less queue claims skip in the travel
+     direction, restoring the pre-advance snapshot if the whole
+     rest of the queue fails; anything else surfaces its status
+     for the player route's error state. A success that resolves
+     to the pre-advance slug + entry restarts playback through
+     the engine's replay path — the URL never changed, so the
+     engine would otherwise sit on the old position (or on
+     `ended`, for an auto-advance onto a duplicate). */
+  const resolveTokenRef = useRef(0);
+  const claimSlug = session.slug;
+  const claimOverride = session.entryIdOverride;
+  const claimDetail = session.detail;
+  const claimActive = session.active;
+  useEffect(() => {
+    if (!claimActive || !claimSlug || claimDetail) return;
+    const slug = claimSlug;
+    const token = ++resolveTokenRef.current;
+    setResolution({ slug, status: 'loading' });
+
+    const handleFailure = (status: ResolutionStatus) => {
+      const chain = chainRef.current;
+      const liveQueue = queueRef.current;
+      const item = liveQueue?.items[liveQueue.index];
+      if (
+        chain &&
+        liveQueue &&
+        item &&
+        item.slug === slug &&
+        item.atEntryId == null
+      ) {
+        let idx = liveQueue.index + chain.direction;
+        while (
+          idx >= 0 &&
+          idx < liveQueue.items.length &&
+          chain.tried.has(idx)
+        ) {
+          idx += chain.direction;
+        }
+        if (idx >= 0 && idx < liveQueue.items.length) {
+          goToQueueIndex(idx, chain.direction, true);
+          return;
+        }
+        // No further item works — the current session stands.
+        chainRef.current = null;
+        setQueue(chain.snapshotQueue);
+        setSession(chain.snapshotSession);
+        setResolution(null);
+        return;
+      }
+      chainRef.current = null;
+      setResolution({ slug, status });
+    };
+
+    fetchThemeBySlug(slug)
+      .then((data) => {
+        if (resolveTokenRef.current !== token) return;
+        if (!data) {
+          handleFailure('missing');
+          return;
+        }
+        const current = sessionRef.current;
+        if (current.slug !== slug || current.detail) {
+          // Superseded by a claim that brought its own detail.
+          chainRef.current = null;
+          return;
+        }
+        setResolution({ slug, status: 'ready' });
+        const entry =
+          data.entries.find(
+            (e) => e.atEntryId === current.entryIdOverride,
+          ) ??
+          data.entries[0] ??
+          null;
+        setSession((prevSession) => {
+          if (prevSession.slug !== slug || prevSession.detail) {
+            return prevSession;
+          }
+          return { ...prevSession, detail: data, entry };
+        });
+        // Duplicate restart (see header): same slug + entry as
+        // the session held before the advance.
+        const chain = chainRef.current;
+        chainRef.current = null;
+        if (
+          chain?.restartFrom &&
+          chain.restartFrom.slug === slug &&
+          chain.restartFrom.entryId != null &&
+          entry !== null &&
+          entry.atEntryId === chain.restartFrom.entryId
+        ) {
+          const pb = playbackRef.current;
+          try {
+            if (pb.ended) {
+              pb.toggleMain();
+            } else {
+              pb.player.currentTime = 0;
+              pb.player.play();
+            }
+          } catch {
+            // Player already released — nothing to restart.
+          }
+        }
+      })
+      .catch(() => {
+        if (resolveTokenRef.current !== token) return;
+        handleFailure('error');
+      });
+  }, [claimActive, claimSlug, claimOverride, claimDetail, goToQueueIndex]);
+
+  /* Auto-advance: a genuine play-to-end transition (the engine's
+     `ended` flipping false → true) moves the queue on, when there
+     is a next item. Manual next/prev go through the same claim
+     path; the engine's load cycle resets `ended` for the new
+     track, so each track end is exactly one transition. */
+  const prevEndedRef = useRef(false);
+  const ended = playback.ended;
+  useEffect(() => {
+    const wasEnded = prevEndedRef.current;
+    prevEndedRef.current = ended;
+    if (!wasEnded && ended) next();
+  }, [ended, next]);
+
+  const currentQueueItem = useMemo<QueueItem | null>(() => {
+    if (!queue) return null;
+    const item = queue.items[queue.index];
+    if (!item || item.slug !== session.slug) return null;
+    if (
+      item.atEntryId != null &&
+      item.atEntryId !== session.entryIdOverride &&
+      item.atEntryId !== session.entry?.atEntryId
+    ) {
+      return null;
+    }
+    return item;
+  }, [queue, session.slug, session.entryIdOverride, session.entry]);
+
+  const nextQueueItem =
+    queue && queue.index < queue.items.length - 1
+      ? queue.items[queue.index + 1]
+      : null;
+  const hasNext = nextQueueItem !== null;
+  const hasPrev = queue !== null && queue.index > 0;
+
+  // Presentation for the mini player: the session's detail when the
+  // catalogue payload is in hand; otherwise the current queue
+  // item's carried fields (a queue track mid-resolution, or one
+  // whose detail could not load); otherwise the download snapshot
+  // the engine resolved (fully-offline opens have no detail).
+  const nowPlaying = useMemo<NowPlaying | null>(() => {
+    const detail = session.detail;
+    if (detail) {
+      return {
+        title: detail.songTitle,
+        artist:
+          detail.allArtists.length > 0
+            ? detail.allArtists.join(' / ')
+            : (detail.artistName ?? ''),
+        cover: detail.animeGrillImage ?? detail.animeCoverImage,
+      };
+    }
+    if (currentQueueItem) {
+      return {
+        title: currentQueueItem.title,
+        artist: currentQueueItem.artistLine,
+        cover: currentQueueItem.coverUrl,
+      };
+    }
+    const local = playback.localUsable;
+    if (local) {
+      return {
+        title: local.songTitle,
+        artist: local.artistName ?? local.animeTitle,
+        cover: local.coverImage,
+      };
+    }
+    return null;
+  }, [session.detail, currentQueueItem, playback.localUsable]);
+
+  const value = useMemo<PlaybackContextValue>(
+    () => ({
+      session,
+      playback,
+      nowPlaying,
+      startSession,
+      updateSession,
+      endSession,
+      queue,
+      queueIndex: queue?.index ?? 0,
+      currentQueueItem,
+      nextQueueItem,
+      hasNext,
+      hasPrev,
+      hasPrevious: hasPrev,
+      startQueue,
+      setQueue: setQueueClaim,
+      next,
+      prev,
+      previous: prev,
+      resolution,
+    }),
+    [
+      session,
+      playback,
+      nowPlaying,
+      startSession,
+      updateSession,
+      endSession,
+      queue,
+      currentQueueItem,
+      nextQueueItem,
+      hasNext,
+      hasPrev,
+      startQueue,
+      setQueueClaim,
+      next,
+      prev,
+      resolution,
+    ],
+  );
+
+  return (
+    <PlaybackContext.Provider value={value}>
+      {children}
+    </PlaybackContext.Provider>
+  );
+}
+
+export function usePlaybackSession(): PlaybackContextValue {
+  const ctx = useContext(PlaybackContext);
+  if (!ctx) {
+    throw new Error(
+      'usePlaybackSession must be used inside <PlaybackProvider>.',
+    );
+  }
+  return ctx;
+}

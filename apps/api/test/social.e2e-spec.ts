@@ -14,6 +14,7 @@ import { WatchHistory } from './../src/library/watch-history.schema';
 import { ThemeCache } from './../src/themes/theme-cache.schema';
 import { Follow } from './../src/social/follow.schema';
 import { Notification } from './../src/social/notification.schema';
+import { UserRank } from './../src/quiz/user-rank.schema';
 import { SocialController } from './../src/social/social.controller';
 import { SocialService } from './../src/social/social.service';
 
@@ -365,6 +366,16 @@ function makeFakeModels() {
       chain(themes.filter((t) => matches(t, filter))),
   };
 
+  // Bob has played quiz games; Alice and Carol have no rank doc.
+  const ranks: Record<string, unknown>[] = [
+    { userId: BOB, tier: 'genin', rp: 500 },
+  ];
+  const userRankModel = {
+    docs: ranks,
+    find: (filter: Record<string, unknown>) =>
+      chain(ranks.filter((r) => matches(r, filter))),
+  };
+
   return {
     userModel,
     followModel,
@@ -372,6 +383,7 @@ function makeFakeModels() {
     ratingModel,
     historyModel,
     themeModel,
+    userRankModel,
   };
 }
 
@@ -427,6 +439,10 @@ describe('Social flow with mocked models (e2e)', () => {
         {
           provide: getModelToken(ThemeCache.name),
           useValue: models.themeModel,
+        },
+        {
+          provide: getModelToken(UserRank.name),
+          useValue: models.userRankModel,
         },
       ],
     }).compile();
@@ -502,7 +518,9 @@ describe('Social flow with mocked models (e2e)', () => {
     const alice = await http.get('/users/alice').expect(200);
     expect(alice.body.totalFollowing).toBe(1);
 
-    // Network list shows the follower, populated.
+    // Network list shows the follower, populated (+ the app
+    // enrichment: Alice has no rank document → the default tier;
+    // the anonymous read carries no isFollowing).
     const network = await http.get('/users/bob/network').expect(200);
     expect(network.body.followers).toEqual([
       {
@@ -511,8 +529,10 @@ describe('Social flow with mocked models (e2e)', () => {
         displayName: 'Alice A',
         avatarUrl: 'https://example.com/alice.png',
         bio: 'Alice bio',
+        tier: 'academy',
       },
     ]);
+    expect(network.body.followers[0]).not.toHaveProperty('isFollowing');
 
     // Follow state: signed-in true, anonymous false (and no 404 games).
     const state = await http
@@ -563,6 +583,37 @@ describe('Social flow with mocked models (e2e)', () => {
     await http.delete('/users/bob/follow').set(asAlice()).expect(200);
     const bobNoop = await http.get('/users/bob').expect(200);
     expect(bobNoop.body.totalFollowers).toBe(0);
+  });
+
+  it('enriches network rows with rank tiers and the caller’s follow state', async () => {
+    const http = request(app.getHttpServer());
+    // Alice → Bob and Bob → Carol, through the real follow writes.
+    await http.post('/users/bob/follow').set(asAlice()).expect(200);
+    await http.post('/users/carol/follow').set(asBob()).expect(200);
+
+    // Alice reads Carol's network: Bob's row is in HER follow
+    // state (she follows him) and carries his rank tier.
+    const asAliceRes = await http
+      .get('/users/carol/network')
+      .set(asAlice())
+      .expect(200);
+    expect(asAliceRes.body.followers).toEqual([
+      {
+        id: BOB,
+        username: 'bob',
+        displayName: 'Bob B',
+        avatarUrl: null,
+        bio: '',
+        tier: 'genin',
+        isFollowing: true,
+      },
+    ]);
+    expect(asAliceRes.body.following).toEqual([]);
+
+    // Anonymous: the tier stays, the follow state is omitted.
+    const anon = await http.get('/users/carol/network').expect(200);
+    expect(anon.body.followers[0].tier).toBe('genin');
+    expect(anon.body.followers[0]).not.toHaveProperty('isFollowing');
   });
 
   it('gates profile activity and composes the friends feed', async () => {
