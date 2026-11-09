@@ -39,7 +39,7 @@ import type {
 import { ApiRequestError } from '../../../src/api';
 import { createSoloGame, submitSoloAnswer } from '../../../src/quizApi';
 import { fetchMyRank } from '../../../src/socialApi';
-import { RankCard } from '../../../src/components/RankCard';
+import { RankResultCard } from '../../../src/components/RankCard';
 import { CountdownRing } from '../../../src/components/CountdownRing';
 import {
   QuizAudioOnly,
@@ -93,12 +93,18 @@ const RESULTS_GUESS_LABEL: Record<QuizGuessType, string> = {
  * points + streak), then the game auto-advances (a Next button
  * skips the wait). The end screen is the designed results screen
  * (§6.25): final score card with the run's Correct / Accuracy /
- * Best Streak stats, and the rank card showing the player's
- * CURRENT rank state. RP is multiplayer-only in this system — the
- * API applies it solely when a multiplayer room finishes (the
- * web's rank-utils run from room routes only; solo games record
- * attempts and award no RP) — so the card is fed by /rank/me and
- * deliberately shows NO "+N RP" award for a solo run.
+ * Best Streak stats, and the results rank card (RankResultCard)
+ * showing the player's CURRENT rank state. RP is multiplayer-only
+ * in this system — the API applies it solely when a multiplayer
+ * room finishes (the web's rank-utils run from room routes only;
+ * solo games record attempts and award no RP) — so the card is
+ * fed by /rank/me, no gainedRp is passed, and its "+N RP" award
+ * pill stays hidden on solo by design (owner ruling, reaffirmed
+ * 2026-11-09). The "saved to your history" footer is literal:
+ * the API persists one QuizAttempt per solo answer, exactly as
+ * the web's submit stores it. The results screen replaces the
+ * whole play layout — the question header is not rendered over
+ * it (the Quiz Results mock opens on the trophy disc).
  *
  * Errors are never swallowed: a failed create lands on a retry
  * screen; a failed answer keeps the live question with the error
@@ -398,19 +404,13 @@ export default function SoloQuizScreen() {
       totalQuestions > 0
         ? Math.round((correctCount / totalQuestions) * 100)
         : 0;
-    const statCell = (value: string, label: string) => (
-      <View key={label} style={styles.statCell}>
-        <Text style={styles.statValue}>{value}</Text>
-        <Text style={styles.statLabel}>{label}</Text>
-      </View>
-    );
     body = (
       <ScrollView
         contentContainerStyle={styles.overContent}
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.trophyDisc}>
-          <Trophy size={30} color={theme.accent} strokeWidth={2} />
+          <Trophy size={28} color={theme.accent} strokeWidth={2} />
         </View>
         <Text style={styles.overTitle}>Run Complete!</Text>
         <Text style={styles.overSub}>
@@ -424,18 +424,32 @@ export default function SoloQuizScreen() {
           </Text>
           <View style={styles.scoreDivider} />
           <View style={styles.statRow}>
-            {statCell(
-              `${correctCount}/${totalQuestions}`,
-              'Correct',
-            )}
-            {statCell(`${accuracy}%`, 'Accuracy')}
-            {statCell(`×${maxStreak}`, 'Best Streak')}
+            <View style={styles.statCell}>
+              <Text style={styles.statValue}>
+                {correctCount}/{totalQuestions}
+              </Text>
+              <Text style={styles.statLabel}>Correct</Text>
+            </View>
+            <View style={styles.statDivider} />
+            <View style={styles.statCell}>
+              <Text style={styles.statValue}>{accuracy}%</Text>
+              <Text style={styles.statLabel}>Accuracy</Text>
+            </View>
+            <View style={styles.statDivider} />
+            <View style={styles.statCell}>
+              <Text style={styles.statValue}>×{maxStreak}</Text>
+              <Text style={styles.statLabel}>Best Streak</Text>
+            </View>
           </View>
         </View>
 
         {rankProfile ? (
           <View style={styles.rankWrap}>
-            <RankCard profile={rankProfile} />
+            {/* No gainedRp: a solo run grants no RP (see the
+                docblock), so the results card's "+N RP" pill
+                stays hidden — it lights up only where a session
+                genuinely granted RP. */}
+            <RankResultCard profile={rankProfile} />
           </View>
         ) : rankLoading ? (
           <View style={styles.rankLoading}>
@@ -443,28 +457,30 @@ export default function SoloQuizScreen() {
           </View>
         ) : null}
 
+        <View style={styles.overSpacer} />
+
         <View style={styles.overButtons}>
           <Pressable
             onPress={() => setRunId((n) => n + 1)}
             accessibilityRole="button"
             accessibilityLabel="Play again"
             style={({ pressed }) => [
-              styles.primaryButton,
+              styles.overPrimaryButton,
               pressed && styles.pressed,
             ]}
           >
-            <Text style={styles.primaryButtonText}>Play Again</Text>
+            <Text style={styles.overPrimaryButtonText}>Play Again</Text>
           </Pressable>
           <Pressable
             onPress={goBack}
             accessibilityRole="button"
             accessibilityLabel="Back to quiz"
             style={({ pressed }) => [
-              styles.secondaryButton,
+              styles.overSecondaryButton,
               pressed && styles.pressed,
             ]}
           >
-            <Text style={styles.secondaryButtonText}>Back to Quiz</Text>
+            <Text style={styles.overSecondaryButtonText}>Back to Quiz</Text>
           </Pressable>
         </View>
 
@@ -663,7 +679,7 @@ export default function SoloQuizScreen() {
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.column}>
-        {header}
+        {phase !== 'over' && header}
         {(phase === 'question' || phase === 'feedback') && scoreBlock}
         {body}
       </View>
@@ -935,51 +951,58 @@ const createStyles = (theme: Theme) =>
       fontFamily: fontFamilies.bodyStrong, fontSize: 14,
       color: theme.text,
     },
+    /* Results layout (Quiz Results mock, measured): content
+       inset 20, trophy disc 64, the two white cards stacked with
+       a 20 gap, then a flex spacer pinning the buttons + footer
+       toward the bottom exactly as the mock draws them. */
     overContent: {
-      padding: spacing.screenEdge,
+      flexGrow: 1,
+      paddingHorizontal: spacing.xl,
+      paddingTop: spacing.lg,
       paddingBottom: spacing.xxxl,
-      gap: spacing.lg,
-      alignItems: 'center',
     },
     overScore: {
       ...typeStyles.display,
-      fontSize: 40,
+      fontSize: 42,
       color: theme.text,
+      marginTop: spacing.lg,
     },
     trophyDisc: {
-      width: 76,
-      height: 76,
+      width: 64,
+      height: 64,
       borderRadius: radii.pill,
       backgroundColor: theme.accentContainer,
       alignItems: 'center',
       justifyContent: 'center',
-      marginTop: spacing.md,
+      alignSelf: 'center',
     },
     overTitle: {
-      ...typeStyles.heading,
-      fontSize: 24,
+      ...typeStyles.display,
+      fontSize: 26,
       color: theme.text,
       textAlign: 'center',
+      marginTop: spacing.md + 2,
     },
     overSub: {
       ...typeStyles.body,
       color: theme.muted,
       textAlign: 'center',
-      marginTop: -spacing.sm,
+      marginTop: spacing.sm + 2,
     },
     scoreCard: {
       alignSelf: 'stretch',
       backgroundColor: theme.surface,
       borderRadius: radii.card,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.border,
-      padding: spacing.xl,
+      paddingTop: spacing.xxl,
+      paddingBottom: spacing.xxl,
+      paddingHorizontal: spacing.lg,
       alignItems: 'center',
-      gap: spacing.sm,
+      marginTop: spacing.xxl,
     },
     scoreLabel: {
       ...typeStyles.caption,
       fontFamily: fontFamilies.bodyStrong,
+      fontSize: 12,
       letterSpacing: 1.2,
       color: theme.muted,
     },
@@ -987,21 +1010,27 @@ const createStyles = (theme: Theme) =>
       alignSelf: 'stretch',
       height: StyleSheet.hairlineWidth,
       backgroundColor: theme.border,
-      marginVertical: spacing.sm,
+      marginTop: spacing.xl,
     },
     statRow: {
       alignSelf: 'stretch',
       flexDirection: 'row',
+      marginTop: spacing.xl,
     },
     statCell: {
       flex: 1,
       alignItems: 'center',
-      gap: 2,
+      gap: spacing.sm,
+    },
+    statDivider: {
+      width: StyleSheet.hairlineWidth,
+      backgroundColor: theme.border,
+      alignSelf: 'stretch',
     },
     statValue: {
       ...typeStyles.body,
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 15,
+      fontSize: 19,
       color: theme.text,
     },
     statLabel: {
@@ -1010,32 +1039,53 @@ const createStyles = (theme: Theme) =>
     },
     rankWrap: {
       alignSelf: 'stretch',
+      marginTop: spacing.xl,
     },
     rankLoading: {
       alignSelf: 'stretch',
       alignItems: 'center',
       paddingVertical: spacing.lg,
+      marginTop: spacing.xl,
+    },
+    overSpacer: {
+      flex: 1,
+      minHeight: spacing.xxl,
     },
     overButtons: {
       alignSelf: 'stretch',
-      gap: spacing.sm,
+      gap: spacing.md,
     },
-    secondaryButton: {
+    overPrimaryButton: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.accent,
+      borderRadius: radii.base,
+      height: 52,
+      paddingHorizontal: spacing.lg,
+    },
+    overPrimaryButtonText: {
+      ...typeStyles.sectionLabel,
+      fontSize: 16,
+      color: theme.onAccent,
+    },
+    overSecondaryButton: {
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor: theme.accentContainer,
       borderRadius: radii.base,
-      minHeight: 48,
+      height: 52,
       paddingHorizontal: spacing.lg,
     },
-    secondaryButtonText: {
+    overSecondaryButtonText: {
       ...typeStyles.sectionLabel,
+      fontSize: 16,
       color: theme.accent,
     },
     overFooter: {
       ...typeStyles.caption,
       color: theme.muted,
       textAlign: 'center',
+      marginTop: spacing.xxxl,
     },
     pressed: {
       opacity: 0.85,

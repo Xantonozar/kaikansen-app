@@ -20,7 +20,10 @@ import {
 import type { UserRankProfile } from '@kaikansen/contracts';
 import { useAuth } from '../../src/auth';
 import { Avatar } from '../../src/components/Avatar';
-import { RankCard, RankCardSkeleton } from '../../src/components/RankCard';
+import {
+  RankCardSkeleton,
+  RankProfileCard,
+} from '../../src/components/RankCard';
 import { fetchPlaylists } from '../../src/libraryApi';
 import { fetchMyRank } from '../../src/socialApi';
 import {
@@ -37,11 +40,14 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * Own Profile (the §6.15 design, layout-fidelity Slice 4) — the
  * signed-in user's hub, distinct from the public /user/:username
  * screen: identity card (avatar, name, handle, the sage "AniList
- * connected" pill, Edit → the Edit Profile screen), the shared
- * RankCard (GET /rank/me), the stats card (Ratings from the
- * session profile, Playlists counted from GET /playlists, Quizzes
- * = the rank document's lifetime games), the menu card, and
- * Log Out. The gear opens Settings.
+ * connected" pill — or its muted not-connected variant, which
+ * routes to Settings where linking lives — Edit → the Edit
+ * Profile screen), the profile-measured RankProfileCard
+ * (GET /rank/me), the stats card (Ratings from the session
+ * profile, Playlists counted from GET /playlists, Quizzes = the
+ * rank document's lifetime games), the menu card, and Log Out.
+ * The gear opens Settings. Card measurements follow the Profile
+ * mock's HTML (rounded-2xl cards, 14px section rhythm).
  *
  * Data comes from the same paths the public profile uses —
  * session profile + /rank/me + the library reads — so the numbers
@@ -108,15 +114,15 @@ export default function OwnProfileScreen() {
       ]}
     >
       <View style={styles.menuIcon}>
-        <Icon size={17} color={theme.onAccentContainer} strokeWidth={2} />
+        <Icon size={18} color={theme.onAccentContainer} strokeWidth={2} />
       </View>
       <Text style={styles.menuLabel}>{label}</Text>
-      <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
+      <ChevronRight size={16} color={theme.muted} strokeWidth={2} />
     </Pressable>
   );
 
-  const stat = (label: string, value: string) => (
-    <View style={styles.statBlock}>
+  const stat = (label: string, value: string, divided = false) => (
+    <View style={[styles.statBlock, divided && styles.statBlockDivided]}>
       <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
     </View>
@@ -134,7 +140,7 @@ export default function OwnProfileScreen() {
           style={styles.backHit}
         >
           <View style={styles.gearCircle}>
-            <SettingsIcon size={20} color={theme.text} strokeWidth={2} />
+            <SettingsIcon size={20} color={theme.muted} strokeWidth={1.75} />
           </View>
         </Pressable>
       </View>
@@ -158,20 +164,49 @@ export default function OwnProfileScreen() {
                 url={user.avatarUrl}
                 name={user.displayName || user.username}
                 seed={user.id}
-                size={64}
+                size={56}
               />
               <View style={styles.identityTexts}>
                 <Text style={styles.displayName} numberOfLines={1}>
                   {user.displayName || user.username}
                 </Text>
                 <Text style={styles.handle}>@{user.username}</Text>
-                {linkedName && (
+                {linkedName ? (
                   <View style={styles.anilistPill}>
                     <View style={styles.anilistDot} />
                     <Text style={styles.anilistPillText}>
                       AniList connected
                     </Text>
                   </View>
+                ) : (
+                  /* Honest unlinked variant (Profile fidelity
+                     pass): the mock draws the pill slot in both
+                     states, so an unlinked account gets a muted
+                     "AniList not connected" pill instead of a
+                     false claim or a hole — it routes to the
+                     Settings AniList rows, where linking lives. */
+                  <Pressable
+                    onPress={() => router.push('/settings')}
+                    accessibilityRole="button"
+                    accessibilityLabel="AniList not connected — open settings to link"
+                    style={({ pressed }) => [
+                      styles.anilistPill,
+                      styles.anilistPillMuted,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <View
+                      style={[styles.anilistDot, styles.anilistDotMuted]}
+                    />
+                    <Text
+                      style={[
+                        styles.anilistPillText,
+                        styles.anilistPillTextMuted,
+                      ]}
+                    >
+                      AniList not connected
+                    </Text>
+                  </Pressable>
                 )}
               </View>
               <Pressable
@@ -193,7 +228,7 @@ export default function OwnProfileScreen() {
                 the Quiz hub. A failed fetch still degrades to
                 no card, never a fabricated rank. */}
             {rank ? (
-              <RankCard profile={rank} />
+              <RankProfileCard profile={rank} />
             ) : rankLoading ? (
               <RankCardSkeleton />
             ) : null}
@@ -203,10 +238,12 @@ export default function OwnProfileScreen() {
               {stat(
                 'Playlists',
                 playlistCount !== null ? String(playlistCount) : '–',
+                true,
               )}
               {stat(
                 'Quizzes',
                 rank ? String(rank.stats.totalGames) : '–',
+                true,
               )}
             </View>
 
@@ -274,8 +311,9 @@ const createStyles = (theme: Theme) =>
     gearCircle: {
       // The mock's gear sits in a plain WHITE circle (design
       // polish pass) — surface fill, fully round, hairline edge.
-      width: 38,
-      height: 38,
+      // 40px disc per the Profile mock's HTML (w-10 h-10).
+      width: 40,
+      height: 40,
       borderRadius: radii.pill,
       backgroundColor: theme.surface,
       borderWidth: StyleSheet.hairlineWidth,
@@ -284,7 +322,11 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
     },
     title: {
-      ...typeStyles.heading,
+      // The mock's screen title is text-2xl bold (24) — the
+      // display face at 24, not the 18px section heading.
+      ...typeStyles.display,
+      fontSize: 24,
+      letterSpacing: -0.5,
       color: theme.text,
       flex: 1,
     },
@@ -298,12 +340,15 @@ const createStyles = (theme: Theme) =>
     identityCard: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
+      // The mock's card rhythm: gap-3.5 (14) between avatar and
+      // texts, p-4 (16) padding, rounded-2xl (16) corners, and a
+      // 14px section gap below (the column's uniform rhythm).
+      gap: 14,
       backgroundColor: theme.surface,
-      borderRadius: radii.card,
-      padding: spacing.md,
+      borderRadius: radii.md,
+      padding: spacing.lg,
       marginTop: spacing.sm,
-      marginBottom: spacing.lg,
+      marginBottom: 14,
     },
     identityTexts: {
       flex: 1,
@@ -312,22 +357,28 @@ const createStyles = (theme: Theme) =>
     },
     displayName: {
       ...typeStyles.display,
-      fontSize: 20,
+      // text-lg (18) bold in the mock.
+      fontSize: 18,
       color: theme.text,
     },
     handle: {
       ...typeStyles.bodySmall,
+      // text-xs (12) at medium weight in the mock.
+      fontFamily: fontFamilies.caption,
       color: theme.muted,
     },
     anilistPill: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 5,
+      gap: 6,
       backgroundColor: theme.successContainer,
       borderRadius: radii.pill,
-      paddingHorizontal: spacing.sm + 2,
-      paddingVertical: 3,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 2,
       marginTop: spacing.xs,
+    },
+    anilistPillMuted: {
+      backgroundColor: theme.accentContainer,
     },
     anilistDot: {
       width: 6,
@@ -335,16 +386,24 @@ const createStyles = (theme: Theme) =>
       borderRadius: radii.pill,
       backgroundColor: theme.success,
     },
+    anilistDotMuted: {
+      backgroundColor: theme.muted,
+    },
     anilistPillText: {
       ...typeStyles.caption,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.success,
     },
+    anilistPillTextMuted: {
+      color: theme.muted,
+    },
     editButton: {
       backgroundColor: theme.accentContainer,
       borderRadius: radii.pill,
       paddingHorizontal: spacing.md + 2,
-      minHeight: 36,
+      // The mock's Edit pill is px-3.5 py-1.5 (14/6) around
+      // 12px text — no fixed height.
+      paddingVertical: 6,
       alignItems: 'center',
       justifyContent: 'center',
       flexShrink: 0,
@@ -357,19 +416,29 @@ const createStyles = (theme: Theme) =>
     statsCard: {
       flexDirection: 'row',
       backgroundColor: theme.surface,
-      borderRadius: radii.card,
+      // rounded-2xl (16), py-3 px-2 (12/8) in the mock; the
+      // section rhythm around it is the column's uniform 14.
+      borderRadius: radii.md,
       paddingVertical: spacing.md,
-      marginTop: spacing.lg,
-      marginBottom: spacing.lg,
+      paddingHorizontal: spacing.sm,
+      marginTop: 14,
+      marginBottom: 14,
     },
     statBlock: {
       flex: 1,
       alignItems: 'center',
-      gap: 1,
+      gap: 2,
+    },
+    statBlockDivided: {
+      // The mock's vertical hairlines between stat columns
+      // (divide-x) — absent before this pass.
+      borderLeftWidth: StyleSheet.hairlineWidth,
+      borderLeftColor: theme.border,
     },
     statValue: {
-      ...typeStyles.body,
-      fontFamily: fontFamilies.bodyStrong,
+      // text-xl (20) bold in the mock — the display face.
+      ...typeStyles.display,
+      fontSize: 20,
       color: theme.text,
     },
     statLabel: {
@@ -378,14 +447,18 @@ const createStyles = (theme: Theme) =>
     },
     menuCard: {
       backgroundColor: theme.surface,
-      borderRadius: radii.card,
-      paddingHorizontal: spacing.md,
+      borderRadius: radii.md,
+      // No horizontal padding on the card: the mock's rows
+      // carry p-3.5 (14) themselves and its hairlines run
+      // full-bleed (divide-y).
+      overflow: 'hidden',
     },
     menuRow: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
-      minHeight: 52,
+      paddingHorizontal: 14,
+      paddingVertical: 14,
     },
     menuRowDivider: {
       borderBottomWidth: StyleSheet.hairlineWidth,
@@ -401,22 +474,26 @@ const createStyles = (theme: Theme) =>
       flexShrink: 0,
     },
     menuLabel: {
+      // text-sm (14) semibold in the mock.
       ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
       color: theme.text,
       flex: 1,
     },
     logout: {
       alignItems: 'center',
       justifyContent: 'center',
-      minHeight: 48,
-      marginTop: spacing.xl,
+      minHeight: 36,
+      marginTop: 14,
     },
     logoutLabel: {
       // Muted mauve in the mock (design polish pass) — the
       // strong danger red was the audit's delta here. (The
       // Settings screen's Log Out row keeps its dusty-red card
-      // treatment, as its own mock draws.)
+      // treatment, as its own mock draws.) text-xs (12)
+      // semibold per the mock's HTML.
       ...typeStyles.body,
+      fontSize: 12,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.secondary,
     },

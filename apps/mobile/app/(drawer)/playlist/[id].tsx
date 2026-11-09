@@ -8,6 +8,7 @@ import {
 import {
   ActivityIndicator,
   Image,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -24,6 +25,7 @@ import {
   Globe,
   ListMusic,
   Lock,
+  MoreVertical,
   Pencil,
   Play,
   Shuffle,
@@ -68,23 +70,30 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
  *
  * Mutations take the API's returned detail as the new truth (the
  * service resolves items server-side), except rename/visibility,
- * which patch the same way. Delete is a two-tap in-place confirm —
- * no modal, works identically on native and web.
+ * which patch the same way. Delete keeps its two-tap confirm, now
+ * on its row in the header's ⋮ sheet.
  *
- * Header (Lavender Dusk final `95ebcfa4a4b940d5a625f5582431652b`):
- * a white card — 2×2 cover grid from the first items' covers (a
- * lone cover fills the square; empty cells are tinted tiles) beside
- * the name, the owner line and the count + Public/Private pill,
- * then a divided action row: Play All (the playlist claimed as a
- * queue, in order), Shuffle (same queue, shuffled), Download (every
- * item's audio through the downloads store, sequentially — items
- * already downloaded no-op). The header's remaining design details
- * are data-backed: the count line's runtime ("12 themes · 18 min")
- * sums the items' summary durations (ThemeSummary.duration — the
- * document's own field; the segment is omitted when no item's
- * duration is known, never invented), rows carry their duration,
- * and the "by <owner>" line renders for every playlist from the
- * detail payload's resolved owner identity.
+ * Header (Playlist mock rebuild — the Stitch screen's HTML is the
+ * measurement truth): a glass-disc top bar (40px white circles —
+ * back left, "Playlist" centred, and for the owner a ⋮ disc right
+ * opening a bottom-sheet menu with the screen's owner actions:
+ * Rename, the visibility toggle and Delete with its two-tap
+ * confirm; a non-owner has no playlist-level actions, so the disc
+ * is not drawn rather than drawn dead). Below it a white card —
+ * 2×2 cover grid from the first items' covers (a lone cover fills
+ * the square; empty cells are tinted tiles) beside the name, the
+ * owner line and the count + Public/Private pill (display-only;
+ * the toggle lives in the ⋮ menu), then a divided action row:
+ * Play All (the playlist claimed as a queue, in order), Shuffle
+ * (same queue, shuffled), Download (every item's audio through
+ * the downloads store, sequentially — items already downloaded
+ * no-op). The header's remaining design details are data-backed:
+ * the count line's runtime ("12 themes · 18 min") sums the items'
+ * summary durations (ThemeSummary.duration — the document's own
+ * field; the segment is omitted when no item's duration is known,
+ * never invented), rows carry their duration, and the
+ * "by <owner>" line renders for every playlist from the detail
+ * payload's resolved owner identity.
  */
 export default function PlaylistDetailScreen() {
   const theme = useTheme();
@@ -107,6 +116,7 @@ export default function PlaylistDetailScreen() {
 
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -346,8 +356,24 @@ export default function PlaylistDetailScreen() {
       accessibilityLabel="Back"
       style={styles.backHit}
     >
-      <View style={styles.tile}>
-        <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
+      <View style={styles.glassDisc}>
+        <ChevronLeft size={20} color={theme.text} strokeWidth={2.2} />
+      </View>
+    </Pressable>
+  );
+
+  /* The header's ⋮ disc (owner only — see the header note): opens
+     the sheet holding Rename / visibility / Delete. */
+  const menuTile = (
+    <Pressable
+      onPress={() => setMenuOpen(true)}
+      hitSlop={3}
+      accessibilityRole="button"
+      accessibilityLabel="Playlist options"
+      style={styles.backHit}
+    >
+      <View style={styles.glassDisc}>
+        <MoreVertical size={20} color={theme.text} strokeWidth={2} />
       </View>
     </Pressable>
   );
@@ -385,6 +411,7 @@ export default function PlaylistDetailScreen() {
   }
 
   return (
+    <>
     <ScrollView style={styles.screen} showsVerticalScrollIndicator={false}>
       <View style={styles.column}>
         <View
@@ -392,7 +419,7 @@ export default function PlaylistDetailScreen() {
         >
           {backTile}
           <Text style={styles.topTitle}>Playlist</Text>
-          <View style={styles.backHit} />
+          {owner ? menuTile : <View style={styles.backHit} />}
         </View>
 
         <View style={styles.body}>
@@ -476,25 +503,9 @@ export default function PlaylistDetailScreen() {
                 ) : (
                   <>
                     <View style={styles.nameRow}>
-                      <Text style={styles.name}>{playlist.name}</Text>
-                      {owner && (
-                        <Pressable
-                          onPress={() => {
-                            setNameDraft(playlist.name);
-                            setEditingName(true);
-                            setActionError(null);
-                          }}
-                          hitSlop={6}
-                          accessibilityRole="button"
-                          accessibilityLabel="Rename playlist"
-                          style={({ pressed }) => [
-                            styles.iconButton,
-                            pressed && styles.pressed,
-                          ]}
-                        >
-                          <Pencil size={16} color={theme.muted} strokeWidth={2} />
-                        </Pressable>
-                      )}
+                      <Text style={styles.name} numberOfLines={2}>
+                        {playlist.name}
+                      </Text>
                     </View>
                     {ownerLine ? (
                       <Text style={styles.byLine}>by {ownerLine}</Text>
@@ -505,54 +516,28 @@ export default function PlaylistDetailScreen() {
                         {playlist.themeCount === 1 ? 'theme' : 'themes'}
                         {runtimeMin !== null ? ` · ${runtimeMin} min` : ''}
                       </Text>
-                      {owner ? (
-                        <Pressable
-                          onPress={toggleVisibility}
-                          disabled={busy}
-                          accessibilityRole="button"
-                          accessibilityLabel={
-                            playlist.isPublic
-                              ? 'Make playlist private'
-                              : 'Make playlist public'
-                          }
-                          accessibilityState={{ selected: playlist.isPublic }}
-                          style={({ pressed }) => [
-                            styles.chip,
-                            playlist.isPublic && styles.chipPublic,
-                            pressed && styles.pressed,
+                      {/* Display-only pill (the mock's); the owner
+                          toggles visibility from the ⋮ menu. */}
+                      <View
+                        style={[
+                          styles.chip,
+                          playlist.isPublic && styles.chipPublic,
+                        ]}
+                      >
+                        {playlist.isPublic ? (
+                          <Globe size={10} color={theme.success} strokeWidth={2.5} />
+                        ) : (
+                          <Lock size={10} color={theme.onAccentContainer} strokeWidth={2.5} />
+                        )}
+                        <Text
+                          style={[
+                            styles.chipText,
+                            playlist.isPublic && styles.chipTextPublic,
                           ]}
                         >
-                          {playlist.isPublic ? (
-                            <Globe size={12} color={theme.onAccentContainer} strokeWidth={2} />
-                          ) : (
-                            <Lock size={12} color={theme.muted} strokeWidth={2} />
-                          )}
-                          <Text
-                            style={[
-                              styles.chipText,
-                              playlist.isPublic && styles.chipTextPublic,
-                            ]}
-                          >
-                            {playlist.isPublic ? 'Public' : 'Private'}
-                          </Text>
-                        </Pressable>
-                      ) : (
-                        <View style={[styles.chip, playlist.isPublic && styles.chipPublic]}>
-                          {playlist.isPublic ? (
-                            <Globe size={12} color={theme.onAccentContainer} strokeWidth={2} />
-                          ) : (
-                            <Lock size={12} color={theme.muted} strokeWidth={2} />
-                          )}
-                          <Text
-                            style={[
-                              styles.chipText,
-                              playlist.isPublic && styles.chipTextPublic,
-                            ]}
-                          >
-                            {playlist.isPublic ? 'Public' : 'Private'}
-                          </Text>
-                        </View>
-                      )}
+                          {playlist.isPublic ? 'Public' : 'Private'}
+                        </Text>
+                      </View>
                     </View>
                   </>
                 )}
@@ -590,7 +575,7 @@ export default function PlaylistDetailScreen() {
                   pressed && styles.pressed,
                 ]}
               >
-                <Shuffle size={18} color={theme.text} strokeWidth={2} />
+                <Shuffle size={20} color={theme.onAccentContainer} strokeWidth={2} />
               </Pressable>
               <Pressable
                 onPress={() => void downloadAll()}
@@ -604,9 +589,9 @@ export default function PlaylistDetailScreen() {
                 ]}
               >
                 {dlBusy ? (
-                  <ActivityIndicator size="small" color={theme.text} />
+                  <ActivityIndicator size="small" color={theme.onAccentContainer} />
                 ) : (
-                  <Download size={18} color={theme.text} strokeWidth={2} />
+                  <Download size={20} color={theme.onAccentContainer} strokeWidth={2} />
                 )}
               </Pressable>
             </View>
@@ -615,38 +600,6 @@ export default function PlaylistDetailScreen() {
           {playlist.description ? (
             <Text style={styles.description}>{playlist.description}</Text>
           ) : null}
-
-          {owner && (
-            <View style={styles.ownerTools}>
-              <Pressable
-                onPress={onDelete}
-                disabled={busy}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  confirmDelete ? 'Confirm delete playlist' : 'Delete playlist'
-                }
-                style={({ pressed }) => [
-                  styles.chip,
-                  confirmDelete && styles.chipDanger,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Trash2
-                  size={12}
-                  color={confirmDelete ? theme.onAccent : theme.muted}
-                  strokeWidth={2}
-                />
-                <Text
-                  style={[
-                    styles.chipText,
-                    confirmDelete && { color: theme.onAccent },
-                  ]}
-                >
-                  {confirmDelete ? 'Tap again to delete' : 'Delete'}
-                </Text>
-              </Pressable>
-            </View>
-          )}
 
           {actionError && <Text style={styles.error}>{actionError}</Text>}
           {favorites.lastError && (
@@ -658,6 +611,7 @@ export default function PlaylistDetailScreen() {
               <ThemeRow
                 key={item.slug}
                 item={item}
+                playlist
                 durationText={
                   item.duration != null ? formatTime(item.duration) : undefined
                 }
@@ -692,6 +646,138 @@ export default function PlaylistDetailScreen() {
         </View>
       </View>
     </ScrollView>
+
+    {/* Owner ⋮ sheet — the header disc's menu (same bottom-sheet
+        pattern as ThemeRowMenu): Rename, the visibility toggle
+        and Delete with its existing two-tap confirm, all wired to
+        the mutations above. */}
+    <Modal
+      visible={menuOpen}
+      transparent
+      animationType="slide"
+      onRequestClose={() => setMenuOpen(false)}
+    >
+      <View style={styles.menuBackdrop}>
+        <Pressable
+          style={styles.menuDismiss}
+          onPress={() => setMenuOpen(false)}
+          accessibilityRole="button"
+          accessibilityLabel="Close"
+        />
+        <View style={styles.menuSheet}>
+          <View style={styles.menuHeader}>
+            <View style={styles.menuHeaderMain}>
+              <Text style={styles.menuTitle} numberOfLines={1}>
+                {playlist.name}
+              </Text>
+              <Text style={styles.menuSubtitle}>
+                {playlist.isPublic ? 'Public playlist' : 'Private playlist'}
+                {' · '}
+                {playlist.themeCount}{' '}
+                {playlist.themeCount === 1 ? 'theme' : 'themes'}
+              </Text>
+            </View>
+            <Pressable
+              onPress={() => setMenuOpen(false)}
+              accessibilityRole="button"
+              accessibilityLabel="Close menu"
+              style={({ pressed }) => [
+                styles.menuClose,
+                pressed && styles.pressed,
+              ]}
+            >
+              <X size={18} color={theme.text} strokeWidth={2} />
+            </Pressable>
+          </View>
+
+          <Pressable
+            onPress={() => {
+              setMenuOpen(false);
+              setNameDraft(playlist.name);
+              setEditingName(true);
+              setActionError(null);
+            }}
+            disabled={busy}
+            accessibilityRole="button"
+            accessibilityLabel="Rename playlist"
+            style={({ pressed }) => [
+              styles.menuRow,
+              pressed && styles.pressed,
+            ]}
+          >
+            <View style={styles.menuIcon}>
+              <Pencil size={18} color={theme.accent} strokeWidth={2} />
+            </View>
+            <Text style={styles.menuLabel}>Rename</Text>
+          </Pressable>
+
+          <Pressable
+            onPress={() => {
+              setMenuOpen(false);
+              toggleVisibility();
+            }}
+            disabled={busy}
+            accessibilityRole="button"
+            accessibilityLabel={
+              playlist.isPublic ? 'Make playlist private' : 'Make playlist public'
+            }
+            style={({ pressed }) => [
+              styles.menuRow,
+              pressed && styles.pressed,
+            ]}
+          >
+            <View style={styles.menuIcon}>
+              {playlist.isPublic ? (
+                <Lock size={18} color={theme.accent} strokeWidth={2} />
+              ) : (
+                <Globe size={18} color={theme.accent} strokeWidth={2} />
+              )}
+            </View>
+            <Text style={styles.menuLabel}>
+              {playlist.isPublic ? 'Make private' : 'Make public'}
+            </Text>
+          </Pressable>
+
+          <Pressable
+            onPress={() => {
+              if (confirmDelete) setMenuOpen(false);
+              onDelete();
+            }}
+            disabled={busy}
+            accessibilityRole="button"
+            accessibilityLabel={
+              confirmDelete ? 'Confirm delete playlist' : 'Delete playlist'
+            }
+            style={({ pressed }) => [
+              styles.menuRow,
+              pressed && styles.pressed,
+            ]}
+          >
+            <View
+              style={[
+                styles.menuIcon,
+                confirmDelete && styles.menuIconDanger,
+              ]}
+            >
+              <Trash2
+                size={18}
+                color={confirmDelete ? theme.onAccent : theme.danger}
+                strokeWidth={2}
+              />
+            </View>
+            <Text
+              style={[
+                styles.menuLabel,
+                { color: confirmDelete ? theme.danger : theme.text },
+              ]}
+            >
+              {confirmDelete ? 'Tap again to delete' : 'Delete playlist'}
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+    </>
   );
 }
 
@@ -708,14 +794,15 @@ const createStyles = (theme: Theme) =>
   },
   topRow: {
     paddingHorizontal: spacing.screenEdge,
-    paddingBottom: spacing.sm,
+    // The mock's bar sits 14px above the header card (mb-3.5).
+    paddingBottom: 14,
     flexDirection: 'row',
     alignItems: 'center',
   },
   topTitle: {
     flex: 1,
-    ...typeStyles.body,
-    fontFamily: fontFamilies.bodyStrong,
+    // The mock's centred title: 15px semibold, tracking wide.
+    ...typeStyles.sectionLabel,
     color: theme.muted,
     textAlign: 'center',
     letterSpacing: 0.4,
@@ -726,11 +813,16 @@ const createStyles = (theme: Theme) =>
     alignItems: 'center',
     justifyContent: 'center',
   },
-  tile: {
-    width: 38,
-    height: 38,
-    borderRadius: radii.base,
-    backgroundColor: theme.raised,
+  glassDisc: {
+    // The mock's header discs: plain WHITE 40px circles (w-10
+    // h-10), fully round, hairline edge — the Profile slice's
+    // gear-disc treatment.
+    width: 40,
+    height: 40,
+    borderRadius: radii.pill,
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -754,19 +846,23 @@ const createStyles = (theme: Theme) =>
     backgroundColor: theme.surface,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
-    borderRadius: radii.card,
-    padding: spacing.md,
+    // The mock's card: rounded-2xl (16) corners, p-3.5 (14).
+    borderRadius: radii.md,
+    padding: 14,
     marginBottom: spacing.md,
   },
   headerTop: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
+    alignItems: 'flex-start',
+    // The mock's collage-to-text gap: gap-3.5 (14).
+    gap: 14,
   },
   grid: {
-    width: 100,
-    height: 100,
-    borderRadius: radii.md,
+    // The mock's collage: 96px square (w-24), rounded-xl (12),
+    // 2px padding and 2px gutters, cells rounded 3px.
+    width: 96,
+    height: 96,
+    borderRadius: radii.base,
     backgroundColor: theme.raised,
     padding: 2,
     flexDirection: 'row',
@@ -775,8 +871,9 @@ const createStyles = (theme: Theme) =>
     overflow: 'hidden',
   },
   gridCell: {
-    width: 47,
-    height: 47,
+    width: 45,
+    height: 45,
+    borderRadius: 3,
     backgroundColor: theme.surface,
   },
   gridCellEmpty: {
@@ -785,9 +882,9 @@ const createStyles = (theme: Theme) =>
     justifyContent: 'center',
   },
   gridSingle: {
-    width: 100,
-    height: 100,
-    borderRadius: radii.md,
+    width: 96,
+    height: 96,
+    borderRadius: radii.base,
     backgroundColor: theme.surface,
   },
   headerInfo: {
@@ -796,6 +893,9 @@ const createStyles = (theme: Theme) =>
   },
   byLine: {
     ...typeStyles.bodySmall,
+    // The mock's by-line: 13px at medium weight.
+    fontSize: 13,
+    fontFamily: fontFamilies.caption,
     color: theme.muted,
     marginTop: 2,
   },
@@ -809,9 +909,11 @@ const createStyles = (theme: Theme) =>
   actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    // The mock's action row: gap-2.5 (10), mt-3 (12), pt-2.5 (10)
+    // above its hairline.
+    gap: 10,
     marginTop: spacing.md,
-    paddingTop: spacing.md,
+    paddingTop: 10,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: theme.border,
   },
@@ -826,7 +928,9 @@ const createStyles = (theme: Theme) =>
     backgroundColor: theme.accent,
   },
   playAllText: {
-    ...typeStyles.sectionLabel,
+    // The mock's label: 14px bold on the deep-mauve pill.
+    ...typeStyles.body,
+    fontFamily: fontFamilies.bodyStrong,
     color: theme.onAccent,
   },
   roundButton: {
@@ -834,17 +938,13 @@ const createStyles = (theme: Theme) =>
     height: 44,
     borderRadius: radii.pill,
     backgroundColor: theme.accentContainer,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
     alignItems: 'center',
     justifyContent: 'center',
   },
   actionDisabled: {
     opacity: 0.45,
-  },
-  ownerTools: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    flexWrap: 'wrap',
   },
   nameRow: {
     flexDirection: 'row',
@@ -853,7 +953,8 @@ const createStyles = (theme: Theme) =>
   },
   name: {
     ...typeStyles.display,
-    fontSize: 22,
+    // The mock's playlist name: 19px bold, tight leading.
+    fontSize: 19,
     color: theme.text,
     flexShrink: 1,
   },
@@ -901,26 +1002,23 @@ const createStyles = (theme: Theme) =>
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: theme.surface,
+    // The mock's visibility pill: lavender fill, hairline edge,
+    // 11px medium text (px-2 py-0.5 in the HTML).
+    backgroundColor: theme.accentContainer,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
     borderRadius: radii.pill,
-    paddingHorizontal: spacing.sm + 2,
-    paddingVertical: 5,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
   },
   chipPublic: {
     // Design: Public playlists wear the sage pill; Private stays lavender.
     backgroundColor: theme.successContainer,
     borderColor: 'transparent',
   },
-  chipDanger: {
-    backgroundColor: theme.danger,
-    borderColor: 'transparent',
-  },
   chipText: {
     ...typeStyles.caption,
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.muted,
+    color: theme.onAccentContainer,
   },
   chipTextPublic: {
     color: theme.success,
@@ -939,6 +1037,73 @@ const createStyles = (theme: Theme) =>
     color: theme.muted,
     lineHeight: 20,
     paddingTop: spacing.sm,
+  },
+  /* Owner ⋮ sheet — ThemeRowMenu's bottom-sheet pattern. */
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: withOpacity(theme.background, 0.72),
+    justifyContent: 'flex-end',
+  },
+  menuDismiss: {
+    flex: 1,
+  },
+  menuSheet: {
+    backgroundColor: theme.surface,
+    borderTopLeftRadius: radii.cardLg,
+    borderTopRightRadius: radii.cardLg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    paddingHorizontal: spacing.screenEdge,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xl,
+  },
+  menuHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  menuHeaderMain: {
+    flex: 1,
+    gap: 2,
+  },
+  menuTitle: {
+    ...typeStyles.heading,
+    color: theme.text,
+  },
+  menuSubtitle: {
+    ...typeStyles.caption,
+    color: theme.muted,
+  },
+  menuClose: {
+    width: 36,
+    height: 36,
+    borderRadius: radii.base,
+    backgroundColor: theme.raised,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  menuRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: spacing.sm + 2,
+  },
+  menuIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: radii.base,
+    backgroundColor: theme.raised,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  menuIconDanger: {
+    backgroundColor: theme.danger,
+  },
+  menuLabel: {
+    ...typeStyles.body,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
   },
   pressed: {
     opacity: 0.85,

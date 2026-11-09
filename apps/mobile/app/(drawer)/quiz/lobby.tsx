@@ -23,7 +23,7 @@ import {
   useLocalSearchParams,
   useRouter,
 } from 'expo-router';
-import { ChevronLeft, Plus } from 'lucide-react-native';
+import { ChevronLeft } from 'lucide-react-native';
 import type {
   PublicRoomListItem,
   RoomGuessType,
@@ -61,17 +61,27 @@ const PUBLIC_REFRESH_MS = 20_000;
  * designed screen replacing the old Create/Join/Public tabs:
  *
  * - Create card → the Create Room screen (§6.23) — creation no
- *   longer lives in the lobby;
+ *   longer lives in the lobby; the card is the mock's row: title +
+ *   description left, compact Create Room pill right;
  * - Join with a code — the design's six single-character boxes over
  *   one hidden input (so typing auto-advances, paste fills all six,
- *   and backspace steps back naturally); incomplete codes keep Join
- *   disabled with the hint showing, a rejected code marks the boxes
- *   in the error colour with the server's message verbatim;
+ *   and backspace steps back naturally), with the Join pill beside
+ *   the boxes as the mock draws it; incomplete codes keep Join
+ *   disabled, a rejected code marks the boxes in the error colour
+ *   with the server's message verbatim under the row;
  * - Public rooms — the discovery list served by the gateway's
  *   `room:list-public` event (this API's addition; the web has no
  *   room list). Rows join through the same `room:join` flow as a
  *   typed code; full rooms render disabled, as designed. The list
  *   refreshes on focus, on a 20s interval, and on pull-to-refresh.
+ *
+ * Lobby fidelity pass (2026-11-10, measured from the Stitch HTML):
+ * the header is the mock's bare arrow + 22pt title with the
+ * subtitle on its own line — the connection status dot the earlier
+ * build added is NOT in the mock and is removed; connection state
+ * still surfaces through disabled actions and the error line. The
+ * persistent "codes are 6 characters" hint is likewise not in the
+ * mock and is gone; only real errors render under the code row.
  *
  * Quick match (the old `room:public` join-or-create card) was
  * removed by owner decision 2026-11-09 — strict design only. The
@@ -242,30 +252,22 @@ export default function QuizLobbyScreen() {
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.header}>
-        <Pressable
-          onPress={goBack}
-          hitSlop={3}
-          accessibilityRole="button"
-          accessibilityLabel="Back to quiz home"
-          style={styles.backHit}
-        >
-          {/* Bare arrow (design polish pass) — no tile, as the
-              mock draws it. */}
-          <ChevronLeft size={22} color={theme.text} strokeWidth={2} />
-        </Pressable>
-        <View style={styles.headerMain}>
+        <View style={styles.headerRow}>
+          <Pressable
+            onPress={goBack}
+            hitSlop={3}
+            accessibilityRole="button"
+            accessibilityLabel="Back to quiz home"
+            style={styles.backHit}
+          >
+            {/* Bare arrow — no tile/disc, as the mock draws it. */}
+            <ChevronLeft size={24} color={theme.text} strokeWidth={2} />
+          </Pressable>
           <Text style={styles.headerTitle}>Multiplayer</Text>
-          <Text style={styles.headerSub}>
-            Play quizzes live with friends or anyone.
-          </Text>
         </View>
-        <View
-          style={[
-            styles.statusDot,
-            connected && styles.statusDotOn,
-            connStatus === 'error' && styles.statusDotError,
-          ]}
-        />
+        <Text style={styles.headerSub}>
+          Play quizzes live with friends or anyone.
+        </Text>
       </View>
 
       <ScrollView
@@ -293,12 +295,15 @@ export default function QuizLobbyScreen() {
               )}
               {error && <Text style={styles.errorText}>{error}</Text>}
 
-              {/* Create card (§6.22) */}
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Create a room</Text>
-                <Text style={styles.cardBody}>
-                  Host a Party of 3 to 8 players, or a 1v1 Duel.
-                </Text>
+              {/* Create card (§6.22) — the mock's row: text left,
+                  compact pill right. */}
+              <View style={[styles.card, styles.createCard]}>
+                <View style={styles.createMain}>
+                  <Text style={styles.cardTitle}>Create a room</Text>
+                  <Text style={styles.cardBody}>
+                    Host a Party of 3 to 8 players, or a 1v1 Duel
+                  </Text>
+                </View>
                 <Pressable
                   onPress={() => router.push('/quiz/create')}
                   disabled={!connected}
@@ -306,90 +311,88 @@ export default function QuizLobbyScreen() {
                   accessibilityLabel="Create a room"
                   accessibilityState={{ disabled: !connected }}
                   style={({ pressed }) => [
-                    styles.primaryButton,
+                    styles.createButton,
                     !connected && styles.buttonDisabled,
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Plus size={17} color={theme.onAccent} strokeWidth={2} />
-                  <Text style={styles.primaryButtonText}>Create Room</Text>
+                  <Text style={styles.createButtonText}>Create Room</Text>
                 </Pressable>
               </View>
 
-              {/* Join with a code (§6.22) */}
+              {/* Join with a code (§6.22) — boxes and the Join
+                  pill share one row, as the mock draws it. */}
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>Join with a code</Text>
-                <Pressable
-                  onPress={() => codeInputRef.current?.focus()}
-                  accessibilityRole="button"
-                  accessibilityLabel="Room code, 6 characters"
-                  style={styles.boxesPressable}
-                >
-                  <View style={styles.boxesRow} pointerEvents="none">
-                    {[0, 1, 2, 3, 4, 5].map((i) => (
-                      <View
-                        key={i}
-                        style={[
-                          styles.box,
-                          i === code.length &&
-                            !codeError &&
-                            styles.boxActive,
-                          codeError && styles.boxError,
-                          code[i] && styles.boxFilled,
-                        ]}
-                      >
-                        <Text style={styles.boxChar}>{code[i] ?? ''}</Text>
-                      </View>
-                    ))}
-                  </View>
-                  <TextInput
-                    ref={codeInputRef}
-                    value={code}
-                    onChangeText={onCodeChange}
-                    onSubmitEditing={() => {
-                      if (code.length === 6) void joinByCode(code, 'code');
+                <View style={styles.joinRow}>
+                  <Pressable
+                    onPress={() => codeInputRef.current?.focus()}
+                    accessibilityRole="button"
+                    accessibilityLabel="Room code, 6 characters"
+                    style={styles.boxesPressable}
+                  >
+                    <View style={styles.boxesRow} pointerEvents="none">
+                      {[0, 1, 2, 3, 4, 5].map((i) => (
+                        <View
+                          key={i}
+                          style={[
+                            styles.box,
+                            i === code.length &&
+                              !codeError &&
+                              styles.boxActive,
+                            codeError && styles.boxError,
+                            code[i] && styles.boxFilled,
+                          ]}
+                        >
+                          <Text style={styles.boxChar}>{code[i] ?? ''}</Text>
+                        </View>
+                      ))}
+                    </View>
+                    <TextInput
+                      ref={codeInputRef}
+                      value={code}
+                      onChangeText={onCodeChange}
+                      onSubmitEditing={() => {
+                        if (code.length === 6) void joinByCode(code, 'code');
+                      }}
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      caretHidden
+                      maxLength={6}
+                      style={styles.hiddenInput}
+                      accessibilityLabel="Room code"
+                    />
+                  </Pressable>
+                  <Pressable
+                    onPress={() => void joinByCode(code, 'code')}
+                    disabled={
+                      !connected || joining !== null || code.length !== 6
+                    }
+                    accessibilityRole="button"
+                    accessibilityLabel="Join room"
+                    accessibilityState={{
+                      disabled:
+                        !connected || joining !== null || code.length !== 6,
+                      busy: joining === 'code',
                     }}
-                    autoCapitalize="characters"
-                    autoCorrect={false}
-                    caretHidden
-                    maxLength={6}
-                    style={styles.hiddenInput}
-                    accessibilityLabel="Room code"
-                  />
-                </Pressable>
+                    style={({ pressed }) => [
+                      styles.joinButton,
+                      (!connected || joining !== null || code.length !== 6) &&
+                        styles.buttonDisabled,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    {joining === 'code' ? (
+                      <ActivityIndicator color={theme.accent} size="small" />
+                    ) : null}
+                    <Text style={styles.joinButtonText}>
+                      {joining === 'code' ? 'Joining…' : 'Join'}
+                    </Text>
+                  </Pressable>
+                </View>
                 {codeError ? (
                   <Text style={styles.errorText}>{codeError}</Text>
-                ) : (
-                  <Text style={styles.hint}>
-                    {code.length < 6
-                      ? `Codes are 6 characters — ${6 - code.length} to go. Ask the host for theirs.`
-                      : 'Ready — tap Join.'}
-                  </Text>
-                )}
-                <Pressable
-                  onPress={() => void joinByCode(code, 'code')}
-                  disabled={!connected || joining !== null || code.length !== 6}
-                  accessibilityRole="button"
-                  accessibilityLabel="Join room"
-                  accessibilityState={{
-                    disabled:
-                      !connected || joining !== null || code.length !== 6,
-                    busy: joining === 'code',
-                  }}
-                  style={({ pressed }) => [
-                    styles.joinButton,
-                    (!connected || joining !== null || code.length !== 6) &&
-                      styles.buttonDisabled,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  {joining === 'code' ? (
-                    <ActivityIndicator color={theme.accent} size="small" />
-                  ) : null}
-                  <Text style={styles.joinButtonText}>
-                    {joining === 'code' ? 'Joining…' : 'Join'}
-                  </Text>
-                </Pressable>
+                ) : null}
               </View>
 
               {/* Public rooms (§6.22) */}
@@ -417,65 +420,78 @@ export default function QuizLobbyScreen() {
                   No open rooms right now — create one above.
                 </Text>
               ) : (
-                rooms?.map((room) => (
-                  <View key={room.roomId} style={styles.roomRow}>
-                    <Avatar
-                      url={room.hostAvatar}
-                      name={room.hostUsername}
-                      seed={room.hostUsername}
-                      size={44}
-                    />
-                    <View style={styles.roomMain}>
-                      <Text style={styles.roomHost} numberOfLines={1}>
-                        {room.hostUsername}
-                      </Text>
-                      <Text style={styles.roomMeta} numberOfLines={1}>
-                        {room.roomType === 'party' ? 'Party' : 'Duel'} ·{' '}
-                        {GUESS_LABEL[room.guessType]} · {room.roundCount}{' '}
-                        rounds
-                      </Text>
-                    </View>
-                    <Text style={styles.roomCount}>
-                      {room.playerCount}/{room.maxPlayers}
-                    </Text>
-                    {room.isFull ? (
-                      <View
-                        style={[styles.joinPill, styles.joinPillDisabled]}
-                      >
-                        <Text style={styles.joinPillTextDisabled}>Full</Text>
+                <View style={styles.roomsWrap}>
+                  {rooms?.map((room) => (
+                    <View key={room.roomId} style={styles.roomRow}>
+                      <Avatar
+                        url={room.hostAvatar}
+                        name={room.hostUsername}
+                        seed={room.hostUsername}
+                        size={40}
+                      />
+                      <View style={styles.roomMain}>
+                        <Text style={styles.roomHost} numberOfLines={1}>
+                          {room.hostUsername}
+                        </Text>
+                        <Text style={styles.roomMeta} numberOfLines={1}>
+                          {room.roomType === 'party' ? 'Party' : 'Duel'} ·{' '}
+                          {GUESS_LABEL[room.guessType]} · {room.roundCount}{' '}
+                          rounds
+                        </Text>
                       </View>
-                    ) : (
-                      <Pressable
-                        onPress={() => void joinByCode(room.roomCode, 'list')}
-                        disabled={!connected || joining !== null}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Join ${room.hostUsername}'s room`}
-                        accessibilityState={{
-                          disabled: !connected || joining !== null,
-                          busy:
-                            joining === 'list' &&
-                            joiningCode === room.roomCode,
-                        }}
-                        style={({ pressed }) => [
-                          styles.joinPill,
-                          (!connected || joining !== null) &&
-                            styles.buttonDisabled,
-                          pressed && styles.pressed,
-                        ]}
-                      >
-                        {joining === 'list' &&
-                        joiningCode === room.roomCode ? (
-                          <ActivityIndicator
-                            color={theme.onAccent}
-                            size="small"
-                          />
+                      <View style={styles.roomSide}>
+                        <Text style={styles.roomCount}>
+                          {room.playerCount}/{room.maxPlayers}
+                          {/* The mock's full duel row carries the
+                              mode in its count ("2/2 Duel"). */}
+                          {room.isFull && room.roomType === 'duel'
+                            ? ' Duel'
+                            : ''}
+                        </Text>
+                        {room.isFull ? (
+                          <View
+                            style={[styles.joinPill, styles.joinPillDisabled]}
+                          >
+                            <Text style={styles.joinPillTextDisabled}>
+                              Full
+                            </Text>
+                          </View>
                         ) : (
-                          <Text style={styles.joinPillText}>Join</Text>
+                          <Pressable
+                            onPress={() =>
+                              void joinByCode(room.roomCode, 'list')
+                            }
+                            disabled={!connected || joining !== null}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Join ${room.hostUsername}'s room`}
+                            accessibilityState={{
+                              disabled: !connected || joining !== null,
+                              busy:
+                                joining === 'list' &&
+                                joiningCode === room.roomCode,
+                            }}
+                            style={({ pressed }) => [
+                              styles.joinPill,
+                              (!connected || joining !== null) &&
+                                styles.buttonDisabled,
+                              pressed && styles.pressed,
+                            ]}
+                          >
+                            {joining === 'list' &&
+                            joiningCode === room.roomCode ? (
+                              <ActivityIndicator
+                                color={theme.onAccent}
+                                size="small"
+                              />
+                            ) : (
+                              <Text style={styles.joinPillText}>Join</Text>
+                            )}
+                          </Pressable>
                         )}
-                      </Pressable>
-                    )}
-                  </View>
-                ))
+                      </View>
+                    </View>
+                  ))}
+                </View>
               )}
             </>
           )}
@@ -491,49 +507,41 @@ const createStyles = (theme: Theme) =>
       flex: 1,
       backgroundColor: theme.background,
     },
+    /* Header — the Stitch HTML's shape: a 36pt bare-arrow hit
+       area + 22pt display title on one row (gap 10), the subtitle
+       on its own full-width line under it (13pt, ~6pt below the
+       row, 2pt inset). */
     header: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
       paddingHorizontal: spacing.screenEdge,
-      paddingTop: spacing.sm,
-      paddingBottom: spacing.md,
+      paddingTop: spacing.md,
+      // The mock's vertical rhythm: subtitle → first card is 14.
+      paddingBottom: 14,
       width: '100%',
       maxWidth: CONTENT_MAX_WIDTH,
       alignSelf: 'center',
     },
+    headerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
     backHit: {
-      width: 44,
-      height: 44,
+      width: 36,
+      height: 36,
+      marginLeft: -4,
       alignItems: 'center',
       justifyContent: 'center',
     },
-
-    headerMain: {
-      flex: 1,
-    },
     headerTitle: {
-      ...typeStyles.heading,
-      fontSize: 20,
+      ...typeStyles.display,
       color: theme.text,
     },
     headerSub: {
-      ...typeStyles.caption,
+      fontFamily: fontFamilies.body,
+      fontSize: 13,
       color: theme.muted,
-      marginTop: 1,
-    },
-    statusDot: {
-      width: 10,
-      height: 10,
-      borderRadius: 5,
-      backgroundColor: theme.muted,
-      marginRight: spacing.sm,
-    },
-    statusDotOn: {
-      backgroundColor: theme.accent,
-    },
-    statusDotError: {
-      backgroundColor: theme.secondary,
+      marginTop: 6,
+      paddingLeft: 2,
     },
     content: {
       paddingHorizontal: spacing.screenEdge,
@@ -543,11 +551,15 @@ const createStyles = (theme: Theme) =>
       width: '100%',
       maxWidth: FORM_MAX_WIDTH,
       alignSelf: 'center',
-      gap: spacing.md,
+      // The mock stacks its sections 14 apart (space-y-3.5).
+      gap: 14,
     },
+    /* Cards — this screen's HTML rounds them at 16 (rounded-2xl)
+       with 16pt padding; the generic radii.card (24) belongs to
+       other screens' mocks, not this one. */
     card: {
       backgroundColor: theme.surface,
-      borderRadius: radii.card,
+      borderRadius: radii.md,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.border,
       padding: spacing.lg,
@@ -555,52 +567,63 @@ const createStyles = (theme: Theme) =>
     },
     cardCenter: {
       backgroundColor: theme.surface,
-      borderRadius: radii.card,
+      borderRadius: radii.md,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.border,
       padding: spacing.xl,
       alignItems: 'center',
     },
     cardTitle: {
-      ...typeStyles.body,
       fontFamily: fontFamilies.bodyStrong,
+      fontSize: 15,
       color: theme.text,
+    },
+    createCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+    },
+    createMain: {
+      flex: 1,
+      gap: 2,
     },
     cardBody: {
       ...typeStyles.bodySmall,
       color: theme.muted,
-      lineHeight: 17,
+      lineHeight: 16,
     },
-    primaryButton: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: spacing.sm,
+    createButton: {
       backgroundColor: theme.accent,
       borderRadius: radii.base,
-      minHeight: 48,
+      alignItems: 'center',
+      justifyContent: 'center',
       paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.sm,
     },
-    primaryButtonText: {
-      ...typeStyles.sectionLabel,
+    createButtonText: {
+      fontFamily: fontFamilies.bodyStrong,
       // Quiz-flow button labels measure ≈13pt in the mocks
       // (kaikansen-quiz-realimg.png, kaikansen-lobby-realimg.png)
       // — the hub fix (owner's design pass) applied here too.
       fontSize: 13,
       color: theme.onAccent,
     },
+    joinRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
     joinButton: {
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: spacing.sm,
+      gap: spacing.xs,
       backgroundColor: theme.accentContainer,
       borderRadius: radii.base,
-      minHeight: 48,
       paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.sm,
     },
     joinButtonText: {
-      ...typeStyles.sectionLabel,
+      fontFamily: fontFamilies.bodyStrong,
       fontSize: 13,
       color: theme.accent,
     },
@@ -608,16 +631,19 @@ const createStyles = (theme: Theme) =>
       opacity: 0.45,
     },
     boxesPressable: {
+      flex: 1,
       position: 'relative',
     },
     boxesRow: {
       flexDirection: 'row',
-      gap: spacing.sm,
+      gap: 6,
     },
     box: {
       flex: 1,
-      height: 56,
-      borderRadius: radii.base,
+      // The mock's boxes are 40 tall with the small (8) radius —
+      // they share a row with the Join pill, not a row of their own.
+      height: 40,
+      borderRadius: radii.sm,
       backgroundColor: theme.background,
       borderWidth: 1,
       borderColor: theme.border,
@@ -625,7 +651,6 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
     },
     boxFilled: {
-      backgroundColor: theme.surface,
       borderColor: theme.muted,
     },
     boxActive: {
@@ -636,8 +661,8 @@ const createStyles = (theme: Theme) =>
       borderColor: theme.secondary,
     },
     boxChar: {
-      ...typeStyles.mono,
-      fontSize: 20,
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 16,
       color: theme.text,
     },
     hiddenInput: {
@@ -652,25 +677,33 @@ const createStyles = (theme: Theme) =>
       flexDirection: 'row',
       alignItems: 'baseline',
       justifyContent: 'space-between',
-      marginTop: spacing.sm,
+      marginTop: spacing.xs,
+      paddingHorizontal: spacing.xs,
     },
     sectionTitle: {
-      ...typeStyles.sectionLabel,
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 14,
       color: theme.text,
     },
     sectionMeta: {
-      ...typeStyles.caption,
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
       color: theme.muted,
+    },
+    roomsWrap: {
+      // Room cards sit 10 apart (space-y-2.5), tighter than the
+      // 14pt section rhythm.
+      gap: 10,
     },
     roomRow: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
       backgroundColor: theme.surface,
-      borderRadius: radii.card,
+      borderRadius: radii.md,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.border,
-      padding: spacing.md,
+      padding: 14,
     },
     roomMain: {
       flex: 1,
@@ -685,31 +718,40 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.caption,
       color: theme.muted,
     },
+    roomSide: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
     roomCount: {
-      ...typeStyles.bodySmall,
       fontFamily: fontFamilies.bodyStrong,
-      color: theme.text,
+      fontSize: 12,
+      color: theme.muted,
     },
     joinPill: {
-      minWidth: 64,
-      minHeight: 36,
-      borderRadius: radii.pill,
+      // The mock's Join/Full are rounded rects (rounded-xl = 12),
+      // not full pills: 16×6 padding around a 12pt label.
+      borderRadius: radii.base,
       backgroundColor: theme.accent,
       alignItems: 'center',
       justifyContent: 'center',
-      paddingHorizontal: spacing.md,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: 6,
     },
     joinPillDisabled: {
       backgroundColor: theme.accentContainer,
+      borderWidth: 1,
+      borderColor: theme.border,
+      paddingHorizontal: spacing.md,
     },
     joinPillText: {
-      ...typeStyles.bodySmall,
       fontFamily: fontFamilies.bodyStrong,
+      fontSize: 12,
       color: theme.onAccent,
     },
     joinPillTextDisabled: {
-      ...typeStyles.bodySmall,
       fontFamily: fontFamilies.bodyStrong,
+      fontSize: 12,
       color: theme.muted,
     },
     hint: {

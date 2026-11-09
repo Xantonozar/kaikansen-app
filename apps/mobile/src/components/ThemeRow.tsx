@@ -28,7 +28,11 @@ import { ThemeRowMenu } from './ThemeRowMenu';
  * heart + ⋮, no chip/play disc) and the Library mock's (play disc +
  * heart, no ⋮/chip) differ in detail; the search anatomy wins
  * because law #8 gives every song row a ⋮ and dropping the play
- * disc or chip per-screen would fork this shared unit.
+ * disc or chip per-screen would fork this shared unit. The
+ * Playlist detail screen has since been rebuilt against its own
+ * mock (owner-ordered), so it opts into the mock's anatomy through
+ * the `playlist` prop below — the same opt-in pattern as `compact`
+ * and `typeChip`; every other consumer keeps the search anatomy.
  *
  * Actions are opt-in per screen, so a screen only ever draws controls
  * it has wired (Slice M2):
@@ -48,17 +52,22 @@ import { ThemeRowMenu } from './ThemeRowMenu';
  *   to playlist / Download, all wired). It renders unless
  *   `menu={false}`.
  *
- * Two opt-in deviations (owner's design pass, measured from the
+ * Three opt-in deviations (owner's design pass, measured from the
  * mocks): `typeChip={false}` drops the OP/ED chip — the Theme
  * Detail mock's meta line is the artist alone, and the Library
  * mock (kaikansen-library-realimg.png) draws NO OP chip on any of
- * its rows, so every Library usage opts out too — and `compact`
+ * its rows, so every Library usage opts out too — `compact`
  * (Theme Detail Similar rows, measured from
  * kaikansen-detail-realimg.png — that mock's rows are a more
  * compact cut of the row than the Library mock's) shrinks the
  * thumb to ≈46, the play disc to ≈44, the row's vertical padding
  * to 10, and orders the cluster the mock's way — play disc, then
- * heart, then ⋮. Every other consumer keeps the defaults above.
+ * heart, then ⋮ — and `playlist` (Playlist detail rows, measured
+ * from kaikansen-playlist.html: 48pt thumb at radii.base, 10px
+ * padding, radii.md card, no play disc and no type chip; the
+ * cluster is duration · remove? · heart · ⋮, and playing a row
+ * lives in the ⋮ menu's Play and the header's Play All). Every
+ * other consumer keeps the defaults above.
  */
 export function ThemeRow({
   item,
@@ -74,6 +83,7 @@ export function ThemeRow({
   menu = true,
   typeChip = true,
   compact = false,
+  playlist = false,
 }: {
   item: ThemeSummary;
   onPress?: () => void;
@@ -94,6 +104,8 @@ export function ThemeRow({
   typeChip?: boolean;
   /** The Theme Detail Similar rows' compact cut (see header). */
   compact?: boolean;
+  /** The Playlist detail rows' mock anatomy (see header). */
+  playlist?: boolean;
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -153,19 +165,25 @@ export function ThemeRow({
       style={({ pressed }) => [
         styles.row,
         compact && styles.rowCompact,
+        playlist && styles.rowPlaylist,
         pressed && styles.pressed,
       ]}
     >
       {cover ? (
         <Image
           source={{ uri: cover }}
-          style={[styles.thumb, compact && styles.thumbCompact]}
+          style={[
+            styles.thumb,
+            compact && styles.thumbCompact,
+            playlist && styles.thumbPlaylist,
+          ]}
         />
       ) : (
         <View
           style={[
             styles.thumb,
             compact && styles.thumbCompact,
+            playlist && styles.thumbPlaylist,
             styles.placeholder,
           ]}
         />
@@ -180,7 +198,7 @@ export function ThemeRow({
           <Text style={styles.meta} numberOfLines={1}>
             {metaText ?? artist}
           </Text>
-          {typeChip && (
+          {typeChip && !playlist && (
             <View style={styles.typeChip}>
               <Text
                 style={[
@@ -217,7 +235,9 @@ export function ThemeRow({
             <X size={15} color={theme.muted} strokeWidth={2} />
           </Pressable>
         )}
-        {compact ? (
+        {playlist ? (
+          heartButton
+        ) : compact ? (
           <>
             {playButton}
             {heartButton}
@@ -264,6 +284,18 @@ const createStyles = (theme: Theme) =>
     // Detail mock rows measure ≈131px tall @2x ≈ 65.5pt with a
     // ≈46pt thumb: vertical padding 10 around the compact thumb.
     paddingVertical: 10,
+  },
+  rowPlaylist: {
+    // Playlist mock rows (kaikansen-playlist.html): p-2.5 (10)
+    // padding, rounded-2xl (16) card corners.
+    padding: 10,
+    borderRadius: radii.md,
+  },
+  thumbPlaylist: {
+    // Playlist mock thumb: w-12 h-12 (48), rounded-xl (12).
+    width: 48,
+    height: 48,
+    borderRadius: radii.base,
   },
   thumbCompact: {
     width: 46,
