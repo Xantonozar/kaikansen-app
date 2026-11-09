@@ -1,36 +1,44 @@
 import type { ImageSourcePropType } from 'react-native';
 
 /**
- * Default artist images — the bundled set of 20 chibi musicians
- * (assets/default-artists/) shown for artists whose catalogue image
- * is missing or unusable (owner order 2026-11-10: artists get real
- * defaults like users do, not an initial-letter disc). The pick is
- * deterministic: an FNV-1a hash of the artist slug modulo the set
- * size, so the same artist always gets the same image on every
- * surface and every device, with no server state — the exact
- * pattern of defaultAvatars.ts, seeded by slug instead of user id.
+ * Default artist images — the set of 20 chibi musicians shown for
+ * artists whose catalogue image is missing or unusable (owner
+ * order 2026-11-10: artists get real defaults like users do, not
+ * an initial-letter disc). The images are hosted on Cloudinary
+ * (cloud "chirkut", folder kaikansen/default-artists): the same
+ * files as the bundled set they replaced (assets/default-artists/,
+ * byte-identical to the hosted copies, verified 2026-11-10). The
+ * bundled PNGs remain in the repo but are no longer referenced.
+ *
+ * The pick is deterministic: an FNV-1a hash of the artist slug
+ * modulo the set size, so the same artist always gets the same
+ * image on every surface and every device, with no server state —
+ * the exact pattern of defaultAvatars.ts, seeded by slug instead
+ * of user id. Index i of DEFAULT_ARTIST_URLS is artist-(i + 1),
+ * index-aligned with the old bundled array, so moving the source
+ * from bundled to hosted changed no artist's image.
  */
-export const DEFAULT_ARTISTS: ImageSourcePropType[] = [
-  require('../assets/default-artists/artist-01.png'),
-  require('../assets/default-artists/artist-02.png'),
-  require('../assets/default-artists/artist-03.png'),
-  require('../assets/default-artists/artist-04.png'),
-  require('../assets/default-artists/artist-05.png'),
-  require('../assets/default-artists/artist-06.png'),
-  require('../assets/default-artists/artist-07.png'),
-  require('../assets/default-artists/artist-08.png'),
-  require('../assets/default-artists/artist-09.png'),
-  require('../assets/default-artists/artist-10.png'),
-  require('../assets/default-artists/artist-11.png'),
-  require('../assets/default-artists/artist-12.png'),
-  require('../assets/default-artists/artist-13.png'),
-  require('../assets/default-artists/artist-14.png'),
-  require('../assets/default-artists/artist-15.png'),
-  require('../assets/default-artists/artist-16.png'),
-  require('../assets/default-artists/artist-17.png'),
-  require('../assets/default-artists/artist-18.png'),
-  require('../assets/default-artists/artist-19.png'),
-  require('../assets/default-artists/artist-20.png'),
+export const DEFAULT_ARTIST_URLS: string[] = [
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263665/default-artist-01_m4fhrt.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263665/default-artist-02_uulyv0.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263665/default-artist-03_itzwhv.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263666/default-artist-04_v0sejg.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263667/default-artist-05_mv3wpt.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263666/default-artist-06_iumdsz.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263666/default-artist-07_d7jvoh.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263667/default-artist-08_oyyu0o.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263669/default-artist-09_yefsgq.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263666/default-artist-10_ktnhde.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263665/default-artist-11_qfqrtl.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263667/default-artist-12_agkwc5.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263667/default-artist-13_xhja93.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263667/default-artist-14_ckna2r.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263668/default-artist-15_do3ctp.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263668/default-artist-16_yqow88.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263668/default-artist-17_rj4vkf.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263668/default-artist-18_hjcsiu.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263669/default-artist-19_nnjyez.png',
+  'https://res.cloudinary.com/chirkut/image/upload/v1794263669/default-artist-20_spgvi9.png',
 ];
 
 export function pickDefaultArtist(seed: string): ImageSourcePropType {
@@ -40,5 +48,7 @@ export function pickDefaultArtist(seed: string): ImageSourcePropType {
     hash ^= seed.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193);
   }
-  return DEFAULT_ARTISTS[(hash >>> 0) % DEFAULT_ARTISTS.length];
+  return {
+    uri: DEFAULT_ARTIST_URLS[(hash >>> 0) % DEFAULT_ARTIST_URLS.length],
+  };
 }

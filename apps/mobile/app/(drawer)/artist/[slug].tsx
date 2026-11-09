@@ -42,8 +42,9 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
  * Image fallback (owner order 2026-11-10): a real catalogue image
  * wins; when imageUrl is null, an .svg (undrawable in RN), or the
  * remote load fails, the hero shows the artist's deterministic
- * bundled chibi musician (src/defaultArtists.ts, FNV-1a of the
- * slug % 20) instead of the initial-letter disc the mock draws.
+ * Cloudinary-hosted chibi musician (src/defaultArtists.ts,
+ * FNV-1a of the slug % 20) instead of the initial-letter disc
+ * the mock draws.
  */
 export default function ArtistDetailScreen() {
   const theme = useTheme();
