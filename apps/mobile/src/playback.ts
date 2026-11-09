@@ -127,6 +127,59 @@ export function entryHasAudio(
   return resolvePlaybackUrl(detail, entry, 'listen') !== null;
 }
 
+/* ------------------------------------------------------------------ */
+/* Quiz question audio (owner ruling: questions are audio-only)       */
+/* ------------------------------------------------------------------ */
+
+const AUDIO_FILE_EXTENSIONS = [
+  '.ogg',
+  '.mp3',
+  '.m4a',
+  '.aac',
+  '.opus',
+  '.flac',
+  '.wav',
+];
+
+/**
+ * The ONE audio source a quiz question may play, picked from a
+ * multiplayer round's flat candidate list. The API builds that list
+ * as [video, audio, ...entry video sources] (quiz-rooms
+ * buildMediaCandidates; the contract documents the same order), but
+ * the list itself is unlabelled, so the audio entry is recognised,
+ * in order:
+ *  1. the derived .ogg twin of the round's videoUrl, when listed
+ *     (the catalogue's normal case — stored audioUrl is null and
+ *     the API resolved the same derivation);
+ *  2. any non-video candidate whose path ends in an audio extension
+ *     (a stored audioUrl on another host);
+ *  3. the candidate in the API's audio slot — index 1 when index 0
+ *     is the video (a stored audioUrl that itself carries a
+ *     video-file extension: the sync stores the lowest-resolution
+ *     entry link as audioUrl when it stores one at all).
+ * Null when no candidate can be identified as audio: the round then
+ * reports no playable media instead of ever surfacing the video.
+ */
+export function quizAudioCandidate(
+  videoUrl: string | null,
+  candidates: (string | null)[],
+): string | null {
+  const plausible = candidates.filter(isPlausibleUrl);
+  if (plausible.length === 0) return null;
+  const derived = deriveAudioUrl(videoUrl);
+  if (derived && plausible.includes(derived)) return derived;
+  const byExtension = plausible.find((url) => {
+    if (url === videoUrl) return false;
+    const path = url.split(/[?#]/)[0].toLowerCase();
+    return AUDIO_FILE_EXTENSIONS.some((ext) => path.endsWith(ext));
+  });
+  if (byExtension) return byExtension;
+  if (videoUrl && plausible[0] === videoUrl && plausible.length > 1) {
+    return plausible[1];
+  }
+  return null;
+}
+
 /**
  * Whether a URL is worth handing to the player at all. Fixture themes
  * carry real https URLs (v.animethemes.moe) so fixture playback is

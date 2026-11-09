@@ -56,6 +56,7 @@ import {
 } from '../../../src/quizSocket';
 import { CountdownRing } from '../../../src/components/CountdownRing';
 import { QuizMedia } from '../../../src/components/QuizMedia';
+import { quizAudioCandidate } from '../../../src/playback';
 import { QuizOptions } from '../../../src/components/QuizOptions';
 import {
   fontFamilies,
@@ -500,6 +501,18 @@ export default function QuizRoomScreen() {
   const deadlineMs = liveRound
     ? Date.parse(liveRound.startedAt) + liveRound.timeLimitSeconds * 1000
     : 0;
+
+  // Owner ruling (2026-11-09): quiz questions are AUDIO-ONLY — the
+  // round's flat candidate list leads with the theme's video, which
+  // gives the anime away on sight. Only the identified audio
+  // candidate (the hidden .ogg) may play; when none can be
+  // identified the media card reports no playable media instead.
+  const roundAudioCandidate = liveRound
+    ? quizAudioCandidate(
+        liveRound.theme.videoUrl,
+        liveRound.theme.mediaCandidates,
+      )
+    : null;
 
   const startHint = (() => {
     if (!room || phase !== 'waiting') return null;
@@ -1015,7 +1028,10 @@ export default function QuizRoomScreen() {
                 </View>
               ) : (
                 <QuizMedia
-                  candidates={liveRound.theme.mediaCandidates}
+                  audioOnly
+                  candidates={
+                    roundAudioCandidate ? [roundAudioCandidate] : []
+                  }
                   coverImage={null}
                   mediaKey={`${roomId}:${liveRound.round}`}
                 />

@@ -1,7 +1,14 @@
 import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { Check, X } from 'lucide-react-native';
-import { radii, spacing, typeStyles, withOpacity, type Theme } from '../theme';
+import { Check, ChevronRight, X } from 'lucide-react-native';
+import {
+  fontFamilies,
+  radii,
+  spacing,
+  typeStyles,
+  withOpacity,
+  type Theme,
+} from '../theme';
 import { useTheme } from '../theme-context';
 
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
@@ -24,6 +31,7 @@ export function QuizOptions({
   selected = null,
   correctValue = null,
   pickedValue = null,
+  variant = 'standard',
 }: {
   options: string[];
   onSelect: (option: string) => void;
@@ -31,10 +39,14 @@ export function QuizOptions({
   selected?: string | null;
   correctValue?: string | null;
   pickedValue?: string | null;
+  /** 'large' = the Quiz Question v2 anatomy (solo question screen):
+   *  taller card-radius rows, a tinted letter disc, a chevron. */
+  variant?: 'standard' | 'large';
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const revealed = correctValue !== null;
+  const large = variant === 'large';
 
   return (
     <View style={styles.list}>
@@ -54,6 +66,7 @@ export function QuizOptions({
             accessibilityState={{ disabled: disabled || revealed, selected: isPicked }}
             style={({ pressed }) => [
               styles.row,
+              large && styles.rowLarge,
               isPicked && !revealed && styles.rowSelected,
               isCorrect && styles.rowCorrect,
               isWrongPick && styles.rowWrong,
@@ -64,6 +77,7 @@ export function QuizOptions({
             <View
               style={[
                 styles.letter,
+                large && styles.letterLarge,
                 isPicked && !isCorrect && styles.letterActive,
                 isCorrect && styles.letterCorrect,
                 isWrongPick && styles.letterWrong,
@@ -77,6 +91,7 @@ export function QuizOptions({
                 <Text
                   style={[
                     styles.letterText,
+                    large && styles.letterTextLarge,
                     isPicked && styles.letterTextActive,
                   ]}
                 >
@@ -84,9 +99,12 @@ export function QuizOptions({
                 </Text>
               )}
             </View>
-            <Text style={[styles.label, isCorrect && styles.labelCorrect]} numberOfLines={2}>
+            <Text style={[styles.label, large && styles.labelLarge, isCorrect && styles.labelCorrect]} numberOfLines={2}>
               {option}
             </Text>
+            {large && !revealed && (
+              <ChevronRight size={18} color={theme.muted} strokeWidth={2} />
+            )}
           </Pressable>
         );
       })}
@@ -114,6 +132,12 @@ const createStyles = (theme: Theme) =>
     rowSelected: {
       borderColor: theme.accent,
       backgroundColor: withOpacity(theme.accent, 0.12),
+    },
+    rowLarge: {
+      minHeight: 62,
+      borderRadius: radii.card,
+      paddingHorizontal: spacing.lg,
+      gap: spacing.md,
     },
     rowCorrect: {
       // Lavender Dusk Answered state: sage tint + sage border, dark label.
@@ -150,6 +174,21 @@ const createStyles = (theme: Theme) =>
     letterText: {
       ...typeStyles.caption,
       color: theme.muted,
+    },
+    letterLarge: {
+      width: 38,
+      height: 38,
+      borderRadius: 19,
+      backgroundColor: theme.accentContainer,
+    },
+    letterTextLarge: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 15,
+      color: theme.accent,
+    },
+    labelLarge: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 16,
     },
     letterTextActive: {
       color: theme.onAccent,

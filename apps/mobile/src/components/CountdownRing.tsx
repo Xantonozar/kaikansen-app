@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Svg, { Circle } from 'react-native-svg';
 import { fontFamilies, type Theme } from '../theme';
@@ -17,11 +17,19 @@ export function CountdownRing({
   totalSeconds,
   onExpire,
   size = 46,
+  glyph,
+  caption,
 }: {
   deadlineMs: number;
   totalSeconds: number;
   onExpire?: () => void;
   size?: number;
+  /** Large rings only: a glyph rendered above the seconds number
+   *  (the solo question screen's music note / buffering spinner). */
+  glyph?: ReactNode;
+  /** Large rings only: a caption under the seconds number
+   *  (the solo question screen's "seconds"). */
+  caption?: string;
 }) {
   const theme = useTheme();
   const styles = createStyles(theme);
@@ -53,7 +61,8 @@ export function CountdownRing({
   const seconds = Math.ceil(remainingMs / 1000);
   const urgent = remainingMs <= 5000 && remainingMs > 0;
 
-  const stroke = 4;
+  const large = size >= 100;
+  const stroke = large ? 8 : 4;
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
   const ringColor = urgent ? theme.secondary : theme.accent;
@@ -87,9 +96,17 @@ export function CountdownRing({
         />
       </Svg>
       <View style={styles.labelWrap}>
-        <Text style={[styles.label, urgent && { color: theme.secondary }]}>
+        {glyph}
+        <Text
+          style={[
+            styles.label,
+            large && styles.labelLarge,
+            urgent && { color: theme.secondary },
+          ]}
+        >
           {seconds}
         </Text>
+        {caption ? <Text style={styles.caption}>{caption}</Text> : null}
       </View>
     </View>
   );
@@ -110,5 +127,15 @@ const createStyles = (theme: Theme) =>
       fontFamily: fontFamilies.mono,
       fontSize: 15,
       color: theme.text,
+    },
+    labelLarge: {
+      fontFamily: fontFamilies.display,
+      fontSize: 40,
+      lineHeight: 44,
+    },
+    caption: {
+      fontFamily: fontFamilies.body,
+      fontSize: 13,
+      color: theme.muted,
     },
   });

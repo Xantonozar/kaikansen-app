@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -9,38 +15,24 @@ import {
 } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEvent, useEventListener } from 'expo';
-import { Volume2, VolumeX } from 'lucide-react-native';
+import { Music2, Volume2, VolumeX } from 'lucide-react-native';
 import { isPlausibleUrl } from '../playback';
 import { radii, spacing, typeStyles, withOpacity, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
 
 /**
- * Embedded quiz media (Slice M4) — the question's theme clip, played
- * inline on the quiz screens (the player screen's expo-video
- * patterns, shrunk to a card). Candidates are tried in order: the
- * first renders on the visible video surface (watch); when it fails,
- * later candidates play behind the cover artwork (listen) — a round
- * stays answerable even when every candidate fails, with the failure
- * stated on the card instead of swallowed. A mute toggle sits on the
- * corner; guessing needs the audio, so sound starts ON.
- *
- * `mediaKey` identifies the question/round: a new key reloads the
- * first candidate and autoplays. Leaving the screen pauses the
+ * The quiz player core (Slice M4) — tries the candidates in order
+ * and plays the first that loads, falling through on error; the
+ * last failure sticks (`failed`). Sound starts ON (guessing needs
+ * the audio) with a mute toggle; a new `mediaKey` restarts from
+ * the first candidate and autoplays; leaving the screen pauses the
  * player (the hook releases it on unmount), so no clip leaks over
  * other screens.
  */
-export function QuizMedia({
-  candidates,
-  coverImage,
-  mediaKey,
-}: {
-  candidates: (string | null)[];
-  coverImage: string | null;
-  mediaKey: string;
-}) {
-  const theme = useTheme();
-  const styles = useMemo(() => createStyles(theme), [theme]);
-
+function useQuizMediaPlayer(
+  candidates: (string | null)[],
+  mediaKey: string,
+) {
   const sources = useMemo(
     () => candidates.filter(isPlausibleUrl),
     [candidates],
@@ -56,7 +48,6 @@ export function QuizMedia({
   }, [mediaKey]);
 
   const url = sources[sourceIndex] ?? null;
-  const watchSurface = sourceIndex === 0 && url !== null;
 
   const player = useVideoPlayer(null, (p) => {
     p.loop = false;
@@ -97,6 +88,10 @@ export function QuizMedia({
     }
   });
 
+  const toggleMute = useCallback(() => {
+    setMuted((m) => !m);
+  }, []);
+
   useEffect(() => {
     player.muted = muted;
   }, [muted, player]);
@@ -112,7 +107,95 @@ export function QuizMedia({
     };
   }, [player]);
 
+  return { player, status, url, sourceIndex, failed, muted, toggleMute };
+}
+
+/**
+ * Embedded quiz media (Slice M4) — the question's theme clip, played
+ * inline on the quiz screens (the player screen's expo-video
+ * patterns, shrunk to a card).
+ *
+ * Default mode (legacy): the first candidate renders on the visible
+ * video surface (watch); when it fails, later candidates play
+ * behind the cover artwork (listen) — a round stays answerable even
+ * when every candidate fails, with the failure stated on the card
+ * instead of swallowed. A mute toggle sits on the corner.
+ *
+ * `audioOnly` mode (owner ruling, 2026-11-09 — quiz questions are
+ * AUDIO-ONLY: the visible video and even the cover art give the
+ * anime away on sight): the visible surface and the cover are never
+ * rendered. Callers pass audio candidates only, which play behind
+ * a neutral tile (music-note glyph, "Playing..." state); failure
+ * keeps the same honest note as the default mode.
+ */
+export function QuizMedia({
+  candidates,
+  coverImage,
+  mediaKey,
+  audioOnly = false,
+}: {
+  candidates: (string | null)[];
+  coverImage: string | null;
+  mediaKey: string;
+  audioOnly?: boolean;
+}) {
+  const theme = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const { player, status, url, sourceIndex, failed, muted, toggleMute } =
+    useQuizMediaPlayer(candidates, mediaKey);
+
+  const watchSurface = !audioOnly && sourceIndex === 0 && url !== null;
   const buffering = url !== null && !failed && status === 'loading';
+
+  if (audioOnly) {
+    return (
+      <View style={styles.wrap}>
+        <View style={styles.audioTile}>
+          {buffering ? (
+            <ActivityIndicator color={theme.accent} size="large" />
+          ) : (
+            <>
+              <Music2 size={30} color={theme.muted} strokeWidth={1.8} />
+              {!failed && url !== null && (
+                <Text style={styles.audioTileText}>Playing...</Text>
+              )}
+            </>
+          )}
+        </View>
+        {url !== null && (
+          <VideoView
+            player={player}
+            style={styles.hiddenSurface}
+            nativeControls={false}
+          />
+        )}
+        {url !== null && !failed && (
+          <Pressable
+            onPress={toggleMute}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel={muted ? 'Unmute theme' : 'Mute theme'}
+            style={styles.muteButton}
+          >
+            {muted ? (
+              <VolumeX size={17} color={theme.text} strokeWidth={2} />
+            ) : (
+              <Volume2 size={17} color={theme.text} strokeWidth={2} />
+            )}
+          </Pressable>
+        )}
+        {(failed || url === null) && (
+          <View style={styles.noteBar}>
+            <Text style={styles.note}>
+              {url === null && !failed
+                ? 'No playable media for this theme — you can still answer.'
+                : 'This theme could not be played — you can still answer.'}
+            </Text>
+          </View>
+        )}
+      </View>
+    );
+  }
 
   return (
     <View style={styles.wrap}>
@@ -146,7 +229,7 @@ export function QuizMedia({
       )}
       {url !== null && !failed && (
         <Pressable
-          onPress={() => setMuted((m) => !m)}
+          onPress={toggleMute}
           hitSlop={6}
           accessibilityRole="button"
           accessibilityLabel={muted ? 'Unmute theme' : 'Mute theme'}
@@ -172,6 +255,65 @@ export function QuizMedia({
   );
 }
 
+export type QuizAudioPhase = 'buffering' | 'playing' | 'failed' | 'empty';
+
+export interface QuizAudioState {
+  phase: QuizAudioPhase;
+  muted: boolean;
+  toggleMute: () => void;
+}
+
+/**
+ * Headless quiz audio (owner ruling, 2026-11-09) — the solo
+ * question screen's player: no surface, no artwork, nothing
+ * visible at all; the hidden question clip plays while the screen
+ * composes its own chrome (countdown ring, status line, mute
+ * button) from the reported state. Playback state is reported via
+ * `onStateChange` whenever the phase or mute changes.
+ */
+export function QuizAudioOnly({
+  candidates,
+  mediaKey,
+  onStateChange,
+}: {
+  candidates: (string | null)[];
+  mediaKey: string;
+  onStateChange?: (state: QuizAudioState) => void;
+}) {
+  const { player, status, url, failed, muted, toggleMute } =
+    useQuizMediaPlayer(candidates, mediaKey);
+
+  const phase: QuizAudioPhase = failed
+    ? 'failed'
+    : url === null
+      ? 'empty'
+      : status === 'loading' || status === 'idle'
+        ? 'buffering'
+        : 'playing';
+
+  const reportRef = useRef(onStateChange);
+  reportRef.current = onStateChange;
+  useEffect(() => {
+    reportRef.current?.({ phase, muted, toggleMute });
+  }, [phase, muted, toggleMute]);
+
+  if (url === null) return null;
+  return (
+    <VideoView
+      player={player}
+      style={hiddenSurfaceStyle}
+      nativeControls={false}
+    />
+  );
+}
+
+const hiddenSurfaceStyle = {
+  position: 'absolute' as const,
+  width: 1,
+  height: 1,
+  opacity: 0,
+};
+
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
     wrap: {
@@ -192,6 +334,18 @@ const createStyles = (theme: Theme) =>
     },
     artworkPlaceholder: {
       backgroundColor: theme.raised,
+    },
+    audioTile: {
+      width: '100%',
+      aspectRatio: 16 / 9,
+      backgroundColor: theme.raised,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: spacing.sm,
+    },
+    audioTileText: {
+      ...typeStyles.bodySmall,
+      color: theme.muted,
     },
     hiddenSurface: {
       position: 'absolute',

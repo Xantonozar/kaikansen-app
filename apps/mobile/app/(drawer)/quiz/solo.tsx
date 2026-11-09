@@ -21,9 +21,12 @@ import {
   ChevronRight,
   Flame,
   Hourglass,
+  Music2,
   RotateCcw,
   SkipForward,
   Trophy,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react-native';
 import type {
@@ -38,7 +41,10 @@ import { createSoloGame, submitSoloAnswer } from '../../../src/quizApi';
 import { fetchMyRank } from '../../../src/socialApi';
 import { RankCard } from '../../../src/components/RankCard';
 import { CountdownRing } from '../../../src/components/CountdownRing';
-import { QuizMedia } from '../../../src/components/QuizMedia';
+import {
+  QuizAudioOnly,
+  type QuizAudioState,
+} from '../../../src/components/QuizMedia';
 import { QuizOptions } from '../../../src/components/QuizOptions';
 import {
   fontFamilies,
@@ -54,10 +60,17 @@ type Phase = 'creating' | 'question' | 'feedback' | 'over' | 'fatal';
 
 const FEEDBACK_MS = 2800;
 
-const GUESS_LABEL: Record<QuizGuessType, string> = {
-  anime: 'Guess the anime',
-  title: 'Guess the song',
-  artist: 'Guess the artist',
+/**
+ * The question prompt per guess type — the Quiz Question v2 mock's
+ * line for 'anime' verbatim, the other two following its pattern.
+ * (The short GUESS_LABEL chips the screen used to print under the
+ * media card are gone with the card: the mock shows only the
+ * question, and the theme's type/sequence line gave framing away.)
+ */
+const QUESTION_PROMPT: Record<QuizGuessType, string> = {
+  anime: 'Which anime is this theme from?',
+  title: 'What is the name of this song?',
+  artist: 'Who performs this theme?',
 };
 
 /** Title-case variant for the results screen's subtitle (§6.25). */
@@ -69,10 +82,13 @@ const RESULTS_GUESS_LABEL: Record<QuizGuessType, string> = {
 
 /**
  * Solo game (Slice M4) — a server-held 10-question game over the
- * S4 REST surface. The client renders the question theme inline
- * (QuizMedia), runs a LOCAL 20s countdown ring for display (the
- * server measures and scores authoritatively), and sends the
- * chosen option verbatim — or null on timeout/skip. The answer
+ * S4 REST surface. The question phase follows the Quiz Question v2
+ * design and the owner's audio-only ruling (2026-11-09): the theme
+ * plays as HIDDEN .ogg audio only (QuizAudioOnly) — no video, no
+ * cover, nothing that gives the anime away on sight — under a big
+ * countdown ring, while a LOCAL 20s countdown drives the ring's
+ * display (the server measures and scores authoritatively), and
+ * the chosen option is sent verbatim — or null on timeout/skip. The answer
  * response drives the feedback state (correct option revealed,
  * points + streak), then the game auto-advances (a Next button
  * skips the wait). The end screen is the designed results screen
@@ -120,6 +136,16 @@ export default function SoloQuizScreen() {
     null,
   );
   const [rankLoading, setRankLoading] = useState(false);
+  // The hidden question audio's reported state (QuizAudioOnly):
+  // drives the status line and the ring's mute toggle.
+  const [audioState, setAudioState] = useState<QuizAudioState>({
+    phase: 'empty',
+    muted: false,
+    toggleMute: () => {},
+  });
+  const handleAudioState = useCallback((state: QuizAudioState) => {
+    setAudioState(state);
+  }, []);
 
   const mountedRef = useRef(true);
   const submittingRef = useRef(false);
@@ -274,8 +300,9 @@ export default function SoloQuizScreen() {
     else router.replace('/(tabs)/quiz');
   };
 
-  /* Header (the mock): a bare ✕, the centred "Question N of M",
-     and the streak pill at the top-right once a streak is live. */
+  /* Header (Quiz Question v2): the ✕ in a white disc, the centred
+     "Question N of M" with the progress bar under it, and the
+     streak pill at the top-right once a streak is live. */
   const header = (
     <View style={styles.header}>
       <Pressable
@@ -283,9 +310,9 @@ export default function SoloQuizScreen() {
         hitSlop={3}
         accessibilityRole="button"
         accessibilityLabel="Leave game"
-        style={styles.backHit}
+        style={styles.backDisc}
       >
-        <X size={22} color={theme.text} strokeWidth={2} />
+        <X size={20} color={theme.text} strokeWidth={2} />
       </Pressable>
       <View style={styles.headerMain}>
         <Text style={styles.headerTitle}>
@@ -293,6 +320,21 @@ export default function SoloQuizScreen() {
             ? `Question ${question.index} of ${totalQuestions}`
             : 'Solo quiz'}
         </Text>
+        {question && (
+          <View style={styles.progressTrack}>
+            <View
+              style={[
+                styles.progressFill,
+                {
+                  width: `${Math.min(
+                    100,
+                    (question.index / Math.max(1, totalQuestions)) * 100,
+                  )}%`,
+                },
+              ]}
+            />
+          </View>
+        )}
       </View>
       <View style={styles.headerSide}>
         {streak >= 2 && (
@@ -305,23 +347,15 @@ export default function SoloQuizScreen() {
     </View>
   );
 
-  /* Score block (the mock): the centred "Score" label + big
-     total, with the countdown ring centred beneath it — the
-     chips row and progress bar the audit flagged are gone
-     ("Question N of M" in the header carries progress). */
+  /* Score block (the mock): the centred "SCORE" label + big total.
+     The countdown ring lives in the question body now (v2 centres
+     it between the score and the status line). */
   const scoreBlock = (
     <View style={styles.scoreBlock}>
       <Text style={styles.scoreBlockLabel}>Score</Text>
       <Text style={styles.scoreBlockValue}>
         {totalScore.toLocaleString('en-US')}
       </Text>
-      {(phase === 'question' || phase === 'feedback') && question && (
-        <CountdownRing
-          deadlineMs={deadlineMs}
-          totalSeconds={timeLimit}
-          onExpire={phase === 'question' ? onExpire : undefined}
-        />
-      )}
     </View>
   );
 
@@ -441,48 +475,109 @@ export default function SoloQuizScreen() {
     );
   } else if (question) {
     const inFeedback = phase === 'feedback' && feedback !== null;
+    const audioFailed = audioState.phase === 'failed';
+    const audioEmpty = audioState.phase === 'empty';
     body = (
-      <ScrollView
-        contentContainerStyle={styles.gameContent}
-        showsVerticalScrollIndicator={false}
-      >
-        <QuizMedia
-          candidates={[question.theme.videoUrl, question.theme.audioUrl]}
-          coverImage={question.theme.coverImage}
+      <>
+        <QuizAudioOnly
+          candidates={[question.theme.audioUrl]}
           mediaKey={`${gameId ?? 'game'}:${question.index}`}
+          onStateChange={handleAudioState}
         />
-        <View style={styles.themeMeta}>
-          <Text style={styles.themeMetaText}>
-            {question.theme.type}
-            {question.theme.sequence} · {GUESS_LABEL[quizType]} — tap an
-            answer
-          </Text>
-        </View>
-        <QuizOptions
-          options={question.options}
-          onSelect={(option) => void submit(option)}
-          disabled={phase !== 'question'}
-          selected={picked}
-          correctValue={inFeedback ? feedback.correctValue : null}
-          pickedValue={inFeedback ? picked : null}
-        />
-        {error && phase === 'question' && (
-          <Text style={styles.errorText}>{error}</Text>
-        )}
-        {phase === 'question' && (
-          <Pressable
-            onPress={() => void submit(null)}
-            accessibilityRole="button"
-            accessibilityLabel="Skip this question"
-            style={({ pressed }) => [
-              styles.skipButton,
-              pressed && styles.pressed,
-            ]}
-          >
-            <SkipForward size={15} color={theme.muted} strokeWidth={2} />
-            <Text style={styles.skipText}>Skip</Text>
-          </Pressable>
-        )}
+        <ScrollView
+          contentContainerStyle={styles.gameContent}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Quiz Question v2 centrepiece: the big countdown ring
+              (music note, seconds left) with the hidden audio's
+              mute toggle at its lower-right — the mock's layout has
+              no media card at all; the clip is audio-only. */}
+          <View style={styles.ringWrap}>
+            <CountdownRing
+              deadlineMs={deadlineMs}
+              totalSeconds={timeLimit}
+              onExpire={phase === 'question' ? onExpire : undefined}
+              size={168}
+              glyph={
+                audioState.phase === 'buffering' ? (
+                  <ActivityIndicator color={theme.accent} />
+                ) : (
+                  <Music2 size={22} color={theme.accent} strokeWidth={2} />
+                )
+              }
+              caption="seconds"
+            />
+            {!audioFailed && !audioEmpty && (
+              <Pressable
+                onPress={audioState.toggleMute}
+                hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  audioState.muted ? 'Unmute theme' : 'Mute theme'
+                }
+                style={styles.ringMute}
+              >
+                {audioState.muted ? (
+                  <VolumeX size={17} color={theme.text} strokeWidth={2} />
+                ) : (
+                  <Volume2 size={17} color={theme.text} strokeWidth={2} />
+                )}
+              </Pressable>
+            )}
+          </View>
+          {phase === 'question' && (
+            <>
+              <View style={styles.statusRow}>
+                <View
+                  style={[
+                    styles.statusDot,
+                    (audioFailed || audioEmpty) && styles.statusDotMuted,
+                  ]}
+                />
+                <Text style={styles.statusText}>
+                  {audioFailed
+                    ? 'This theme could not be played — you can still answer.'
+                    : audioEmpty
+                      ? 'No playable media for this theme — you can still answer.'
+                      : 'Playing... guess the anime!'}
+                </Text>
+              </View>
+              <Text style={styles.prompt}>
+                {QUESTION_PROMPT[quizType]}
+              </Text>
+            </>
+          )}
+          <QuizOptions
+            variant="large"
+            options={question.options}
+            onSelect={(option) => void submit(option)}
+            disabled={phase !== 'question'}
+            selected={picked}
+            correctValue={inFeedback ? feedback.correctValue : null}
+            pickedValue={inFeedback ? picked : null}
+          />
+          {error && phase === 'question' && (
+            <Text style={styles.errorText}>{error}</Text>
+          )}
+          {phase === 'question' && (
+            <Pressable
+              onPress={() => void submit(null)}
+              accessibilityRole="button"
+              accessibilityLabel="Skip this question"
+              style={({ pressed }) => [
+                styles.skipButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <SkipForward size={15} color={theme.muted} strokeWidth={2} />
+              <Text style={styles.skipText}>Skip</Text>
+            </Pressable>
+          )}
+          {phase === 'question' && (
+            <Text style={styles.footerNote}>
+              Clip plays from 0:00. Faster answers earn more points.
+            </Text>
+          )}
         {inFeedback && (
           <View style={styles.feedbackCard}>
             <View style={styles.feedbackHead}>
@@ -553,8 +648,9 @@ export default function SoloQuizScreen() {
               <ChevronRight size={16} color={theme.onAccent} strokeWidth={2} />
             </Pressable>
           </View>
-        )}
-      </ScrollView>
+          )}
+        </ScrollView>
+      </>
     );
   } else {
     body = (
@@ -595,11 +691,28 @@ const createStyles = (theme: Theme) =>
       paddingTop: spacing.sm,
       paddingBottom: spacing.md,
     },
-    backHit: {
-      width: 44,
-      height: 44,
+    backDisc: {
+      width: 40,
+      height: 40,
+      borderRadius: radii.pill,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
       alignItems: 'center',
       justifyContent: 'center',
+    },
+    progressTrack: {
+      width: 150,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: theme.raised,
+      marginTop: spacing.xs + 2,
+      overflow: 'hidden',
+    },
+    progressFill: {
+      height: '100%',
+      borderRadius: 3,
+      backgroundColor: theme.accent,
     },
     headerMain: {
       flex: 1,
@@ -617,7 +730,9 @@ const createStyles = (theme: Theme) =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.xs,
-      backgroundColor: theme.accentContainer,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
       borderRadius: radii.pill,
       paddingHorizontal: spacing.sm + 2,
       paddingVertical: spacing.xs + 2,
@@ -625,7 +740,7 @@ const createStyles = (theme: Theme) =>
     streakPillText: {
       ...typeStyles.caption,
       fontFamily: fontFamilies.bodyStrong,
-      color: theme.onAccentContainer,
+      color: theme.text,
     },
     scoreBlock: {
       alignItems: 'center',
@@ -650,12 +765,55 @@ const createStyles = (theme: Theme) =>
       paddingBottom: spacing.xxxl,
       gap: spacing.md,
     },
-    themeMeta: {
-      alignItems: 'center',
+    ringWrap: {
+      alignSelf: 'center',
+      position: 'relative',
+      marginTop: spacing.sm,
     },
-    themeMetaText: {
+    ringMute: {
+      position: 'absolute',
+      right: 2,
+      bottom: 2,
+      width: 36,
+      height: 36,
+      borderRadius: radii.pill,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    statusRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: spacing.xs + 2,
+    },
+    statusDot: {
+      width: 8,
+      height: 8,
+      borderRadius: 4,
+      backgroundColor: theme.accent,
+    },
+    statusDotMuted: {
+      backgroundColor: theme.muted,
+    },
+    statusText: {
+      ...typeStyles.bodySmall,
+      color: theme.muted,
+      textAlign: 'center',
+    },
+    prompt: {
+      ...typeStyles.heading,
+      fontSize: 21,
+      lineHeight: 27,
+      color: theme.text,
+      textAlign: 'center',
+    },
+    footerNote: {
       ...typeStyles.caption,
       color: theme.muted,
+      textAlign: 'center',
     },
     skipButton: {
       flexDirection: 'row',
