@@ -5,6 +5,7 @@ import type {
   ArtistDetailResponse,
   HomeResponse,
   RelatedAnimeResponse,
+  SearchGroup,
   SearchResponse,
   SeasonResponse,
   SimilarThemesResponse,
@@ -54,14 +55,22 @@ export class ThemesController {
   @Get('search')
   @ApiOkResponse({
     description:
-      'Two-stage regex theme search (web parity, searchType: regex); page 1 also carries the web ALL-view anime and artist groups plus the users group (public accounts, NetworkUser projection).',
+      'Catalogue search (Option B): themes/anime/artists match via MongoDB Search when its indexes are Active (searchType: atlas), else the web-parity two-stage regex (searchType: regex); the users group always uses the people search’s matching (public accounts, NetworkUser projection). ?group=all (default) is the preview — top 5 per group with per-group totals; group=themes|anime|artists|users serves that group’s full view, paginated at ?limit= (the app sends 15).',
   })
   search(
     @Query('q') q = '',
     @Query('page') page?: string,
+    @Query('group') group?: string,
+    @Query('limit') limit?: string,
   ): Promise<SearchResponse> {
     const parsed = Number.parseInt(page ?? '', 10);
-    return this.themes.search(q, Number.isNaN(parsed) ? 1 : parsed);
+    const parsedLimit = Number.parseInt(limit ?? '', 10);
+    return this.themes.search(
+      q,
+      Number.isNaN(parsed) ? 1 : parsed,
+      (group ?? 'all') as SearchGroup,
+      Number.isNaN(parsedLimit) ? undefined : parsedLimit,
+    );
   }
 
   @Get('themes/:slug/similar')

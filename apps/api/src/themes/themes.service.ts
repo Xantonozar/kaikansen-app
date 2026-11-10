@@ -16,11 +16,14 @@ import type {
   RelatedAnimeResponse,
   SearchAnimeResult,
   SearchArtistResult,
+  SearchGroup,
+  SearchGroupMeta,
   SearchResponse,
   Season,
   SeasonResponse,
   SimilarThemesResponse,
   ThemeDetail,
+  ThemeSummary,
   ThemeType,
 } from '@kaikansen/contracts';
 import { User, type UserDocument } from '../auth/user.schema';
@@ -59,6 +62,104 @@ const SEARCH_MODIFIER_LIMIT = 50; // songs limit when an OP/ED modifier is used
 const SONG_CANDIDATE_LIMIT = 400; // stage-1 candidate cap
 const MAX_TERMS = 6;
 const MAX_TERM_LENGTH = 32;
+
+/* Option B (MongoDB Search) constants — spec 2026-11-10. The index
+   names match apps/api/search-indexes/*.json, created at rollout;
+   until they are Active every Atlas attempt fails into the regex
+   fallback, by design. */
+const SEARCH_GROUPS: readonly SearchGroup[] = [
+  'all',
+  'themes',
+  'anime',
+  'artists',
+  'users',
+];
+const SEARCH_FULL_GROUP_PAGE_SIZE = 15; // a group full view's default page
+const SEARCH_MAX_LIMIT = 50; // hard cap on a client-supplied `limit`
+const THEMES_SEARCH_INDEX = 'kaikansen_themes_search';
+const ANIME_SEARCH_INDEX = 'kaikansen_anime_search';
+const ARTISTS_SEARCH_INDEX = 'kaikansen_artists_search';
+const THEME_SEARCH_FIELDS = ['animeTitle', 'songTitle', 'artistName'];
+const ANIME_SEARCH_FIELDS = ['titleRomaji', 'titleEnglish', 'synonyms'];
+const ARTIST_SEARCH_FIELDS = ['name', 'aliases'];
+
+/** One group page of a search view: the rows served + the group's total. */
+interface GroupPage<T> {
+  rows: T[];
+  total: number;
+}
+
+/** A parsed GET /search request, shared by the Atlas and regex paths. */
+interface SearchView {
+  query: string;
+  page: number;
+  /** Effective view ('all' past page 1 is folded to 'themes' by `search`). */
+  view: SearchGroup;
+  limit: number | undefined;
+  cleanWords: string[];
+  themeTypeFilter: 'OP' | 'ED' | null;
+  themeSeqFilter: number | null;
+  themeModifierUsed: boolean;
+}
+
+function emptyGroupsMeta(): SearchResponse['groups'] {
+  const empty: SearchGroupMeta = { total: 0, hasMore: false };
+  return {
+    themes: { ...empty },
+    anime: { ...empty },
+    artists: { ...empty },
+    users: { ...empty },
+  };
+}
+
+/**
+ * The regex group filter: every clean word an escaped,
+ * case-insensitive substring of at least one of the group's
+ * fields — `$and` across words, `$or` across fields (the web's
+ * ALL-view shape).
+ */
+function regexGroupFilter(
+  fields: string[],
+  cleanWords: string[],
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): any {
+  const contains = (word: string) => new RegExp(escapeRegExp(word), 'i');
+  const conditions = cleanWords.map((word) => ({
+    $or: fields.map((field) => ({ [field]: contains(word) })),
+  }));
+  return conditions.length === 1 ? conditions[0] : { $and: conditions };
+}
+
+/**
+ * The `$search` stage for a catalogue group: one compound per
+ * clean word, requiring (minimumShouldMatch 1) an autocomplete
+ * match on at least one of the group's fields — Atlas ANDs the
+ * per-word compounds, mirroring the regex semantics. Matching is
+ * partial by index design: the fields are nGram-tokenized
+ * autocomplete (see apps/api/search-indexes/), so a word matches
+ * as a fragment anywhere in a field's tokens.
+ */
+function autocompleteStage(
+  index: string,
+  fields: string[],
+  cleanWords: string[],
+): Record<string, unknown> {
+  return {
+    $search: {
+      index,
+      compound: {
+        must: cleanWords.map((word) => ({
+          compound: {
+            should: fields.map((path) => ({
+              autocomplete: { query: word, path },
+            })),
+            minimumShouldMatch: 1,
+          },
+        })),
+      },
+    },
+  };
+}
 
 function escapeRegExp(raw: string): string {
   return raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -309,39 +410,57 @@ export class ThemesService {
   }
 
   /**
-   * GET /search — theme search with the web's own semantics (AUDIT.md §6;
-   * ZadidSalman/Kaisen `app/api/search/route.ts`). The web's search is
-   * regex end to end — it self-labels `searchType: 'regex'` and issues no
-   * `$text` query anywhere. (The collection does carry a `theme_full_search`
-   * TEXT index, but the web code never uses it, and neither does this port.)
+   * GET /search — the Option B search (owner spec 2026-11-10): the
+   * catalogue groups (themes / anime / artists) match through
+   * MongoDB Search (Atlas Search) `$search` pipelines over the
+   * nGram-autocomplete indexes shipped in `apps/api/search-indexes/`,
+   * which is what keeps PARTIAL matching — "naruto" surfaces Naruto
+   * Shippuden and the fragments "naru" / "shippu" / "uto" still
+   * match mid-word (whole-word `$text` and prefix-only edgeGram
+   * were both rejected for losing exactly that). The users group
+   * keeps the people search's own regex matching (public accounts,
+   * public fields only — see searchUserGroupRegex).
    *
-   * Two stages, mirroring the web's songs search:
+   * Views (`group` param): 'all' is the preview — top 5 of every
+   * group plus per-group totals (the web's ALL view, extended);
+   * each other value is that group's full view, paginated at the
+   * requested `limit` (the app sends 15; themes default to the
+   * web's SONGS sizes, 20 or 50 under an OP/ED modifier). 'all'
+   * past page 1 continues as the themes full view, the legacy
+   * paging older clients use. Tokens like "op", "ed12" or "op 9"
+   * are not search words in either matcher: they parse into
+   * type/sequence filters and suppress the non-theme groups.
    *
-   * Stage 1 — candidate narrowing: unless an OP/ED modifier was parsed out
-   * of the query, prefix-match the first clean word (`^word`,
-   * case-insensitive) over animeTitle/songTitle/artistName and collect up
-   * to 400 candidate ids.
-   *
-   * Stage 2 — full regex over the candidates: every clean word must appear
-   * (escaped, case-insensitive substring) in at least one of
-   * animeTitle/songTitle/artistName — `$and` across words, `$or` across
-   * fields — restricted to the stage-1 ids when stage 1 produced any.
-   * Results sort by totalWatches desc, then avgRating desc.
-   *
-   * Tokens like "op", "ed12" or "op 9" are not search words: they parse
-   * into type/sequence filters (and widen the page size to 50, as on the
-   * web). Pagination mirrors the web's SONGS view: 20 per page, and the
-   * total is counted on every search (the web counts it for that view).
-   *
-   * Alongside the songs, page 1 carries the web's ALL-view anime and
-   * artist groups plus the users group (see searchGroups) — the
-   * grouped results the app's search screen renders under the
-   * Themes list.
+   * FALLBACK: Atlas Search exists only once the indexes are
+   * created at rollout and Active. Any `$search` failure — index
+   * missing, still building, Atlas unreachable — falls back to
+   * searchRegex (the web-parity two-stage regex, kept whole) and
+   * the response reports `searchType: 'regex'`; the app never
+   * breaks because Atlas is unavailable. A modifier-only query
+   * ("op 9", no words) and the users view also go straight to the
+   * regex path: `$search` needs text to match. `searchType`
+   * reports the matcher behind the served view's primary group
+   * (themes for 'all'/'themes', the group itself for a
+   * catalogue-group view; always 'regex' for the users view).
    */
-  async search(rawQuery: string, page = 1): Promise<SearchResponse> {
-    const model = this.requireModel();
+  async search(
+    rawQuery: string,
+    page = 1,
+    group: SearchGroup = 'all',
+    limit?: number,
+  ): Promise<SearchResponse> {
+    this.requireModel();
     const query = rawQuery.trim();
     const safePage = Number.isFinite(page) && page >= 1 ? Math.floor(page) : 1;
+    const requested: SearchGroup = SEARCH_GROUPS.includes(group)
+      ? group
+      : 'all';
+    const view: SearchGroup =
+      requested === 'all' && safePage > 1 ? 'themes' : requested;
+    const safeLimit =
+      limit !== undefined && Number.isFinite(limit) && limit >= 1
+        ? Math.min(Math.floor(limit), SEARCH_MAX_LIMIT)
+        : undefined;
     if (query.length === 0) {
       return {
         query,
@@ -350,6 +469,8 @@ export class ThemesService {
         artists: [],
         users: [],
         searchType: 'regex',
+        group: view,
+        groups: emptyGroupsMeta(),
         page: safePage,
         total: 0,
         hasMore: false,
@@ -361,163 +482,472 @@ export class ThemesService {
     const words = normalizeWords(query);
     const { cleanWords, themeTypeFilter, themeSeqFilter } =
       parseThemeModifiers(words);
-    const themeModifierUsed = themeTypeFilter !== null;
+    const ctx: SearchView = {
+      query,
+      page: safePage,
+      view,
+      limit: safeLimit,
+      cleanWords,
+      themeTypeFilter,
+      themeSeqFilter,
+      themeModifierUsed: themeTypeFilter !== null,
+    };
+    if (cleanWords.length === 0 || view === 'users') {
+      return this.searchRegex(ctx);
+    }
+    try {
+      return await this.searchAtlas(ctx);
+    } catch {
+      return this.searchRegex(ctx);
+    }
+  }
 
-    const contains = (word: string) => new RegExp(escapeRegExp(word), 'i');
-    const wordConditions = cleanWords.map((word) => ({
-      $or: [
-        { animeTitle: contains(word) },
-        { songTitle: contains(word) },
-        { artistName: contains(word) },
-      ],
-    }));
-    // The filter is assembled dynamically, exactly as on the web.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let themeFilter: any =
-      wordConditions.length === 1
-        ? wordConditions[0]
-        : wordConditions.length > 1
-          ? { $and: wordConditions }
-          : {};
-    if (themeTypeFilter) themeFilter.type = themeTypeFilter;
-    if (themeSeqFilter !== null) themeFilter.sequence = themeSeqFilter;
+  /** The themes page size for a view (preview cap / SONGS sizes / client limit). */
+  private themesPageSize(ctx: SearchView): number {
+    if (ctx.view === 'all') {
+      // The preview caps themes like every group — except under an
+      // OP/ED modifier, where the groups are suppressed and themes
+      // are the whole view: the web widens the page to 50 then.
+      return ctx.themeModifierUsed
+        ? SEARCH_MODIFIER_LIMIT
+        : SEARCH_GROUP_LIMIT;
+    }
+    if (ctx.limit !== undefined) return ctx.limit;
+    return ctx.themeModifierUsed ? SEARCH_MODIFIER_LIMIT : SEARCH_PAGE_SIZE;
+  }
 
-    // — Stage 1: prefix narrowing to candidate ids —
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let effectiveFilter: any = themeFilter;
-    if (!themeModifierUsed && cleanWords.length > 0) {
-      const prefix = new RegExp(`^${escapeRegExp(cleanWords[0])}`, 'i');
-      const candidates = (await model
-        .find({
-          $or: [
-            { animeTitle: prefix },
-            { songTitle: prefix },
-            { artistName: prefix },
-          ],
-        })
-        .select('_id')
-        .limit(SONG_CANDIDATE_LIMIT)
-        .lean()
-        .exec()) as Array<{ _id: unknown }>;
-      if (candidates.length > 0) {
-        effectiveFilter = {
-          $and: [
-            { _id: { $in: candidates.map((c) => c._id) } },
-            themeFilter,
-          ],
-        };
+  /** The page size for a catalogue group (preview cap / client limit / 15). */
+  private groupPageSize(ctx: SearchView): number {
+    if (ctx.view === 'all') return SEARCH_GROUP_LIMIT;
+    return ctx.limit ?? SEARCH_FULL_GROUP_PAGE_SIZE;
+  }
+
+  /**
+   * The Atlas path: themes (when in view) are the primary matcher
+   * — a failure there fails the whole view into the regex fallback.
+   * The anime/artist groups degrade individually to their regex
+   * form (their own index may lag the themes one at rollout),
+   * except when the group IS the view, where its failure fails the
+   * view. OP/ED modifiers ride the themes pipeline as a `$match`
+   * stage and suppress the other groups, as on the web.
+   */
+  private async searchAtlas(ctx: SearchView): Promise<SearchResponse> {
+    const inView = (g: SearchGroup) => ctx.view === 'all' || ctx.view === g;
+    let themesRows: ThemeSummary[] = [];
+    let themesTotal = 0;
+    let themesSkip = 0;
+    if (inView('themes')) {
+      const size = this.themesPageSize(ctx);
+      themesSkip = (ctx.page - 1) * size;
+      const themes = await this.searchThemesAtlas(ctx, size, themesSkip);
+      themesRows = themes.rows;
+      themesTotal = themes.total;
+    }
+
+    const empty: GroupPage<never> = { rows: [], total: 0 };
+    let anime: GroupPage<SearchAnimeResult> = empty;
+    let artists: GroupPage<SearchArtistResult> = empty;
+    let users: GroupPage<NetworkUser> = empty;
+    if (!ctx.themeModifierUsed) {
+      const size = this.groupPageSize(ctx);
+      const skip = (ctx.page - 1) * size;
+      if (inView('anime')) {
+        anime = await this.searchAnimeGroupAtlas(
+          ctx,
+          size,
+          skip,
+          ctx.view === 'anime',
+        );
+      }
+      if (inView('artists')) {
+        artists = await this.searchArtistGroupAtlas(
+          ctx,
+          size,
+          skip,
+          ctx.view === 'artists',
+        );
+      }
+      if (inView('users')) {
+        users = await this.searchUserGroupRegex(ctx.cleanWords, size, skip);
       }
     }
 
-    // — Stage 2: full regex over the (possibly narrowed) filter —
-    const limit = themeModifierUsed ? SEARCH_MODIFIER_LIMIT : SEARCH_PAGE_SIZE;
-    const skip = (safePage - 1) * limit;
+    return this.assembleSearch(
+      ctx,
+      'atlas',
+      { rows: themesRows, total: themesTotal },
+      themesSkip,
+      anime,
+      artists,
+      users,
+    );
+  }
+
+  /**
+   * One `$search` + facet round trip: the page of documents and
+   * the full match count in a single aggregation. Ranking is
+   * Atlas relevance first (the `$search` score), tie-broken by
+   * totalWatches desc / avgRating desc (themes only — the group
+   * collections carry neither) and finally `_id` asc, so pages
+   * partition cleanly and never overlap (the Bug 6 rule, carried
+   * over from the regex sort).
+   */
+  private async runSearchFacet(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    model: Model<any>,
+    index: string,
+    fields: string[],
+    cleanWords: string[],
+    match: Record<string, unknown> | null,
+    popularityTiebreak: boolean,
+    limit: number,
+    skip: number,
+  ): Promise<GroupPage<unknown>> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stages: any[] = [autocompleteStage(index, fields, cleanWords)];
+    if (match) stages.push({ $match: match });
+    stages.push(
+      { $addFields: { _searchScore: { $meta: 'searchScore' } } },
+      {
+        $sort: popularityTiebreak
+          ? { _searchScore: -1, totalWatches: -1, avgRating: -1, _id: 1 }
+          : { _searchScore: -1, _id: 1 },
+      },
+      {
+        $facet: {
+          results: [{ $skip: skip }, { $limit: limit }],
+          total: [{ $count: 'count' }],
+        },
+      },
+    );
+    const out = (await model.aggregate(stages)) as Array<{
+      results?: unknown[];
+      total?: Array<{ count: number }>;
+    }>;
+    const facet = out[0];
+    if (!facet) {
+      throw new Error(`MongoDB Search returned no result (index ${index})`);
+    }
+    return { rows: facet.results ?? [], total: facet.total?.[0]?.count ?? 0 };
+  }
+
+  /** Themes through Atlas: text match plus the OP/ED `$match` filters. */
+  private async searchThemesAtlas(
+    ctx: SearchView,
+    limit: number,
+    skip: number,
+  ): Promise<GroupPage<ThemeSummary>> {
+    const model = this.requireModel();
+    const match: Record<string, unknown> = {};
+    if (ctx.themeTypeFilter) match.type = ctx.themeTypeFilter;
+    if (ctx.themeSeqFilter !== null) match.sequence = ctx.themeSeqFilter;
+    const facet = await this.runSearchFacet(
+      model,
+      THEMES_SEARCH_INDEX,
+      THEME_SEARCH_FIELDS,
+      ctx.cleanWords,
+      Object.keys(match).length > 0 ? match : null,
+      true,
+      limit,
+      skip,
+    );
+    return {
+      rows: (facet.rows as ThemeDoc[]).map(toThemeSummary),
+      total: facet.total,
+    };
+  }
+
+  private async searchAnimeGroupAtlas(
+    ctx: SearchView,
+    limit: number,
+    skip: number,
+    strict: boolean,
+  ): Promise<GroupPage<SearchAnimeResult>> {
+    if (!this.animeModel) return { rows: [], total: 0 };
+    try {
+      const facet = await this.runSearchFacet(
+        this.animeModel,
+        ANIME_SEARCH_INDEX,
+        ANIME_SEARCH_FIELDS,
+        ctx.cleanWords,
+        null,
+        false,
+        limit,
+        skip,
+      );
+      return {
+        rows: await this.toAnimeResults(facet.rows as AnimeDoc[]),
+        total: facet.total,
+      };
+    } catch (err) {
+      if (strict) throw err;
+      return this.searchAnimeGroupRegex(
+        regexGroupFilter(ANIME_SEARCH_FIELDS, ctx.cleanWords),
+        limit,
+        skip,
+      );
+    }
+  }
+
+  private async searchArtistGroupAtlas(
+    ctx: SearchView,
+    limit: number,
+    skip: number,
+    strict: boolean,
+  ): Promise<GroupPage<SearchArtistResult>> {
+    if (!this.artistModel) return { rows: [], total: 0 };
+    try {
+      const facet = await this.runSearchFacet(
+        this.artistModel,
+        ARTISTS_SEARCH_INDEX,
+        ARTIST_SEARCH_FIELDS,
+        ctx.cleanWords,
+        null,
+        false,
+        limit,
+        skip,
+      );
+      return {
+        rows: await this.toArtistResults(facet.rows as ArtistCacheDocument[]),
+        total: facet.total,
+      };
+    } catch (err) {
+      if (strict) throw err;
+      return this.searchArtistGroupRegex(
+        regexGroupFilter(ARTIST_SEARCH_FIELDS, ctx.cleanWords),
+        limit,
+        skip,
+      );
+    }
+  }
+
+  /**
+   * The regex fallback — the web's own search semantics (AUDIT.md
+   * §6; ZadidSalman/Kaisen `app/api/search/route.ts`), kept whole
+   * and renamed from the original `search` when Option B landed.
+   * The web's search is regex end to end — it self-labels
+   * `searchType: 'regex'` and issues no `$text` query anywhere.
+   * (The collection does carry a `theme_full_search` TEXT index,
+   * but the web code never uses it, and neither does this port.)
+   *
+   * Two stages, mirroring the web's songs search:
+   *
+   * Stage 1 — candidate narrowing: unless an OP/ED modifier was
+   * parsed out of the query, prefix-match the first clean word
+   * (`^word`, case-insensitive) over animeTitle/songTitle/
+   * artistName and collect up to 400 candidate ids.
+   *
+   * Stage 2 — full regex over the candidates: every clean word
+   * must appear (escaped, case-insensitive substring) in at least
+   * one of animeTitle/songTitle/artistName — `$and` across words,
+   * `$or` across fields — restricted to the stage-1 ids when
+   * stage 1 produced any. Results sort by totalWatches desc, then
+   * avgRating desc, then `_id` asc (Bug 6 tiebreaker).
+   *
+   * The groups use the web's ALL-view filters (every clean word a
+   * substring of one of the group's fields) with counts, paginated
+   * like the Atlas path; a group model the service was constructed
+   * without simply yields an empty group. OP/ED modifiers suppress
+   * the groups entirely, exactly as on the web.
+   */
+  private async searchRegex(ctx: SearchView): Promise<SearchResponse> {
+    const model = this.requireModel();
+    const { cleanWords, themeTypeFilter, themeSeqFilter, themeModifierUsed } =
+      ctx;
+    const inView = (g: SearchGroup) => ctx.view === 'all' || ctx.view === g;
+
+    let themesRows: ThemeSummary[] = [];
+    let themesTotal = 0;
+    let themesSkip = 0;
+    if (inView('themes')) {
+      const contains = (word: string) => new RegExp(escapeRegExp(word), 'i');
+      const wordConditions = cleanWords.map((word) => ({
+        $or: [
+          { animeTitle: contains(word) },
+          { songTitle: contains(word) },
+          { artistName: contains(word) },
+        ],
+      }));
+      // The filter is assembled dynamically, exactly as on the web.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let themeFilter: any =
+        wordConditions.length === 1
+          ? wordConditions[0]
+          : wordConditions.length > 1
+            ? { $and: wordConditions }
+            : {};
+      if (themeTypeFilter) themeFilter.type = themeTypeFilter;
+      if (themeSeqFilter !== null) themeFilter.sequence = themeSeqFilter;
+
+      // — Stage 1: prefix narrowing to candidate ids —
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let effectiveFilter: any = themeFilter;
+      if (!themeModifierUsed && cleanWords.length > 0) {
+        const prefix = new RegExp(`^${escapeRegExp(cleanWords[0])}`, 'i');
+        const candidates = (await model
+          .find({
+            $or: [
+              { animeTitle: prefix },
+              { songTitle: prefix },
+              { artistName: prefix },
+            ],
+          })
+          .select('_id')
+          .limit(SONG_CANDIDATE_LIMIT)
+          .lean()
+          .exec()) as Array<{ _id: unknown }>;
+        if (candidates.length > 0) {
+          effectiveFilter = {
+            $and: [
+              { _id: { $in: candidates.map((c) => c._id) } },
+              themeFilter,
+            ],
+          };
+        }
+      }
+
+      // — Stage 2: full regex over the (possibly narrowed) filter —
+      const limit = this.themesPageSize(ctx);
+      themesSkip = (ctx.page - 1) * limit;
+      const [docs, total] = await Promise.all([
+        model
+          .find(effectiveFilter)
+          .sort({ totalWatches: -1, avgRating: -1, _id: 1 })
+          .skip(themesSkip)
+          .limit(limit)
+          .lean()
+          .exec(),
+        model.countDocuments(effectiveFilter).exec(),
+      ]);
+      themesRows = (docs as ThemeDoc[]).map(toThemeSummary);
+      themesTotal = total;
+    }
+
+    const empty: GroupPage<never> = { rows: [], total: 0 };
+    let anime: GroupPage<SearchAnimeResult> = empty;
+    let artists: GroupPage<SearchArtistResult> = empty;
+    let users: GroupPage<NetworkUser> = empty;
+    if (!themeModifierUsed && cleanWords.length > 0) {
+      const size = this.groupPageSize(ctx);
+      const skip = (ctx.page - 1) * size;
+      if (inView('anime')) {
+        anime = await this.searchAnimeGroupRegex(
+          regexGroupFilter(ANIME_SEARCH_FIELDS, cleanWords),
+          size,
+          skip,
+        );
+      }
+      if (inView('artists')) {
+        artists = await this.searchArtistGroupRegex(
+          regexGroupFilter(ARTIST_SEARCH_FIELDS, cleanWords),
+          size,
+          skip,
+        );
+      }
+      if (inView('users')) {
+        users = await this.searchUserGroupRegex(cleanWords, size, skip);
+      }
+    }
+
+    return this.assembleSearch(
+      ctx,
+      'regex',
+      { rows: themesRows, total: themesTotal },
+      themesSkip,
+      anime,
+      artists,
+      users,
+    );
+  }
+
+  /**
+   * Builds the SearchResponse from the four group pages: the
+   * top-level total/hasMore mirror the web's `meta` position —
+   * the themes group for the 'all'/'themes' views, the served
+   * group for a single-group view — and `groups` carries every
+   * group's own meta (groups outside the view report total 0).
+   */
+  private assembleSearch(
+    ctx: SearchView,
+    searchType: 'atlas' | 'regex',
+    themes: GroupPage<ThemeSummary>,
+    themesSkip: number,
+    anime: GroupPage<SearchAnimeResult>,
+    artists: GroupPage<SearchArtistResult>,
+    users: GroupPage<NetworkUser>,
+  ): SearchResponse {
+    const meta = <T,>(page: GroupPage<T>, skip: number): SearchGroupMeta => ({
+      total: page.total,
+      hasMore: skip + page.rows.length < page.total,
+    });
+    const groupSkip = (ctx.page - 1) * this.groupPageSize(ctx);
+    const groups: SearchResponse['groups'] = {
+      themes: meta(themes, themesSkip),
+      anime: meta(anime, groupSkip),
+      artists: meta(artists, groupSkip),
+      users: meta(users, groupSkip),
+    };
+    const primary =
+      ctx.view === 'anime'
+        ? groups.anime
+        : ctx.view === 'artists'
+          ? groups.artists
+          : ctx.view === 'users'
+            ? groups.users
+            : groups.themes;
+    return {
+      query: ctx.query,
+      results: themes.rows,
+      anime: anime.rows,
+      artists: artists.rows,
+      users: users.rows,
+      searchType,
+      group: ctx.view,
+      groups,
+      page: ctx.page,
+      total: primary.total,
+      hasMore: primary.hasMore,
+      themeTypeFilter: ctx.themeTypeFilter,
+      themeSeqFilter: ctx.themeSeqFilter,
+    };
+  }
+
+  private async searchAnimeGroupRegex(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    filter: any,
+    limit: number,
+    skip: number,
+  ): Promise<GroupPage<SearchAnimeResult>> {
+    if (!this.animeModel) return { rows: [], total: 0 };
     const [docs, total] = await Promise.all([
-      model
-        .find(effectiveFilter)
-        // Bug 6 (multi-user matrix 2026-11-09): the web's two-key
-        // sort leaves hundreds of rows tied at 0 watches / 0
-        // rating, and MongoDB's order among ties is unspecified —
-        // skip/limit pages overlapped (page 2 repeated 10–12 of
-        // page 1's 20). `_id: 1` is a unique final tiebreaker, so
-        // pages partition cleanly; the primary ordering is
-        // unchanged. (The web has the same flaw; this is the one
-        // deliberate deviation, in the direction of correctness.)
-        .sort({ totalWatches: -1, avgRating: -1, _id: 1 })
+      this.animeModel
+        .find(filter)
+        // `_id` asc partitions skip/limit pages cleanly (the
+        // groups historically served in natural order; with real
+        // pagination an unstable order would overlap pages — the
+        // Bug 6 rule again).
+        .sort({ _id: 1 })
         .skip(skip)
         .limit(limit)
         .lean()
         .exec(),
-      model.countDocuments(effectiveFilter).exec(),
+      this.animeModel.countDocuments(filter).exec(),
     ]);
-
-    const results = (docs as ThemeDoc[]).map(toThemeSummary);
-    // The anime/artist/user groups are the web's ALL view: page 1 only.
-    const groups =
-      safePage === 1
-        ? await this.searchGroups(cleanWords, themeModifierUsed)
-        : { anime: [], artists: [], users: [] };
-    return {
-      query,
-      results,
-      anime: groups.anime,
-      artists: groups.artists,
-      users: groups.users,
-      searchType: 'regex',
-      page: safePage,
-      total,
-      hasMore: skip + results.length < total,
-      themeTypeFilter,
-      themeSeqFilter,
-    };
+    return { rows: await this.toAnimeResults(docs as AnimeDoc[]), total };
   }
 
   /**
-   * The anime + artist + user groups of GET /search — the web's
-   * ALL-view filters (app/api/search/route.ts): every clean word
-   * must appear (escaped, case-insensitive substring) in at least
-   * one of the group's fields — anime: titleRomaji / titleEnglish /
-   * synonyms; artists: name / aliases; users: username /
-   * displayName (public accounts only, the people search's own
-   * filter — see searchUserGroup) — capped at the web's ALL-view 5
-   * per group, in the collection's natural order (the web sorts
-   * none of the groups). The web skips the groups when an OP/ED
-   * modifier was parsed out of the query, and so does this port.
-   *
-   * Theme counts come from the theme collection itself (one light
-   * projection find per group, counted in memory — the groups cap
-   * at 5 and a catalogue anime/artist carries at most dozens of
-   * themes): an anime row's count is exactly what its detail page
-   * lists, and an artist's total is max(cache counter, counted) —
-   * the cache counter drifts (see getArtistDetail), so a search row
-   * never reports fewer themes than the artist page would.
-   *
-   * A model the service was constructed without simply yields an
-   * empty group — the themes slice never depends on them.
+   * Anime docs → search rows: theme counts come from the theme
+   * collection itself (one light projection find — a catalogue
+   * anime carries at most dozens of themes), so a row's count is
+   * exactly what its detail page lists. Rows navigate by AniList
+   * id — a document without one cannot be opened, so it is not a
+   * result (it still counts toward the group's total: the matcher
+   * matched it).
    */
-  private async searchGroups(
-    cleanWords: string[],
-    themeModifierUsed: boolean,
-  ): Promise<{
-    anime: SearchAnimeResult[];
-    artists: SearchArtistResult[];
-    users: NetworkUser[];
-  }> {
-    if (themeModifierUsed || cleanWords.length === 0) {
-      return { anime: [], artists: [], users: [] };
-    }
-    const contains = (word: string) => new RegExp(escapeRegExp(word), 'i');
-    // The filters are assembled dynamically, exactly as on the web.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const groupFilter = (fields: string[]): any => {
-      const conditions = cleanWords.map((word) => ({
-        $or: fields.map((field) => ({ [field]: contains(word) })),
-      }));
-      return conditions.length === 1 ? conditions[0] : { $and: conditions };
-    };
-
-    const [anime, artists, users] = await Promise.all([
-      this.searchAnimeGroup(
-        groupFilter(['titleRomaji', 'titleEnglish', 'synonyms']),
-      ),
-      this.searchArtistGroup(groupFilter(['name', 'aliases'])),
-      this.searchUserGroup(cleanWords),
-    ]);
-    return { anime, artists, users };
-  }
-
-  private async searchAnimeGroup(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    filter: any,
+  private async toAnimeResults(
+    docs: AnimeDoc[],
   ): Promise<SearchAnimeResult[]> {
-    if (!this.animeModel) return [];
-    const docs = (await this.animeModel
-      .find(filter)
-      .limit(SEARCH_GROUP_LIMIT)
-      .lean()
-      .exec()) as unknown as AnimeDoc[];
-    // Rows navigate by AniList id — a document without one cannot
-    // be opened, so it is not a result.
     const openable = docs.filter((d) => d.anilistId !== null);
     if (openable.length === 0) return [];
 
@@ -544,16 +974,38 @@ export class ThemesService {
     }));
   }
 
-  private async searchArtistGroup(
+  private async searchArtistGroupRegex(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     filter: any,
+    limit: number,
+    skip: number,
+  ): Promise<GroupPage<SearchArtistResult>> {
+    if (!this.artistModel) return { rows: [], total: 0 };
+    const [docs, total] = await Promise.all([
+      this.artistModel
+        .find(filter)
+        .sort({ _id: 1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+        .exec(),
+      this.artistModel.countDocuments(filter).exec(),
+    ]);
+    return {
+      rows: await this.toArtistResults(docs as ArtistCacheDocument[]),
+      total,
+    };
+  }
+
+  /**
+   * Artist docs → search rows: a row's total is max(cache counter,
+   * counted) — the cache counter drifts (see getArtistDetail), so
+   * a search row never reports fewer themes than the artist page
+   * would.
+   */
+  private async toArtistResults(
+    docs: ArtistCacheDocument[],
   ): Promise<SearchArtistResult[]> {
-    if (!this.artistModel) return [];
-    const docs = (await this.artistModel
-      .find(filter)
-      .limit(SEARCH_GROUP_LIMIT)
-      .lean()
-      .exec()) as unknown as ArtistCacheDocument[];
     if (docs.length === 0) return [];
 
     const counts = new Map<string, number>();
@@ -584,20 +1036,22 @@ export class ThemesService {
    * (SocialService.searchUsers, the USERS branch of the web's
    * /api/search): public accounts only (isPublic), every clean
    * word a case-insensitive substring of the username or the
-   * display name. Two group-level differences from the dedicated
-   * endpoint, both following the other ALL-view groups: the cap
-   * is the groups' 5 (not the endpoint's 20-per-page), and there
-   * is no 2-character minimum — /search answers one-character
-   * queries for every other group, so the group simply matches
-   * what it matches. The projection is the people search's
-   * NetworkUser, field for field — public profile fields only;
-   * the stored email, password hash and AniList token never
-   * leave the document. Natural order, like the other groups.
+   * display name. There is no 2-character minimum — /search
+   * answers one-character queries for every other group, so the
+   * group simply matches what it matches. Option B extended the
+   * group with page/limit pagination (the preview caps it at the
+   * groups' 5); the matching itself is unchanged and never moves
+   * to Atlas. The projection is the people search's NetworkUser,
+   * field for field — public profile fields only; the stored
+   * email, password hash and AniList token never leave the
+   * document.
    */
-  private async searchUserGroup(
+  private async searchUserGroupRegex(
     cleanWords: string[],
-  ): Promise<NetworkUser[]> {
-    if (!this.userModel) return [];
+    limit: number,
+    skip: number,
+  ): Promise<GroupPage<NetworkUser>> {
+    if (!this.userModel) return { rows: [], total: 0 };
     const contains = (word: string) => new RegExp(escapeRegExp(word), 'i');
     const conditions = cleanWords.map((word) => ({
       $or: [{ username: contains(word) }, { displayName: contains(word) }],
@@ -606,16 +1060,24 @@ export class ThemesService {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const filter: any = {
       isPublic: true,
-      ...(conditions.length === 1
-        ? conditions[0]
-        : { $and: conditions }),
+      ...(conditions.length === 1 ? conditions[0] : { $and: conditions }),
     };
-    const docs = (await this.userModel
-      .find(filter)
-      .limit(SEARCH_GROUP_LIMIT)
-      .lean()
-      .exec()) as unknown as SearchUserDoc[];
-    return docs.map((d) => this.toSearchUser(d));
+    const [docs, total] = await Promise.all([
+      this.userModel
+        .find(filter)
+        .sort({ _id: 1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+        .exec(),
+      this.userModel.countDocuments(filter).exec(),
+    ]);
+    return {
+      rows: (docs as unknown as SearchUserDoc[]).map((d) =>
+        this.toSearchUser(d),
+      ),
+      total,
+    };
   }
 
   /** The people search's projection (SocialService.toNetworkUser). */
@@ -628,6 +1090,7 @@ export class ThemesService {
       bio: doc.bio ?? '',
     };
   }
+
 
   /**
    * GET /themes/:slug/similar — the web's similar-themes read

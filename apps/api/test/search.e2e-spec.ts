@@ -134,6 +134,8 @@ describe('GET /search — users group (e2e)', () => {
   const userModel = {
     find: (filter: Record<string, unknown>) =>
       chain(userDocs.filter((u) => matches(u, filter))),
+    countDocuments: (filter: Record<string, unknown>) =>
+      queryOf(userDocs.filter((u) => matches(u, filter)).length),
   };
 
   beforeAll(async () => {
@@ -144,11 +146,17 @@ describe('GET /search — users group (e2e)', () => {
         { provide: getModelToken(ThemeCache.name), useValue: themeModel },
         {
           provide: getModelToken(AnimeCache.name),
-          useValue: { find: () => queryOf([]) },
+          useValue: {
+            find: () => queryOf([]),
+            countDocuments: () => queryOf(0),
+          },
         },
         {
           provide: getModelToken(ArtistCache.name),
-          useValue: { find: () => queryOf([]) },
+          useValue: {
+            find: () => queryOf([]),
+            countDocuments: () => queryOf(0),
+          },
         },
         { provide: getModelToken(User.name), useValue: userModel },
       ],
@@ -210,5 +218,53 @@ describe('GET /search — users group (e2e)', () => {
     expect(modified.body.users).toEqual([]);
     const page2 = await http.get('/search?q=ali&page=2').expect(200);
     expect(page2.body.users).toEqual([]);
+  });
+
+  it('the preview reports per-group totals + hasMore (regex fallback in the sandbox)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/search?q=fan')
+      .expect(200);
+    // The fake models carry no Atlas aggregate: the search must
+    // degrade to the regex path and say so.
+    expect(res.body.searchType).toBe('regex');
+    expect(res.body.group).toBe('all');
+    expect(res.body.groups.users).toEqual({ total: 7, hasMore: true });
+    expect(res.body.groups.themes).toEqual({ total: 0, hasMore: false });
+  });
+
+  it('the users full view paginates at the requested limit without overlap', async () => {
+    const http = request(app.getHttpServer());
+    const p1 = await http
+      .get('/search?q=fan&group=users&limit=3')
+      .expect(200);
+    expect(p1.body.group).toBe('users');
+    expect(p1.body.total).toBe(7);
+    expect(p1.body.hasMore).toBe(true);
+    expect(
+      p1.body.users.map((u: { username: string }) => u.username),
+    ).toEqual(['fan1', 'fan2', 'fan3']);
+
+    const p2 = await http
+      .get('/search?q=fan&group=users&limit=3&page=2')
+      .expect(200);
+    expect(
+      p2.body.users.map((u: { username: string }) => u.username),
+    ).toEqual(['fan4', 'fan5', 'fan6']);
+    expect(p2.body.hasMore).toBe(true);
+
+    const p3 = await http
+      .get('/search?q=fan&group=users&limit=3&page=3')
+      .expect(200);
+    expect(
+      p3.body.users.map((u: { username: string }) => u.username),
+    ).toEqual(['fan7']);
+    expect(p3.body.hasMore).toBe(false);
+    // The full view serves only its own group.
+    expect(p3.body.results).toEqual([]);
+    expect(p3.body.anime).toEqual([]);
+    const raw = JSON.stringify(p3.body);
+    expect(raw).not.toContain('someone@example.com');
+    expect(raw).not.toContain('never-served');
+    expect(raw).not.toContain('anilist-secret-token');
   });
 });

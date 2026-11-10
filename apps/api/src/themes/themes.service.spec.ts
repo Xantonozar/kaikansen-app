@@ -548,7 +548,8 @@ describe('ThemesService.search', () => {
       });
     const service = serviceWith(model);
 
-    const res = await service.search('test');
+    // The themes full view keeps the web's SONGS mechanics (20/page).
+    const res = await service.search('test', 1, 'themes');
 
     expect(find).toHaveBeenCalledTimes(2);
 
@@ -662,8 +663,8 @@ describe('ThemesService.search', () => {
     const countDocuments = jest.fn(() => queryOf(docs.length));
     const service = serviceWith({ find, countDocuments });
 
-    const page1 = await service.search('the', 1);
-    const page2 = await service.search('the', 2);
+    const page1 = await service.search('the', 1, 'themes');
+    const page2 = await service.search('the', 2, 'themes');
 
     expect(page1.results).toHaveLength(20);
     expect(page2.results).toHaveLength(20);
@@ -782,6 +783,13 @@ describe('ThemesService.search', () => {
       artists: [],
       users: [],
       searchType: 'regex',
+      group: 'all',
+      groups: {
+        themes: { total: 0, hasMore: false },
+        anime: { total: 0, hasMore: false },
+        artists: { total: 0, hasMore: false },
+        users: { total: 0, hasMore: false },
+      },
       page: 1,
       total: 0,
       hasMore: false,
@@ -828,6 +836,9 @@ function groupedSearchModels(opts: {
   animeThemeDocs?: unknown[];
   artistThemeDocs?: unknown[];
   userDocs?: unknown[];
+  animeTotal?: number;
+  artistTotal?: number;
+  userTotal?: number;
 }) {
   const themeQueries: ReturnType<typeof queryOf>[] = [];
   const themeFind = jest.fn((filter: Record<string, unknown>) => {
@@ -871,9 +882,24 @@ function groupedSearchModels(opts: {
       find: themeFind,
       countDocuments: jest.fn(() => queryOf(opts.total ?? 0)),
     } as unknown as Model<ThemeCacheDocument>,
-    { find: animeFind } as unknown as Model<AnimeCacheDocument>,
-    { find: artistFind } as unknown as Model<ArtistCacheDocument>,
-    { find: userFind } as unknown as Model<UserDocument>,
+    {
+      find: animeFind,
+      countDocuments: jest.fn(() =>
+        queryOf(opts.animeTotal ?? opts.animeDocs?.length ?? 0),
+      ),
+    } as unknown as Model<AnimeCacheDocument>,
+    {
+      find: artistFind,
+      countDocuments: jest.fn(() =>
+        queryOf(opts.artistTotal ?? opts.artistDocs?.length ?? 0),
+      ),
+    } as unknown as Model<ArtistCacheDocument>,
+    {
+      find: userFind,
+      countDocuments: jest.fn(() =>
+        queryOf(opts.userTotal ?? opts.userDocs?.length ?? 0),
+      ),
+    } as unknown as Model<UserDocument>,
   );
   return {
     service,
@@ -1127,6 +1153,465 @@ describe('ThemesService.search — anime/artist/user groups', () => {
     expect(res.anime).toEqual([]);
     expect(res.artists).toEqual([]);
     expect(res.users).toEqual([]);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Option B — MongoDB Search (Atlas) path, fallback, group views       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Aggregate stand-in that behaves like Atlas + the facet stage:
+ * it reads the pipeline's $facet skip/limit and slices a fixed
+ * dataset, reporting the dataset size (or an override) as the
+ * facet total.
+ */
+function facetApplyingAggregate(
+  docs: Record<string, unknown>[],
+  totalOverride?: number,
+) {
+  return jest.fn(
+    async (stages: Record<string, unknown>[]) => {
+      const facetStage = stages.find((s) => '$facet' in s) as {
+        $facet: { results: Record<string, number>[] };
+      };
+      const results = facetStage.$facet.results;
+      const skip = results.find((s) => '$skip' in s)?.$skip ?? 0;
+      const limit = results.find((s) => '$limit' in s)?.$limit ?? docs.length;
+      return [
+        {
+          results: docs.slice(skip, skip + limit),
+          total: [{ count: totalOverride ?? docs.length }],
+        },
+      ];
+    },
+  );
+}
+
+/** The $search stage of the first aggregate call, typed for assertions. */
+function searchStageOf(aggregate: jest.Mock) {
+  const stages = aggregate.mock.calls[0][0] as Record<string, unknown>[];
+  return stages[0].$search as {
+    index: string;
+    compound: {
+      must: {
+        compound: {
+          should: { autocomplete: { query: string; path: string } }[];
+          minimumShouldMatch: number;
+        };
+      }[];
+    };
+  };
+}
+
+function facetOf(aggregate: jest.Mock, call = 0) {
+  const stages = aggregate.mock.calls[call][0] as Record<string, unknown>[];
+  const facetStage = stages.find((s) => '$facet' in s) as {
+    $facet: { results: Record<string, number>[]; total: unknown[] };
+  };
+  return facetStage.$facet;
+}
+
+describe('ThemesService.search — Option B (Atlas Search)', () => {
+  it('builds the $search pipeline: nGram-autocomplete index, per-word compound, score sort, facet page', async () => {
+    const aggregate = jest.fn(async () => [
+      {
+        results: [makeDoc({ slug: 'atlas-hit' })],
+        total: [{ count: 7 }],
+      },
+    ]);
+    const find = jest.fn(() => queryOf([]));
+    const service = serviceWith({
+      aggregate,
+      find,
+      countDocuments: jest.fn(() => queryOf(0)),
+    });
+
+    const res = await service.search('naruto');
+
+    expect(aggregate).toHaveBeenCalledTimes(1);
+    const search = searchStageOf(aggregate);
+    expect(search.index).toBe('kaikansen_themes_search');
+    // One word → one compound; the word is an autocomplete query
+    // on each of the three theme fields, any of which may match.
+    expect(search.compound.must).toHaveLength(1);
+    const word = search.compound.must[0].compound;
+    expect(word.minimumShouldMatch).toBe(1);
+    expect(word.should.map((s) => s.autocomplete.path)).toEqual([
+      'animeTitle',
+      'songTitle',
+      'artistName',
+    ]);
+    expect(word.should.map((s) => s.autocomplete.query)).toEqual([
+      'naruto',
+      'naruto',
+      'naruto',
+    ]);
+    // Relevance first, the popularity tiebreaks, then `_id`.
+    const stages = (aggregate.mock.calls[0] as unknown[])[0] as Record<
+      string,
+      unknown
+    >[];
+    const sortStage = stages.find((s) => '$sort' in s) as {
+      $sort: Record<string, number>;
+    };
+    expect(sortStage.$sort).toEqual({
+      _searchScore: -1,
+      totalWatches: -1,
+      avgRating: -1,
+      _id: 1,
+    });
+    // The preview asks the facet for the top 5.
+    expect(facetOf(aggregate).results).toEqual([{ $skip: 0 }, { $limit: 5 }]);
+
+    expect(res.searchType).toBe('atlas');
+    expect(res.group).toBe('all');
+    expect(res.results.map((r) => r.slug)).toEqual(['atlas-hit']);
+    expect(res.total).toBe(7);
+    expect(res.groups.themes).toEqual({ total: 7, hasMore: true });
+    // Atlas answered — the regex stages never ran.
+    expect(find).not.toHaveBeenCalled();
+  });
+
+  it('ANDs multiple words (one compound per word) and pages the themes view at the SONGS size', async () => {
+    const aggregate = facetApplyingAggregate([
+      makeDoc({ slug: 'two-word-hit' }),
+    ]);
+    const service = serviceWith({
+      aggregate,
+      find: jest.fn(() => queryOf([])),
+      countDocuments: jest.fn(() => queryOf(0)),
+    });
+
+    const res = await service.search('naruto shippuden', 1, 'themes');
+
+    const search = searchStageOf(aggregate);
+    expect(search.compound.must).toHaveLength(2);
+    expect(
+      search.compound.must[1].compound.should[0].autocomplete.query,
+    ).toBe('shippuden');
+    expect(facetOf(aggregate).results).toEqual([
+      { $skip: 0 },
+      { $limit: 20 },
+    ]);
+    expect(res.results.map((r) => r.slug)).toEqual(['two-word-hit']);
+  });
+
+  it('an OP/ED modifier rides the pipeline as $match and suppresses the groups', async () => {
+    const aggregate = facetApplyingAggregate([
+      makeDoc({ slug: 'op9-atlas-hit' }),
+    ]);
+    const animeAggregate = jest.fn(async () => []);
+    const userFind = jest.fn(() => queryOf([]));
+    const service = new ThemesService(
+      {
+        aggregate,
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ThemeCacheDocument>,
+      {
+        aggregate: animeAggregate,
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<AnimeCacheDocument>,
+      undefined,
+      {
+        find: userFind,
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<UserDocument>,
+    );
+
+    const res = await service.search('op 9 naruto', 1, 'themes');
+
+    const stages = (aggregate.mock.calls[0] as unknown[])[0] as Record<
+      string,
+      unknown
+    >[];
+    const matchStage = stages.find((s) => '$match' in s) as {
+      $match: Record<string, unknown>;
+    };
+    expect(matchStage.$match).toEqual({ type: 'OP', sequence: 9 });
+    expect(animeAggregate).not.toHaveBeenCalled();
+    expect(userFind).not.toHaveBeenCalled();
+    expect(res.anime).toEqual([]);
+    expect(res.users).toEqual([]);
+    expect(res.searchType).toBe('atlas');
+    expect(res.results.map((r) => r.slug)).toEqual(['op9-atlas-hit']);
+  });
+
+  it('falls back to the regex path, labelled regex, when $search fails (index not Active yet)', async () => {
+    const { model, find } = searchModel({
+      candidates: [],
+      results: [makeDoc({ slug: 'regex-hit' })],
+      total: 1,
+    });
+    (model as Record<string, unknown>).aggregate = jest.fn(async () => {
+      throw new Error('kaikansen_themes_search: index not found');
+    });
+    const service = serviceWith(model);
+
+    const res = await service.search('test');
+
+    expect(res.searchType).toBe('regex');
+    expect(res.results.map((r) => r.slug)).toEqual(['regex-hit']);
+    // The regex stages ran (stage 1 + stage 2).
+    expect(find).toHaveBeenCalledTimes(2);
+  });
+
+  it('preview carries every group’s total + hasMore from its own matcher', async () => {
+    const service = new ThemesService(
+      {
+        aggregate: facetApplyingAggregate(
+          Array.from({ length: 5 }, (_, i) =>
+            makeDoc({ slug: `preview-theme-${i}` }),
+          ),
+          7,
+        ),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ThemeCacheDocument>,
+      {
+        aggregate: facetApplyingAggregate(
+          [makeAnimeDoc({ anilistId: 42 }), makeAnimeDoc({ _id: 'a2', anilistId: 77 })],
+          9,
+        ),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<AnimeCacheDocument>,
+      {
+        aggregate: facetApplyingAggregate(
+          [
+            {
+              slug: 'test_artist',
+              name: 'Test Artist',
+              aliases: [],
+              imageUrl: null,
+              totalThemes: 1,
+            },
+          ],
+          1,
+        ),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ArtistCacheDocument>,
+      {
+        find: jest.fn(() => queryOf([makeUserDoc({})])),
+        countDocuments: jest.fn(() => queryOf(12)),
+      } as unknown as Model<UserDocument>,
+    );
+
+    const res = await service.search('test');
+
+    expect(res.searchType).toBe('atlas');
+    expect(res.groups).toEqual({
+      themes: { total: 7, hasMore: true }, // 5 served of 7
+      anime: { total: 9, hasMore: true }, // 2 served of 9
+      artists: { total: 1, hasMore: false }, // the only match served
+      users: { total: 12, hasMore: true }, // 1 served of 12 (regex group)
+    });
+    // Top-level meta mirrors the themes group in the preview.
+    expect(res.total).toBe(7);
+    expect(res.hasMore).toBe(true);
+    expect(res.anime.map((a) => a.anilistId)).toEqual([42, 77]);
+    expect(res.artists.map((a) => a.slug)).toEqual(['test_artist']);
+    expect(res.users.map((u) => u.username)).toEqual(['tester']);
+  });
+
+  it('a catalogue-group view fails over to regex whole when its own index is missing', async () => {
+    const animeFind = jest.fn(() =>
+      queryOf([makeAnimeDoc({ anilistId: 42 })]),
+    );
+    const service = new ThemesService(
+      {
+        aggregate: facetApplyingAggregate([makeDoc({})], 1),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ThemeCacheDocument>,
+      {
+        aggregate: jest.fn(async () => {
+          throw new Error('kaikansen_anime_search: index not found');
+        }),
+        find: animeFind,
+        countDocuments: jest.fn(() => queryOf(1)),
+      } as unknown as Model<AnimeCacheDocument>,
+      undefined,
+      undefined,
+    );
+
+    const res = await service.search('test', 1, 'anime');
+
+    expect(res.searchType).toBe('regex');
+    expect(res.group).toBe('anime');
+    expect(res.total).toBe(1);
+    expect(res.anime.map((a) => a.anilistId)).toEqual([42]);
+    expect(animeFind).toHaveBeenCalled();
+  });
+
+  it('full themes view at limit 15 paginates without overlap (Atlas)', async () => {
+    const docs = Array.from({ length: 40 }, (_, i) =>
+      makeDoc({
+        _id: `pg-${String(i).padStart(2, '0')}`,
+        slug: `pg-theme-${i}`,
+      }),
+    );
+    const aggregate = facetApplyingAggregate(docs);
+    const service = serviceWith({
+      aggregate,
+      find: jest.fn(() => queryOf([])),
+      countDocuments: jest.fn(() => queryOf(0)),
+    });
+
+    const p1 = await service.search('test', 1, 'themes', 15);
+    const p2 = await service.search('test', 2, 'themes', 15);
+    const p3 = await service.search('test', 3, 'themes', 15);
+
+    expect(p1.results).toHaveLength(15);
+    expect(p2.results).toHaveLength(15);
+    expect(p3.results).toHaveLength(10);
+    const slugs = [p1, p2, p3].flatMap((p) => p.results.map((r) => r.slug));
+    expect(new Set(slugs).size).toBe(40);
+    expect(p1.hasMore).toBe(true);
+    expect(p2.hasMore).toBe(true);
+    expect(p3.hasMore).toBe(false);
+    expect(p3.total).toBe(40);
+    expect(facetOf(aggregate, 1).results).toEqual([
+      { $skip: 15 },
+      { $limit: 15 },
+    ]);
+  });
+
+  it('full themes view at limit 15 paginates without overlap (regex fallback)', async () => {
+    const docs = Array.from({ length: 40 }, (_, i) =>
+      makeDoc({
+        _id: `rg-${String(i).padStart(2, '0')}`,
+        slug: `rg-theme-${i}`,
+        animeTitle: 'The Regex Anime',
+      }),
+    );
+    // Stage 1 narrows to nothing (unrestricted stage 2); stage 2
+    // applies the requested sort/skip/limit like Mongo would.
+    let findCalls = 0;
+    const find = jest.fn(() => {
+      findCalls += 1;
+      if (findCalls % 2 === 1) return queryOf([]);
+      let result = [...docs] as Record<string, unknown>[];
+      const q: Record<string, unknown> = {};
+      q.sort = (spec: Record<string, number>) => {
+        const keys = Object.entries(spec);
+        result.sort((a, b) => {
+          for (const [key, dir] of keys) {
+            const av = a[key] as never;
+            const bv = b[key] as never;
+            if (av < bv) return -dir;
+            if (av > bv) return dir;
+          }
+          return 0;
+        });
+        return q;
+      };
+      q.skip = (n: number) => {
+        result = result.slice(n);
+        return q;
+      };
+      q.limit = (n: number) => {
+        result = result.slice(0, n);
+        return q;
+      };
+      q.select = () => q;
+      q.lean = () => q;
+      q.exec = async () => result;
+      return q;
+    });
+    const service = serviceWith({
+      find,
+      countDocuments: jest.fn(() => queryOf(docs.length)),
+    });
+
+    const p1 = await service.search('the', 1, 'themes', 15);
+    const p2 = await service.search('the', 2, 'themes', 15);
+    const p3 = await service.search('the', 3, 'themes', 15);
+
+    expect(p1.searchType).toBe('regex');
+    expect(p1.results).toHaveLength(15);
+    expect(p2.results).toHaveLength(15);
+    expect(p3.results).toHaveLength(10);
+    const slugs = [p1, p2, p3].flatMap((p) => p.results.map((r) => r.slug));
+    expect(new Set(slugs).size).toBe(40);
+    expect(p3.hasMore).toBe(false);
+  });
+
+  it('the users view paginates at the requested limit, stays regex, and leaks nothing private', async () => {
+    const userDocs = Array.from({ length: 20 }, (_, i) =>
+      makeUserDoc({
+        _id: `507f1f77bcf86cd79943${String(100 + i)}`,
+        username: `user${String(i + 1).padStart(2, '0')}`,
+        displayName: `User Number ${i + 1}`,
+      }),
+    );
+    // A chain that applies sort/skip/limit like Mongo.
+    const userFind = jest.fn(() => {
+      let result = [...userDocs] as Record<string, unknown>[];
+      const q: Record<string, unknown> = {};
+      q.sort = (spec: Record<string, number>) => {
+        const [key, dir] = Object.entries(spec)[0];
+        result.sort((a, b) => {
+          const av = String(a[key]);
+          const bv = String(b[key]);
+          return av < bv ? -dir : av > bv ? dir : 0;
+        });
+        return q;
+      };
+      q.skip = (n: number) => {
+        result = result.slice(n);
+        return q;
+      };
+      q.limit = (n: number) => {
+        result = result.slice(0, n);
+        return q;
+      };
+      q.select = () => q;
+      q.lean = () => q;
+      q.exec = async () => result;
+      return q;
+    });
+    const themeAggregate = jest.fn(async () => [
+      { results: [], total: [{ count: 0 }] },
+    ]);
+    const themeFind = jest.fn(() => queryOf([]));
+    const service = new ThemesService(
+      {
+        aggregate: themeAggregate,
+        find: themeFind,
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ThemeCacheDocument>,
+      undefined,
+      undefined,
+      {
+        find: userFind,
+        countDocuments: jest.fn(() => queryOf(userDocs.length)),
+      } as unknown as Model<UserDocument>,
+    );
+
+    const p1 = await service.search('user', 1, 'users', 15);
+    const p2 = await service.search('user', 2, 'users', 15);
+
+    // The users view never touches Atlas and never serves themes.
+    expect(themeAggregate).not.toHaveBeenCalled();
+    expect(themeFind).not.toHaveBeenCalled();
+    expect(p1.searchType).toBe('regex');
+    expect(p1.group).toBe('users');
+    expect(p1.results).toEqual([]);
+    expect(p1.total).toBe(20);
+    expect(p1.users).toHaveLength(15);
+    expect(p1.hasMore).toBe(true);
+    expect(p2.users).toHaveLength(5);
+    expect(p2.hasMore).toBe(false);
+    const names = [...p1.users, ...p2.users].map((u) => u.username);
+    expect(new Set(names).size).toBe(20);
+    const raw = JSON.stringify([p1.users, p2.users]);
+    expect(raw).not.toContain('tester@example.com');
+    expect(raw).not.toContain('never-served');
+    expect(raw).not.toContain('anilist-secret-token');
   });
 });
 

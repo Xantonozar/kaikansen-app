@@ -169,46 +169,94 @@ export interface SearchArtistResult {
 }
 
 /**
+ * The views GET /search can serve (owner's Option B spec,
+ * 2026-11-10): 'all' is the preview — the top 5 of every group
+ * with per-group totals; each other value is that group's full
+ * view, paginated at the requested `limit` (the app sends 15).
+ * An unrecognised `group` value falls back to 'all', and 'all'
+ * past page 1 continues as the 'themes' full view (the legacy
+ * SONGS-view paging older clients use).
+ */
+export type SearchGroup = 'all' | 'themes' | 'anime' | 'artists' | 'users';
+
+/** One result group's pagination meta in a SearchResponse. */
+export interface SearchGroupMeta {
+  /** Total matches in this group across all pages. */
+  total: number;
+  /** True when another page of this group follows. */
+  hasMore: boolean;
+}
+
+/**
  * Response body of GET /search — the web app's search envelope
- * (ZadidSalman/Kaisen `app/api/search/route.ts`): the web returns
- * grouped artists/anime alongside songs; `results` carries the
- * songs group with its SONGS-view pagination, `anime` and
- * `artists` carry the ALL-view groups (web cap: 5 each), and the
- * remaining fields mirror the web's `meta` object. The groups are
- * served on page 1 only and stay empty when an OP/ED modifier was
- * parsed out of the query — the web skips them then too.
+ * (ZadidSalman/Kaisen `app/api/search/route.ts`), extended by the
+ * Option B spec (2026-11-10) with the `group`/`limit` views: the
+ * web returns grouped artists/anime alongside songs; `results`
+ * carries the songs group, `anime` and `artists` carry the
+ * ALL-view groups (web cap: 5 each in the preview), and the
+ * remaining fields mirror the web's `meta` object. In the 'all'
+ * preview every group is capped at 5 and the groups stay empty
+ * when an OP/ED modifier was parsed out of the query — the web
+ * skips them then too. In a single-group full view only that
+ * group's array is populated and its meta is the one computed;
+ * the other groups' metas report total 0.
  *
  * The `users` group is the one deliberate addition over the port's
  * first cut (which left people search at /social/users/search
  * only): owner order 2026-11-10 — the app's search shows users as
  * a result group, as the web's own search does. It follows the
- * other groups' rules (page 1 only, cap 5, empty under an OP/ED
+ * other groups' rules (preview cap 5, empty under an OP/ED
  * modifier) and carries the people search's own projection
  * (NetworkUser — public profile fields only, public accounts
  * only); the dedicated endpoint stays for paginated people search.
  */
 export interface SearchResponse {
   query: string;
-  /** This page of theme results (web order: totalWatches desc, avgRating desc). */
+  /**
+   * This page of theme results. Atlas order when searchType is
+   * 'atlas' (relevance, then totalWatches desc, avgRating desc);
+   * the web's order (totalWatches desc, avgRating desc) on the
+   * regex fallback.
+   */
   results: ThemeSummary[];
-  /** Anime group (page 1 only; empty when an OP/ED modifier is used). */
+  /** Anime group (preview-capped; empty when an OP/ED modifier is used). */
   anime: SearchAnimeResult[];
-  /** Artist group (page 1 only; empty when an OP/ED modifier is used). */
+  /** Artist group (preview-capped; empty when an OP/ED modifier is used). */
   artists: SearchArtistResult[];
   /**
-   * User group (page 1 only; empty when an OP/ED modifier is used) —
-   * public accounts whose username or display name contains every
-   * query word (the /social/users/search matching), projected as
-   * NetworkUser. Cap 5, like the other groups.
+   * User group (preview-capped; empty when an OP/ED modifier is
+   * used) — public accounts whose username or display name
+   * contains every query word (the /social/users/search matching),
+   * projected as NetworkUser.
    */
   users: NetworkUser[];
-  /** The web search is regex-only end to end (AUDIT.md §6) — always 'regex'. */
-  searchType: 'regex';
+  /**
+   * Which matcher produced the served view: 'atlas' when MongoDB
+   * Search answered (the themes matcher for the 'all'/'themes'
+   * views, the group's own matcher for a catalogue-group view),
+   * 'regex' on the web-parity fallback — which also serves the
+   * users group (its matching is unchanged) and any request whose
+   * Atlas call failed or whose indexes are not Active yet.
+   */
+  searchType: 'atlas' | 'regex';
+  /** The view this response serves ('all' past page 1 reports 'themes'). */
+  group: SearchGroup;
+  /** Per-group totals + hasMore for the four result groups. */
+  groups: {
+    themes: SearchGroupMeta;
+    anime: SearchGroupMeta;
+    artists: SearchGroupMeta;
+    users: SearchGroupMeta;
+  };
   /** 1-based page served. */
   page: number;
-  /** Total matches across all pages. */
+  /**
+   * Total matches across all pages — of the themes group in the
+   * 'all'/'themes' views, of the served group in a single-group
+   * view (the web's `meta` position).
+   */
   total: number;
-  /** True when another page follows this one. */
+  /** True when another page follows this one (same scope as `total`). */
   hasMore: boolean;
   /** OP/ED filter parsed out of the query tokens ("op", "ed12", "op 9"), when present. */
   themeTypeFilter: ThemeType | null;
