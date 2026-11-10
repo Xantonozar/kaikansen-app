@@ -22,6 +22,7 @@ import {
   fetchMe,
   linkAnilistAccount,
   loginAccount,
+  logoutSession,
   refreshTokens,
   registerAccount,
 } from './authApi';
@@ -335,6 +336,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
+    // Best-effort server-side logout (audit S1): revoke the
+    // refresh sessions on the API so the stored refresh token
+    // dies everywhere. A failure (offline, expired access token)
+    // never blocks the local sign-out — the local session is
+    // cleared regardless. Demo mode has no server to call.
+    const token = getAccessToken();
+    if (token && !fixtureMode) {
+      try {
+        await logoutSession(token);
+      } catch {
+        // Swallowed on purpose — see above.
+      }
+    }
     await clearSession();
   }, [clearSession]);
 

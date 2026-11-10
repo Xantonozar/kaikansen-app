@@ -1,9 +1,11 @@
 import { type DynamicModule, Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { AccessTokenGuard } from './access-token.guard';
 import { AnilistClient } from './anilist.client';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { AUTH_THROTTLER_OPTIONS } from './auth-throttle';
 import { MailerService } from './mailer.service';
 import { User, UserSchema } from './user.schema';
 import { Rating, RatingSchema } from '../library/rating.schema';
@@ -15,6 +17,7 @@ import {
   ThemeCache,
   ThemeCacheSchema,
 } from '../themes/theme-cache.schema';
+import { Follow, FollowSchema } from '../social/follow.schema';
 
 /**
  * Same conditional-registration pattern as ThemesModule: the Mongoose
@@ -27,20 +30,28 @@ export class AuthModule {
   static register(withDatabase: boolean): DynamicModule {
     return {
       module: AuthModule,
-      imports: withDatabase
-        ? [
-            MongooseModule.forFeature([
-              { name: User.name, schema: UserSchema },
-              // Read-only here: GET /auth/me's listening stats
-              // (AuthService.withStats). Registered in the other
-              // modules too — @nestjs/mongoose reuses the compiled
-              // model per name on the same connection.
-              { name: Rating.name, schema: RatingSchema },
-              { name: WatchHistory.name, schema: WatchHistorySchema },
-              { name: ThemeCache.name, schema: ThemeCacheSchema },
-            ]),
-          ]
-        : [],
+      imports: [
+        // Rate limiting for the auth surface (audit C1): the guard
+        // itself hangs on AuthController; the module registration
+        // only provides the buckets. Registered in both branches —
+        // throttling must also hold on a model-less boot.
+        ThrottlerModule.forRoot(AUTH_THROTTLER_OPTIONS),
+        ...(withDatabase
+          ? [
+              MongooseModule.forFeature([
+                { name: User.name, schema: UserSchema },
+                // Read-only here: GET /auth/me's listening stats
+                // (AuthService.withStats). Registered in the other
+                // modules too — @nestjs/mongoose reuses the compiled
+                // model per name on the same connection.
+                { name: Rating.name, schema: RatingSchema },
+                { name: WatchHistory.name, schema: WatchHistorySchema },
+                { name: ThemeCache.name, schema: ThemeCacheSchema },
+                { name: Follow.name, schema: FollowSchema },
+              ]),
+            ]
+          : []),
+      ],
       controllers: [AuthController],
       // AnilistClient is registered unconditionally (it holds no config);
       // AuthService answers 503 from the AniList endpoints when the

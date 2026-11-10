@@ -24,6 +24,7 @@ import type {
   ForgotPasswordRequest,
   ForgotPasswordResponse,
   LoginRequest,
+  LogoutResponse,
   RefreshRequest,
   RegisterRequest,
   ResetPasswordRequest,
@@ -37,7 +38,7 @@ import {
   type AnilistViewer,
 } from './anilist.client';
 import { MailerService } from './mailer.service';
-import { User, type UserDocument } from './user.schema';
+import { User, type RefreshSession, type UserDocument } from './user.schema';
 import { Rating, type RatingDocument } from '../library/rating.schema';
 import {
   WatchHistory,
@@ -47,6 +48,7 @@ import {
   ThemeCache,
   type ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
+import { Follow, type FollowDocument } from '../social/follow.schema';
 import { computeProfileStats } from '../users/profile-stats';
 
 /**
@@ -108,7 +110,27 @@ export interface TokenPayload {
    * as version 0.
    */
   tokenVersion: number;
+  /**
+   * Refresh tokens only: the tracked session family's id
+   * (User.refreshSessions[].familyId) and the token's own id
+   * (the JWT `jti`, set via the sign options — jsonwebtoken puts
+   * it on the verified payload). Rotation + reuse detection key
+   * off the pair; access tokens carry neither. Both absent on
+   * refresh tokens minted before session tracking existed (the
+   * refresh path adopts those once — see AuthService.refresh).
+   */
+  fid?: string;
+  jti?: string;
 }
+
+/** One tracked refresh family, as the service layer manipulates it. */
+type RefreshSessionState = RefreshSession;
+
+/** Tracked refresh families kept per user; the oldest is pruned. */
+const MAX_REFRESH_SESSIONS = 5;
+
+/** Rotated-out jtis remembered per family for reuse detection. */
+const USED_JTI_CAP = 50;
 
 /**
  * Auth over the shared `users` collection (Slice 2).
@@ -120,16 +142,23 @@ export interface TokenPayload {
  *  1. The refresh token travels in the JSON body both ways (the web
  *     reads it only from an httpOnly cookie) — SECURITY_PRIVACY.md SEC-03.
  *  2. Refresh ROTATES: a fresh access+refresh pair is issued (the web
- *     re-issues only an access token). Rotation is stateless — there
- *     is no server-side session store and no reuse detection — with
- *     ONE revocation hook: refresh compares the token's tokenVersion
- *     claim against the user record, and a password reset bumps the
- *     stored version, revoking every refresh token issued before it.
- *     Access tokens are never checked against the database (their
- *     15-minute TTL bounds them). A stolen refresh token otherwise
- *     still works until it is presented or expires. Session policy
- *     beyond this is OPEN item O-10 (specs/DECISIONS.md) — undecided,
- *     not silently settled here.
+ *     re-issues only an access token). Rotation is TRACKED (owner
+ *     order 2026-11-10, audit S1 — settling OPEN item O-10 for this
+ *     API): every login starts a refresh family on the user record;
+ *     rotation retires the presented token's jti into the family's
+ *     used list, and presenting a retired jti again is REUSE — the
+ *     whole family is revoked (a stolen, already-rotated token can
+ *     no longer live out its 7 days). POST /auth/logout clears the
+ *     families and bumps the session generation, so logout is real
+ *     server-side. The generation hook still applies on top: refresh
+ *     compares the token's tokenVersion claim against the user
+ *     record, and a password reset increments the stored version,
+ *     revoking every refresh token issued before it. Access tokens
+ *     are never checked against the database (their 15-minute TTL
+ *     bounds them). The website's own auth is untouched by all of
+ *     this: its tokens are signed with its own secrets and its user
+ *     fields are unchanged — the families live in an additive,
+ *     API-only field the web never reads.
  *
  * The model is OPTIONAL like the themes model: booted without
  * MONGODB_URI, every method answers 503 while /health keeps working.
@@ -161,6 +190,9 @@ export class AuthService {
     @Optional()
     @InjectModel(ThemeCache.name)
     private readonly themeModel?: Model<ThemeCacheDocument>,
+    @Optional()
+    @InjectModel(Follow.name)
+    private readonly followModel?: Model<FollowDocument>,
   ) {}
 
   private requireModel(): Model<UserDocument> {
@@ -188,22 +220,91 @@ export class AuthService {
     return this.config?.get<string>(name) ?? fallback;
   }
 
-  private signPair(claims: Omit<TokenPayload, 'tokenType'>): AuthTokens {
+  private signPair(
+    claims: Omit<TokenPayload, 'tokenType' | 'fid' | 'jti'>,
+    session: { familyId: string; jti: string },
+  ): AuthTokens {
     const accessToken = jwt.sign(
       { ...claims, tokenType: 'access' },
       this.secret('access'),
       { expiresIn: ACCESS_TTL },
     );
     const refreshToken = jwt.sign(
-      { ...claims, tokenType: 'refresh' },
+      { ...claims, tokenType: 'refresh', fid: session.familyId },
       this.secret('refresh'),
-      // A random jwtid per refresh token: without it, a login and a
-      // refresh inside the same second would mint byte-identical tokens
-      // (same claims, same iat/exp) and "rotation" would be a no-op.
-      // The id is not stored — verification stays stateless.
-      { expiresIn: REFRESH_TTL, jwtid: randomUUID() },
+      // The session's jti as the jwtid: without a unique id, a login
+      // and a refresh inside the same second would mint
+      // byte-identical tokens (same claims, same iat/exp) and
+      // "rotation" would be a no-op. The id is also the rotation
+      // tracker — the family record on the user stores it.
+      { expiresIn: REFRESH_TTL, jwtid: session.jti },
     );
     return { accessToken, refreshToken };
+  }
+
+  /** The user's tracked refresh families (the field is select:false). */
+  private async readSessions(
+    model: Model<UserDocument>,
+    userId: string,
+  ): Promise<RefreshSessionState[]> {
+    const user = await model
+      .findById(userId)
+      .select('+refreshSessions')
+      .exec();
+    return (user?.refreshSessions ?? []).map((s) => ({
+      familyId: s.familyId,
+      currentJti: s.currentJti,
+      usedJtis: [...(s.usedJtis ?? [])],
+      createdAt: s.createdAt,
+    }));
+  }
+
+  /** Replaces the user's tracked families in one $set (the logout /
+   *  cap / rotation writes all go through here). */
+  private async writeSessions(
+    model: Model<UserDocument>,
+    userId: string,
+    sessions: RefreshSessionState[],
+  ): Promise<void> {
+    await model
+      .findByIdAndUpdate(userId, { $set: { refreshSessions: sessions } })
+      .exec();
+  }
+
+  /**
+   * Starts a NEW refresh family for the user and mints its first
+   * pair (login / register / AniList session / legacy adoption in
+   * refresh). Families are capped: the oldest is pruned past
+   * MAX_REFRESH_SESSIONS, so a user with many stale logins sheds
+   * them instead of accumulating session rows forever.
+   */
+  private async issueSession(
+    model: Model<UserDocument>,
+    user: UserDocument,
+  ): Promise<AuthTokens> {
+    const familyId = randomUUID();
+    const jti = randomUUID();
+    const sessions = await this.readSessions(model, user._id.toString());
+    sessions.push({
+      familyId,
+      currentJti: jti,
+      usedJtis: [],
+      createdAt: new Date(),
+    });
+    await this.writeSessions(
+      model,
+      user._id.toString(),
+      sessions.slice(-MAX_REFRESH_SESSIONS),
+    );
+    return this.signPair(
+      {
+        userId: user._id.toString(),
+        username: user.username,
+        email: user.email,
+        tokenVersion: user.tokenVersion ?? 0,
+      },
+      { familyId, jti },
+    );
   }
 
   /** Verifies an access token (used by AccessTokenGuard). */
@@ -296,12 +397,7 @@ export class AuthService {
       avatarUrl,
     });
 
-    const tokens = this.signPair({
-      userId: user._id.toString(),
-      username: user.username,
-      email: user.email,
-      tokenVersion: user.tokenVersion ?? 0,
-    });
+    const tokens = await this.issueSession(model, user);
     return { ...tokens, user: this.toProfile(user) };
   }
 
@@ -338,12 +434,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const tokens = this.signPair({
-      userId: user._id.toString(),
-      username: user.username,
-      email: user.email,
-      tokenVersion: user.tokenVersion ?? 0,
-    });
+    const tokens = await this.issueSession(model, user);
     return { ...tokens, user: this.toProfile(user) };
   }
 
@@ -368,22 +459,121 @@ export class AuthService {
       throw new UnauthorizedException('Invalid refresh token');
     }
     // REVOCATION CHECK: the token's session generation must still be
-    // the user's current one. A password reset increments the stored
-    // tokenVersion, so every refresh token minted before the reset
-    // dies here (a deleted account's tokens die with it). Tokens
-    // minted before the claim existed read as version 0.
+    // the user's current one. A password reset (or a logout)
+    // increments the stored tokenVersion, so every refresh token
+    // minted before it dies here (a deleted account's tokens die
+    // with it). Tokens minted before the claim existed read as
+    // version 0.
     const user = await model.findById(payload.userId).exec();
     if (!user || (payload.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) {
       throw new UnauthorizedException('Invalid refresh token');
     }
-    // ROTATE (deviation 2, above): mint a whole new pair from the
-    // verified claims, stamped with the user's current generation.
-    return this.signPair({
-      userId: payload.userId,
+    const userId = user._id.toString();
+    const claims = {
+      userId,
       username: payload.username,
       email: payload.email,
       tokenVersion: user.tokenVersion ?? 0,
-    });
+    };
+
+    // SESSION TRACKING (audit S1): the presented token must be its
+    // family's CURRENT token. A retired jti presented again is
+    // reuse — the family is revoked before answering, so neither
+    // the thief's copy nor the victim's current token works again
+    // (the victim simply logs in fresh; every other family of
+    // theirs is untouched).
+    const sessions = await this.readSessions(model, userId);
+    if (payload.fid && payload.jti) {
+      const family = sessions.find((s) => s.familyId === payload.fid);
+      if (!family) {
+        // Unknown family: logged out, pruned, or already revoked.
+        throw new UnauthorizedException('Invalid refresh token');
+      }
+      if (family.usedJtis.includes(payload.jti)) {
+        await this.writeSessions(
+          model,
+          userId,
+          sessions.filter((s) => s.familyId !== payload.fid),
+        );
+        throw new UnauthorizedException('Invalid refresh token');
+      }
+      if (payload.jti !== family.currentJti) {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
+      // ROTATE: retire the presented jti, mint the pair on a fresh
+      // one — same family, new current.
+      const nextJti = randomUUID();
+      family.usedJtis = [...family.usedJtis, payload.jti].slice(
+        -USED_JTI_CAP,
+      );
+      family.currentJti = nextJti;
+      await this.writeSessions(model, userId, sessions);
+      return this.signPair(claims, { familyId: payload.fid, jti: nextJti });
+    }
+
+    // LEGACY token (minted before session tracking: it carries a
+    // jti but no family id). If that jti was already retired under
+    // tracking, this presentation is a replay — revoke the family
+    // that recorded it. Otherwise adopt the token once: the pair
+    // it rotates into starts a tracked family, with the legacy jti
+    // recorded as used so a later replay is caught above.
+    if (payload.jti) {
+      const recorded = sessions.find((s) =>
+        s.usedJtis.includes(payload.jti as string),
+      );
+      if (recorded) {
+        await this.writeSessions(
+          model,
+          userId,
+          sessions.filter((s) => s.familyId !== recorded.familyId),
+        );
+        throw new UnauthorizedException('Invalid refresh token');
+      }
+      if (sessions.length > 0) {
+        const familyId = randomUUID();
+        const jti = randomUUID();
+        sessions.push({
+          familyId,
+          currentJti: jti,
+          usedJtis: [payload.jti],
+          createdAt: new Date(),
+        });
+        await this.writeSessions(
+          model,
+          userId,
+          sessions.slice(-MAX_REFRESH_SESSIONS),
+        );
+        return this.signPair(claims, { familyId, jti });
+      }
+    }
+    // No tracking state at all (pre-tracking account, or every
+    // family pruned with the generation still current): start
+    // fresh tracking for the rotated pair.
+    return this.issueSession(model, user);
+  }
+
+  /**
+   * POST /auth/logout — REAL server-side logout (audit S1): every
+   * tracked refresh family is cleared AND the session generation
+   * is bumped, so every refresh token the user holds — tracked or
+   * legacy — stops working immediately, on every device. (Their
+   * other devices' access tokens live out their ≤15 minutes, as
+   * always.) The mobile client calls this best-effort before
+   * clearing its local session; a failed call changes nothing
+   * locally.
+   */
+  async logout(userId: string): Promise<LogoutResponse> {
+    const model = this.requireModel();
+    const user = await model
+      .findByIdAndUpdate(userId, {
+        $set: { refreshSessions: [] },
+        $inc: { tokenVersion: 1 },
+      })
+      .exec();
+    if (!user) {
+      throw new UnauthorizedException('Account no longer exists');
+    }
+    return { ok: true };
   }
 
   /* ---------------------------------------------------------------- */
@@ -532,6 +722,10 @@ export class AuthService {
         $set: {
           passwordHash,
           tokenVersion: (account.tokenVersion ?? 0) + 1,
+          // The generation bump already revokes every refresh
+          // token; clearing the tracked families too keeps the
+          // session list honest (nothing lingers to be pruned).
+          refreshSessions: [],
         },
         $unset: { passwordReset: '' },
       })
@@ -552,7 +746,12 @@ export class AuthService {
    */
   private async withStats(user: UserDocument): Promise<UserProfile> {
     const profile = this.toProfile(user);
-    if (!this.ratingModel || !this.historyModel || !this.themeModel) {
+    if (
+      !this.ratingModel ||
+      !this.historyModel ||
+      !this.themeModel ||
+      !this.followModel
+    ) {
       return profile;
     }
     return {
@@ -562,6 +761,7 @@ export class AuthService {
           ratings: this.ratingModel,
           history: this.historyModel,
           themes: this.themeModel,
+          follows: this.followModel,
         },
         user,
       ),
@@ -867,12 +1067,7 @@ export class AuthService {
       await user.save();
     }
 
-    const tokens = this.signPair({
-      userId: user._id.toString(),
-      username: user.username,
-      email: user.email,
-      tokenVersion: user.tokenVersion ?? 0,
-    });
+    const tokens = await this.issueSession(model, user);
     return { ...tokens, user: this.toProfile(user) };
   }
 

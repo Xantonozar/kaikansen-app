@@ -74,6 +74,21 @@ export function refreshTokens(refreshToken: string): Promise<AuthTokens> {
   return postJson<AuthTokens>('/auth/refresh', body);
 }
 
+/**
+ * Server-side logout (POST /auth/logout): revokes the caller's
+ * refresh sessions on the API, so the stored refresh token dies
+ * everywhere. The auth provider calls this BEST-EFFORT before
+ * clearing the local session — a network failure must never trap
+ * the user in a half-logged-in state, so callers swallow errors.
+ */
+export async function logoutSession(accessToken: string): Promise<void> {
+  const res = await fetch(`${apiBaseUrl}/auth/logout`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw await toApiError(res);
+}
+
 /* ------------------------------------------------------------------ */
 /* Password reset (code-based — a new API capability)                  */
 /* ------------------------------------------------------------------ */

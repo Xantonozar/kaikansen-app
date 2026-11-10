@@ -40,10 +40,12 @@ import { HydratedDocument } from 'mongoose';
  * (the web has no reset capability at all), and
  * `anilistEntriesCache` only for this API's AniList-entries read
  * (GET /library/anilist-entries — the web stores only the merged
- * media ids, never per-entry rows). They follow the same
- * additive pattern as the AniList sub-document: the web's models
- * neither read nor write them, and its delta saves leave them
- * untouched.
+ * media ids, never per-entry rows). A FOURTH, `refreshSessions`,
+ * exists only for this API's refresh-token reuse detection and
+ * server-side logout (owner-ordered 2026-11-10, audit S1). They
+ * follow the same additive pattern as the AniList sub-document:
+ * the web's models neither read nor write them, and its delta
+ * saves leave them untouched.
  */
 
 export type UserDocument = HydratedDocument<User>;
@@ -96,6 +98,34 @@ export class PasswordReset {
 }
 
 export const PasswordResetSchema = SchemaFactory.createForClass(PasswordReset);
+
+/**
+ * One tracked refresh-token family (audit S1 — the session policy
+ * the owner ordered on 2026-11-10, settling OPEN item O-10 for
+ * this API): every login mints a family; rotation moves the
+ * family's current jti into `usedJtis`; presenting a jti from
+ * `usedJtis` again is reuse — the family is revoked on the spot.
+ * `createdAt` orders families so the list can be capped (oldest
+ * pruned) at a small bound. Only hashes of nothing here — jtis
+ * are random UUIDs, useless without the signing secret.
+ */
+@Schema({ _id: false })
+export class RefreshSession {
+  @Prop({ type: String, required: true })
+  familyId: string;
+
+  @Prop({ type: String, required: true })
+  currentJti: string;
+
+  @Prop({ type: [String], default: [] })
+  usedJtis: string[];
+
+  @Prop({ type: Date, default: () => new Date() })
+  createdAt: Date;
+}
+
+export const RefreshSessionSchema =
+  SchemaFactory.createForClass(RefreshSession);
 
 /**
  * One cached AniList list entry for GET /library/anilist-entries
@@ -225,6 +255,21 @@ export class User {
    */
   @Prop({ type: Number, default: 0 })
   tokenVersion: number;
+
+  /**
+   * Tracked refresh-token families for reuse detection +
+   * server-side logout (see RefreshSession above). Additive and
+   * API-only like `passwordReset` / `tokenVersion`: the web's
+   * models neither read nor write it. `select: false` — session
+   * ids never ride along on ordinary user reads; the refresh and
+   * logout paths load the field explicitly.
+   */
+  @Prop({
+    type: [RefreshSessionSchema],
+    default: undefined,
+    select: false,
+  })
+  refreshSessions?: RefreshSession[];
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

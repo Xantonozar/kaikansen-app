@@ -7,7 +7,6 @@ import {
 } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Pressable,
   ScrollView,
   Share,
@@ -66,6 +65,7 @@ import {
   type QuizAudioState,
 } from '../../../src/components/QuizMedia';
 import { quizAudioCandidates } from '../../../src/playback';
+import { countdownSecondsLeft } from '../../../src/quizTiming';
 import { QuizOptions } from '../../../src/components/QuizOptions';
 import {
   fontFamilies,
@@ -591,7 +591,7 @@ export default function QuizRoomScreen() {
     }
     const opensAt = Date.parse(liveRound.startedAt);
     const update = () => {
-      const left = Math.max(0, Math.ceil((opensAt - Date.now()) / 1000));
+      const left = countdownSecondsLeft(opensAt, Date.now());
       setCountdownLeft(left);
       return left;
     };
@@ -649,15 +649,12 @@ export default function QuizRoomScreen() {
     const standing = playerRanks[player.userId];
     return (
       <View key={player.userId} style={styles.playerRow}>
-        {player.avatar ? (
-          <Image source={{ uri: player.avatar }} style={styles.avatar} />
-        ) : (
-          <View style={[styles.avatar, styles.avatarFallback]}>
-            <Text style={styles.avatarInitial}>
-              {player.username.charAt(0).toUpperCase()}
-            </Text>
-          </View>
-        )}
+        <Avatar
+          url={player.avatar}
+          name={player.username}
+          seed={player.userId}
+          size={38}
+        />
         <View style={styles.playerMain}>
           <View style={styles.playerNameRow}>
             <Text style={styles.playerName} numberOfLines={1}>
@@ -1456,18 +1453,12 @@ export default function QuizRoomScreen() {
                   return (
                     <View key={p.userId} style={styles.playerRow}>
                       <Text style={styles.placeText}>{i + 1}</Text>
-                      {p.avatar ? (
-                        <Image
-                          source={{ uri: p.avatar }}
-                          style={styles.avatar}
-                        />
-                      ) : (
-                        <View style={[styles.avatar, styles.avatarFallback]}>
-                          <Text style={styles.avatarInitial}>
-                            {p.username.charAt(0).toUpperCase()}
-                          </Text>
-                        </View>
-                      )}
+                      <Avatar
+                        url={p.avatar}
+                        name={p.username}
+                        seed={p.userId}
+                        size={38}
+                      />
                       <View style={styles.playerMain}>
                         <View style={styles.playerNameRow}>
                           <Text style={styles.playerName} numberOfLines={1}>
@@ -1926,21 +1917,6 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       gap: spacing.md,
       paddingVertical: spacing.xs + 2,
-    },
-    avatar: {
-      width: 38,
-      height: 38,
-      borderRadius: 19,
-      backgroundColor: theme.raised,
-    },
-    avatarFallback: {
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: theme.accentContainer,
-    },
-    avatarInitial: {
-      fontFamily: fontFamilies.bodyStrong, fontSize: 14,
-      color: theme.onAccentContainer,
     },
     playerMain: {
       flex: 1,

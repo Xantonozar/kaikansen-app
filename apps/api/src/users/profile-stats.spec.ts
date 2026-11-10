@@ -90,19 +90,31 @@ function makeModels() {
     // Another user's play — never counted.
     { userId: OTHER, themeId: THEME_A, atEntryId: 11 },
   ];
+  const follows: Record<string, unknown>[] = [
+    { followerId: OTHER, followeeId: USER },
+    { followerId: '507f1f77bcf86cd7994390c4', followeeId: USER },
+    { followerId: USER, followeeId: OTHER },
+    { followerId: USER, followeeId: '507f1f77bcf86cd7994390c4' },
+    { followerId: USER, followeeId: '507f1f77bcf86cd7994390c5' },
+    // Someone else's follow — never counted for USER.
+    { followerId: OTHER, followeeId: '507f1f77bcf86cd7994390c4' },
+  ];
   const modelOf = (docs: Record<string, unknown>[]) => ({
     docs,
     find: (filter: Record<string, unknown>) =>
       queryOf(docs.filter((d) => matches(d, filter))),
+    countDocuments: (filter: Record<string, unknown>) =>
+      queryOf(docs.filter((d) => matches(d, filter)).length),
   });
   return {
     ratings: modelOf(ratings),
     history: modelOf(history),
     themes: modelOf(themes),
+    follows: modelOf(follows),
   };
 }
 
-const user = { _id: USER, totalFollowers: 76, totalFollowing: 104 };
+const user = { _id: USER };
 
 describe('computeProfileStats', () => {
   it('computes the exact aggregates for a seeded user', async () => {
@@ -112,9 +124,17 @@ describe('computeProfileStats', () => {
       meanRating: 9, // (8 + 9 + 10) / 3
       themesListened: 4, // A, B, C and the gone theme — distinct
       totalListenedSeconds: 100 + 200 + 100 + 90 + 90 + 0,
-      followersCount: 76,
-      followingCount: 104,
+      followersCount: 2, // counted from the follows rows
+      followingCount: 3,
     });
+  });
+
+  it('ignores drifted stored counters — the follows rows are the truth (audit S3)', async () => {
+    const models = makeModels();
+    const drifted = { _id: USER, totalFollowers: 999, totalFollowing: 888 };
+    const stats = await computeProfileStats(models as never, drifted);
+    expect(stats.followersCount).toBe(2);
+    expect(stats.followingCount).toBe(3);
   });
 
   it('rounds the mean to 1 decimal', async () => {
@@ -132,6 +152,7 @@ describe('computeProfileStats', () => {
     const models = makeModels();
     models.ratings.docs.splice(0);
     models.history.docs.splice(0);
+    models.follows.docs.splice(0);
     const stats = await computeProfileStats(models as never, {
       _id: USER,
     });

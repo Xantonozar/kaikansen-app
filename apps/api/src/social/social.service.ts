@@ -64,6 +64,23 @@ const FEED_DEFAULT_LIMIT = 3;
 /** The web's friends-activity hard cap: Math.min(limit, 50). */
 const FEED_MAX_LIMIT = 50;
 
+/** Network pagination (audit S2): default + capped page sizes. */
+const NETWORK_DEFAULT_LIMIT = 20;
+const NETWORK_MAX_LIMIT = 50;
+
+/** 1-based page parsing in the themes-service idiom: garbage → 1. */
+function parseNetworkPage(raw: string | undefined): number {
+  const parsed = Number.parseInt(raw ?? '', 10);
+  return Number.isNaN(parsed) || parsed < 1 ? 1 : parsed;
+}
+
+/** Page-size parsing: garbage → the default, capped at the max. */
+function parseNetworkLimit(raw: string | undefined): number {
+  const parsed = Number.parseInt(raw ?? '', 10);
+  if (Number.isNaN(parsed) || parsed < 1) return NETWORK_DEFAULT_LIMIT;
+  return Math.min(parsed, NETWORK_MAX_LIMIT);
+}
+
 /** The web's per-user activity caps: 10 + 10 rows merged, sliced to 15. */
 const PROFILE_ACTIVITY_PER_KIND = 10;
 const PROFILE_ACTIVITY_LIMIT = 15;
@@ -188,8 +205,11 @@ interface SocialModels {
  *   there is no other feed. Ported with its composition rules.
  *
  * Mirrored quirks, deliberately kept:
- * - Network lists are UNPAGINATED and UNSORTED (the web's Follow
- *   finds carry no sort): storage order, however long they get.
+ * - Network lists are UNSORTED (the web's Follow finds carry no
+ *   sort): storage order, however long they get. They ARE paged
+ *   now when the caller asks (audit S2 — the unpaginated full
+ *   lists froze the app's Network screen); the no-params read
+ *   still returns the web's full lists. See getNetwork.
  * - The per-user activity gate is backwards from intuition: a
  *   caller sees the owner's activity when the OWNER FOLLOWS THE
  *   CALLER (or when caller == owner). Everyone else — and every
@@ -415,9 +435,18 @@ export class SocialService {
 
   /**
    * GET /users/:username/network — the web's network route (and
-   * its identical twin, /friends): both full lists, populated
-   * with username/displayName/avatarUrl/bio, in the Follow
-   * queries' own (unsorted, unpaginated) order. Public.
+   * its identical twin, /friends): both lists, populated with
+   * username/displayName/avatarUrl/bio, in the Follow queries'
+   * own (unsorted) order. Public.
+   *
+   * PAGINATION (audit S2 — the freeze-class fix, mirroring the
+   * Library AniList pagination): with ANY of followersPage /
+   * followingPage / limit present, each list pages independently
+   * (1-based pages over the same unsorted query; limit defaults
+   * to 20, caps at 50) and the meta fields report totals +
+   * hasMore per list. With NO paging params the endpoint answers
+   * the web's FULL lists exactly as before (limit: null in the
+   * meta) — the Home and Social rails still read it that way.
    *
    * App enrichment (additive — the web's fields and order are
    * untouched): the app's Network screen (§6.17) draws each row
@@ -431,20 +460,60 @@ export class SocialService {
   async getNetwork(
     username: string,
     authorization?: string,
+    paging: {
+      followersPage?: string;
+      followingPage?: string;
+      limit?: string;
+    } = {},
   ): Promise<NetworkResponse> {
     const models = this.requireModels();
     const user = await this.findUserOr404(models, username);
 
-    const [followerRows, followingRows] = await Promise.all([
-      models.follows.find({ followeeId: user._id }).lean().exec(),
-      models.follows.find({ followerId: user._id }).lean().exec(),
-    ]);
+    const paginated =
+      paging.followersPage !== undefined ||
+      paging.followingPage !== undefined ||
+      paging.limit !== undefined;
+    const followersPage = parseNetworkPage(paging.followersPage);
+    const followingPage = parseNetworkPage(paging.followingPage);
+    const limit = paginated ? parseNetworkLimit(paging.limit) : null;
+
+    let followerRows: FollowDoc[];
+    let followingRows: FollowDoc[];
+    let followersTotal: number;
+    let followingTotal: number;
+    if (!paginated || limit === null) {
+      [followerRows, followingRows] = (await Promise.all([
+        models.follows.find({ followeeId: user._id }).lean().exec(),
+        models.follows.find({ followerId: user._id }).lean().exec(),
+      ])) as [FollowDoc[], FollowDoc[]];
+      followersTotal = followerRows.length;
+      followingTotal = followingRows.length;
+    } else {
+      const pageSize = limit;
+      [followersTotal, followingTotal, followerRows, followingRows] =
+        await Promise.all([
+          models.follows.countDocuments({ followeeId: user._id }).exec(),
+          models.follows.countDocuments({ followerId: user._id }).exec(),
+          models.follows
+            .find({ followeeId: user._id })
+            .skip((followersPage - 1) * pageSize)
+            .limit(pageSize)
+            .lean()
+            .exec() as Promise<FollowDoc[]>,
+          models.follows
+            .find({ followerId: user._id })
+            .skip((followingPage - 1) * pageSize)
+            .limit(pageSize)
+            .lean()
+            .exec() as Promise<FollowDoc[]>,
+        ]);
+    }
 
     const byId = await this.resolveUsers(
       models,
       [
-        ...(followerRows as FollowDoc[]).map((f) => f.followerId),
-        ...(followingRows as FollowDoc[]).map((f) => f.followeeId),
+        ...followerRows.map((f) => f.followerId),
+        ...followingRows.map((f) => f.followeeId),
       ],
       (u) => this.toNetworkUser(u),
     );
@@ -452,12 +521,21 @@ export class SocialService {
     const response: NetworkResponse = {
       // A row whose user account is gone maps to null — the web's
       // populate yields exactly that; mirrored.
-      followers: (followerRows as FollowDoc[]).map(
+      followers: followerRows.map(
         (f) => byId.get(String(f.followerId)) ?? null,
       ),
-      following: (followingRows as FollowDoc[]).map(
+      following: followingRows.map(
         (f) => byId.get(String(f.followeeId)) ?? null,
       ),
+      followersTotal,
+      followingTotal,
+      followersHasMore:
+        limit !== null && followersPage * limit < followersTotal,
+      followingHasMore:
+        limit !== null && followingPage * limit < followingTotal,
+      followersPage,
+      followingPage,
+      limit,
     };
     await this.enrichNetworkRows(models, response, authorization);
     return response;

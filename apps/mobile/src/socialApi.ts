@@ -94,11 +94,38 @@ export async function fetchUserStats(username: string): Promise<UserStats> {
   return apiJson<UserStats>(`/users/${enc(username)}/stats`);
 }
 
+/**
+ * GET /users/:username/network — both lists populated, in
+ * follow-storage order. Pass `paging` to page (audit S2:
+ * per-list 1-based pages; limit defaults to 20 server-side and
+ * caps at 50; the response meta reports totals + hasMore).
+ * Without paging the endpoint answers the full lists — what
+ * Home/Social read. Rows carry the caller's follow state when
+ * signed in.
+ */
 export async function fetchUserNetwork(
   username: string,
+  paging?: {
+    followersPage?: number;
+    followingPage?: number;
+    limit?: number;
+  },
 ): Promise<NetworkResponse> {
   if (fixtureMode) throw new Error(DEMO_READ_MESSAGE);
-  return apiJson<NetworkResponse>(`/users/${enc(username)}/network`);
+  const params = new URLSearchParams();
+  if (paging?.followersPage !== undefined) {
+    params.set('followersPage', String(paging.followersPage));
+  }
+  if (paging?.followingPage !== undefined) {
+    params.set('followingPage', String(paging.followingPage));
+  }
+  if (paging?.limit !== undefined) {
+    params.set('limit', String(paging.limit));
+  }
+  const query = params.toString();
+  return apiJson<NetworkResponse>(
+    `/users/${enc(username)}/network${query ? `?${query}` : ''}`,
+  );
 }
 
 /**

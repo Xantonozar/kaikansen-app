@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { getModelToken } from '@nestjs/mongoose';
+import { ThrottlerGuard } from '@nestjs/throttler';
 import * as jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { AccessTokenGuard } from './../src/auth/access-token.guard';
@@ -111,8 +112,11 @@ function makeFakeModels() {
       avatarUrl: null,
       bio: 'stats bio',
       totalRatings: 2,
-      totalFollowers: 3,
-      totalFollowing: 5,
+      // DRIFTED on purpose (audit S3): the follows rows below are
+      // the truth (3 followers / 5 following); the served stats
+      // must come from them, never from these stored values.
+      totalFollowers: 99,
+      totalFollowing: 98,
       totalTime: 0,
       isPublic: true,
       anilist: {
@@ -153,6 +157,19 @@ function makeFakeModels() {
     { _id: THEME_A, slug: 'secret-slug-a', entries: [{ atEntryId: 1, duration: 3600 }] },
     { _id: THEME_B, slug: 'secret-slug-b', entries: [{ atEntryId: 5, duration: 1800 }] },
   ];
+  // The follow truth: STATSY has 3 followers / 5 following;
+  // EMPTY sits on both sides of one follow (with STATSY), so
+  // its counts are 1 / 1 — everything else about it is empty.
+  const follows: Record<string, unknown>[] = [
+    { followerId: EMPTY, followeeId: STATSY },
+    { followerId: '507f1f77bcf86cd7994390f1', followeeId: STATSY },
+    { followerId: '507f1f77bcf86cd7994390f2', followeeId: STATSY },
+    { followerId: STATSY, followeeId: EMPTY },
+    { followerId: STATSY, followeeId: '507f1f77bcf86cd7994390f1' },
+    { followerId: STATSY, followeeId: '507f1f77bcf86cd7994390f2' },
+    { followerId: STATSY, followeeId: '507f1f77bcf86cd7994390f3' },
+    { followerId: STATSY, followeeId: '507f1f77bcf86cd7994390f4' },
+  ];
 
   const findModel = (docs: Record<string, unknown>[]) => ({
     docs,
@@ -160,6 +177,8 @@ function makeFakeModels() {
       chain(docs.filter((d) => matches(d, filter))),
     findOne: (filter: Record<string, unknown>) =>
       queryOf(docs.find((d) => matches(d, filter)) ?? null),
+    countDocuments: (filter: Record<string, unknown>) =>
+      queryOf(docs.filter((d) => matches(d, filter)).length),
   });
 
   const userModel = {
@@ -177,7 +196,7 @@ function makeFakeModels() {
     ratingModel: findModel(ratings),
     historyModel: findModel(history),
     themeModel: findModel(themes),
-    followModel: findModel([]),
+    followModel: findModel(follows),
     notificationModel: findModel([]),
   };
 }
@@ -236,7 +255,13 @@ describe('Profile stats with mocked models (e2e)', () => {
           useValue: models.notificationModel,
         },
       ],
-    }).compile();
+    })
+      // Hand-wired controllers (no AuthModule): the auth
+      // controller's ThrottlerGuard is stood down — throttling has
+      // its own dedicated suite (auth-throttle.e2e-spec.ts).
+      .overrideGuard(ThrottlerGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
     app = moduleFixture.createNestApplication();
     await app.init();
   });
@@ -276,8 +301,10 @@ describe('Profile stats with mocked models (e2e)', () => {
       meanRating: null,
       themesListened: 0,
       totalListenedSeconds: 0,
-      followersCount: 0,
-      followingCount: 0,
+      // Not zero: EMPTY follows STATSY and is followed by her —
+      // the counts come from the follows rows, as they should.
+      followersCount: 1,
+      followingCount: 1,
     });
     const me = await http
       .get('/auth/me')

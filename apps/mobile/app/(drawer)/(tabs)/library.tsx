@@ -88,6 +88,7 @@ import {
 } from '../../../src/theme';
 import { useTheme } from '../../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
+import { countUpValue } from '../../../src/countUp';
 
 type Section = 'saved' | 'recent' | 'playlists' | 'anilist' | 'offline';
 
@@ -154,8 +155,7 @@ function useCountUp(target: number | null, durationMs = 1000): number {
     const start = Date.now();
     const tick = () => {
       const t = Math.min(1, (Date.now() - start) / durationMs);
-      const eased = 1 - Math.pow(1 - t, 3);
-      const next = Math.round(from + (target - from) * eased);
+      const next = countUpValue(from, target, t);
       valueRef.current = next;
       setValue(next);
       if (t < 1) raf = requestAnimationFrame(tick);

@@ -18,6 +18,7 @@ import {
 } from '../theme';
 import { useTheme } from '../theme-context';
 import { usePlaybackSession } from '../playback-context';
+import { isPlayerRouteOrigin } from '../queueOrigin';
 
 /** Tab routes — the mini player reaches these through the TabBar
     mount; the drawer overlay must skip them (no double render). */
@@ -84,7 +85,7 @@ export function MiniPlayer({
   // reopen the player route; every other origin — and queue-less
   // sessions, which read as 'other' — go to the current track's
   // theme detail, whose hero renders the live session inline.
-  const playerOrigin = queueOrigin === 'playlist' || queueOrigin === 'offline';
+  const playerOrigin = isPlayerRouteOrigin(queueOrigin);
 
   const openNowPlaying = () => {
     if (!session.slug) return;

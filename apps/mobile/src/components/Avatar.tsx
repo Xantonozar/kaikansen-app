@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Image, StyleSheet, Text, View } from 'react-native';
 import { fontFamilies, typeStyles, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
@@ -26,6 +26,13 @@ import { pickDefaultAvatar } from '../defaultAvatars';
  * `disableDefaultAvatar` opts a non-user borrower (the artist hero)
  * out of the chibi and back to the initial disc — for every
  * unusable-avatar case above.
+ *
+ * A raster URL that FAILS TO LOAD (deleted/expired image — audit
+ * S5) joins the unusable cases at runtime: the Image's onError
+ * marks that exact URL failed and the render falls through to the
+ * same chibi (or initial disc) instead of leaving an empty circle
+ * on every surface. The failure is keyed by URL, so a changed
+ * avatarUrl is tried fresh.
  */
 export function Avatar({
   url,
@@ -42,10 +49,15 @@ export function Avatar({
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  /** The exact URL whose load failed (see the header note). */
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const hasUrl = url !== null && url.length > 0;
   const urlPath = hasUrl ? url.toLowerCase().split(/[?#]/)[0] : '';
   const usable =
-    hasUrl && !urlPath.endsWith('.svg') && !urlPath.endsWith('/svg');
+    hasUrl &&
+    !urlPath.endsWith('.svg') &&
+    !urlPath.endsWith('/svg') &&
+    failedUrl !== url;
   const initial = (name.trim().charAt(0) || '?').toUpperCase();
   const box = {
     width: size,
@@ -59,6 +71,7 @@ export function Avatar({
         source={{ uri: url }}
         style={[styles.image, box]}
         accessibilityLabel={`${name}'s avatar`}
+        onError={() => setFailedUrl(url)}
       />
     );
   }

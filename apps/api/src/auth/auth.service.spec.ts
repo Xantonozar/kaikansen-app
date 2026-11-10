@@ -24,6 +24,14 @@ const configStub = {
     ({ JWT_SECRET: ACCESS_SECRET, JWT_REFRESH_SECRET: REFRESH_SECRET })[key],
 } as unknown as ConfigService;
 
+// bcrypt runs at the production cost (12), so under the full
+// suite's parallel load a single hash/compare can exceed jest's
+// 5s default timeout on a small box (observed flake, 2026-11-10:
+// every failure in this file was that timeout, never an
+// assertion — the file passes standalone). The suite's budget is
+// raised for exactly that reason; assertions are unchanged.
+jest.setTimeout(30_000);
+
 interface FakeUser {
   _id: string;
   username: string;
@@ -75,10 +83,22 @@ function makeModel() {
       queryOf(users.find((u) => u._id === id) ?? null),
     ),
     findByIdAndUpdate: jest.fn(
-      (id: string, update: { $set: Record<string, unknown> }) => {
+      (
+        id: string,
+        update: {
+          $set?: Record<string, unknown>;
+          $inc?: Record<string, number>;
+        },
+      ) => {
         const doc = users.find((u) => u._id === id) ?? null;
         if (doc && update.$set) {
           Object.assign(doc, update.$set);
+        }
+        if (doc && update.$inc) {
+          const loose = doc as unknown as Record<string, unknown>;
+          for (const [key, delta] of Object.entries(update.$inc)) {
+            loose[key] = (loose[key] as number) + delta;
+          }
         }
         return queryOf(doc);
       },
@@ -360,12 +380,87 @@ describe('AuthService', () => {
       expect(next.refreshToken).not.toBe(pair.refreshToken);
       const payload = jwt.verify(next.accessToken, ACCESS_SECRET) as jwt.JwtPayload;
       expect(payload.username).toBe('refresher');
-      // Stateless rotation (O-10 is OPEN): the previous refresh token is
-      // NOT revoked — it still rotates again. Asserted so the behaviour
-      // is a documented fact, not an accident.
+      // The rotated pair keeps rotating (the family's new current).
       await expect(
-        service.refresh({ refreshToken: pair.refreshToken }),
+        service.refresh({ refreshToken: next.refreshToken }),
       ).resolves.toBeTruthy();
+    });
+
+    it('reuse of a rotated-out token revokes the whole family (audit S1)', async () => {
+      const { service, pair } = await loggedIn();
+      const next = await service.refresh({ refreshToken: pair.refreshToken });
+      // Replaying the retired token is reuse: it is rejected…
+      const err = await service
+        .refresh({ refreshToken: pair.refreshToken })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnauthorizedException);
+      // …and the family's CURRENT token dies with it — neither the
+      // thief's copy nor the victim's live session survives.
+      const err2 = await service
+        .refresh({ refreshToken: next.refreshToken })
+        .catch((e: unknown) => e);
+      expect(err2).toBeInstanceOf(UnauthorizedException);
+    });
+
+    it('revoking one family leaves the user’s other families alone', async () => {
+      const { service, pair } = await loggedIn();
+      const second = await service.login({
+        email: 'refresh@example.com',
+        password: 'refresh-fake-password',
+      });
+      const rotated = await service.refresh({
+        refreshToken: pair.refreshToken,
+      });
+      expect(rotated.refreshToken).toBeTruthy();
+      // Replay in family 1 → family 1 revoked…
+      await service
+        .refresh({ refreshToken: pair.refreshToken })
+        .catch(() => undefined);
+      // …family 2 still rotates.
+      await expect(
+        service.refresh({ refreshToken: second.refreshToken }),
+      ).resolves.toBeTruthy();
+    });
+
+    it('logout revokes every refresh token (audit S1)', async () => {
+      const { service, pair } = await loggedIn();
+      await expect(service.logout('seed-r')).resolves.toEqual({ ok: true });
+      const err = await service
+        .refresh({ refreshToken: pair.refreshToken })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnauthorizedException);
+      // The access token is stateless: it still verifies until its
+      // own 15-minute expiry — only the refresh side is revoked.
+      expect(service.verifyAccessToken(pair.accessToken)).not.toBeNull();
+    });
+
+    it('adopts a legacy (pre-tracking) refresh token once, then tracks it', async () => {
+      const { service } = await loggedIn();
+      // A token minted before session tracking: a jti, no family id.
+      const legacy = jwt.sign(
+        {
+          userId: 'seed-r',
+          username: 'refresher',
+          email: 'refresh@example.com',
+          tokenType: 'refresh',
+          tokenVersion: 0,
+        },
+        REFRESH_SECRET,
+        { expiresIn: '7d', jwtid: 'legacy-jti-1' },
+      );
+      const adopted = await service.refresh({ refreshToken: legacy });
+      expect(adopted.refreshToken).toBeTruthy();
+      // The adopted pair carries a family id…
+      const claims = jwt.verify(
+        adopted.refreshToken,
+        REFRESH_SECRET,
+      ) as jwt.JwtPayload;
+      expect(claims.fid).toBeTruthy();
+      // …and replaying the legacy token now reads as reuse.
+      const err = await service
+        .refresh({ refreshToken: legacy })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnauthorizedException);
     });
 
     it('rejects a tampered refresh token', async () => {

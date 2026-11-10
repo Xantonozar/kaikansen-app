@@ -2,23 +2,23 @@ import type { Model, Types } from 'mongoose';
 import type { ProfileStats } from '@kaikansen/contracts';
 import type { RatingDocument } from '../library/rating.schema';
 import type { WatchHistoryDocument } from '../library/watch-history.schema';
+import type { FollowDocument } from '../social/follow.schema';
 import type {
   ThemeCache,
   ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
 
-/** The three read models the aggregates are computed from. */
+/** The read models the aggregates are computed from. */
 export interface ProfileStatsModels {
   ratings: Model<RatingDocument>;
   history: Model<WatchHistoryDocument>;
   themes: Model<ThemeCacheDocument>;
+  follows: Model<FollowDocument>;
 }
 
-/** The user fields the aggregates read (id + the stored counters). */
+/** The user fields the aggregates read (id only — counts are live). */
 export interface ProfileStatsUser {
   _id: Types.ObjectId | string;
-  totalFollowers?: number | null;
-  totalFollowing?: number | null;
 }
 
 type RatingDoc = { score: number };
@@ -46,10 +46,14 @@ type ThemeDoc = ThemeCache & { _id: unknown };
  *   else the theme's first entry, else 90 seconds. A play whose
  *   theme no longer exists in the catalogue contributes 0 — it
  *   still counts toward themesListened.
- * - followersCount / followingCount: the user document's stored
- *   counters — the same values the profile and /users/:username/
- *   stats projections already serve (maintained by the follow
- *   write path), reused rather than recounted.
+ * - followersCount / followingCount: counted LIVE from the
+ *   follows collection — the source of truth (audit S3). The
+ *   user document's stored counters are maintained by the
+ *   follow write path, but any missed or double-applied $inc
+ *   drifts them permanently, and the profile would then lie;
+ *   counting here makes the served numbers true by
+ *   construction. The stored counters themselves are repaired
+ *   by CountersService (POST /internal/users/recount-counters).
  *
  * Aggregates ONLY: no history or rating row ever leaves through
  * this routine. The reads load the user's own rating scores and
@@ -60,14 +64,17 @@ export async function computeProfileStats(
   models: ProfileStatsModels,
   user: ProfileStatsUser,
 ): Promise<ProfileStats> {
-  const [ratingDocs, historyDocs] = await Promise.all([
-    models.ratings.find({ userId: user._id }).lean().exec() as Promise<
-      RatingDoc[]
-    >,
-    models.history.find({ userId: user._id }).lean().exec() as Promise<
-      HistoryDoc[]
-    >,
-  ]);
+  const [ratingDocs, historyDocs, followersCount, followingCount] =
+    await Promise.all([
+      models.ratings.find({ userId: user._id }).lean().exec() as Promise<
+        RatingDoc[]
+      >,
+      models.history.find({ userId: user._id }).lean().exec() as Promise<
+        HistoryDoc[]
+      >,
+      models.follows.countDocuments({ followeeId: user._id }).exec(),
+      models.follows.countDocuments({ followerId: user._id }).exec(),
+    ]);
 
   const meanRating =
     ratingDocs.length > 0
@@ -108,7 +115,7 @@ export async function computeProfileStats(
     meanRating,
     themesListened: distinctThemeIds.length,
     totalListenedSeconds,
-    followersCount: user.totalFollowers ?? 0,
-    followingCount: user.totalFollowing ?? 0,
+    followersCount,
+    followingCount,
   };
 }

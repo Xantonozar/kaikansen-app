@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  FlatList,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -13,6 +13,7 @@ import { ArrowLeft } from 'lucide-react-native';
 import type { NetworkResponse, NetworkUser } from '@kaikansen/contracts';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
+import { SkeletonPersonRow } from '../../../src/components/Skeleton';
 import { tierLabel } from '../../../src/rankUtil';
 import {
   fetchUserNetwork,
@@ -31,6 +32,23 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 
 type NetworkTab = 'followers' | 'following';
 
+/** Page size for the paged network reads (audit S2). */
+const PAGE_SIZE = 20;
+
+/** The rows of one list with the deleted-account nulls removed. */
+function visibleRows(list: (NetworkUser | null)[]): NetworkUser[] {
+  return list.filter((u): u is NetworkUser => u !== null);
+}
+
+/** Append a fresh page, dropping any id already shown. */
+function appendRows(
+  current: NetworkUser[],
+  page: NetworkUser[],
+): NetworkUser[] {
+  const seen = new Set(current.map((u) => u.id));
+  return [...current, ...page.filter((u) => !seen.has(u.id))];
+}
+
 /**
  * Network — a user's followers / following as the designed
  * standalone screen (kaikansen-network.png + network.html, the
@@ -39,18 +57,23 @@ type NetworkTab = 'followers' | 'following';
  * line, and ONE grouped card of rows (avatar, display name,
  * "@username · Tier", and a Follow/Following pill in the CALLER's
  * state). Re-measured against the Stitch HTML in the design-fix
- * queue; the data path below is unchanged from the Slice 4 build.
+ * queue.
  *
- * Data is GET /users/:username/network — the web's full,
- * unpaginated lists. The rows carry the rank tier and (for
- * signed-in callers) the caller's follow state, both enriched by
- * the endpoint; the buttons write through the same follow /
- * unfollow endpoints the profile screen uses, with the same
- * optimistic flip + reconcile + session-count bookkeeping.
- * Deleted accounts arrive as nulls (the web's populate) and are
- * filtered out, as on the profile screen — so the count line
- * counts the people actually shown. Entered from the public
- * profile's follower/following stat blocks.
+ * Data is GET /users/:username/network, PAGED (audit S2 — the
+ * full unpaginated lists froze this screen on big networks,
+ * the Library AniList freeze class): page size 20 per list, each
+ * tab infinite-scrolls its own page counter, and the count line
+ * reads the server's totals. The rows render in a FlatList
+ * inside the grouped card; page loads show person-row skeletons.
+ * The rows carry the rank tier and (for signed-in callers) the
+ * caller's follow state, both enriched by the endpoint; the
+ * buttons write through the same follow / unfollow endpoints the
+ * profile screen uses, with the same optimistic flip + reconcile
+ * + session-count bookkeeping. Deleted accounts arrive as nulls
+ * (the web's populate) and are filtered out of the rows, as on
+ * the profile screen — the count line now reports the server's
+ * follow-row totals. Entered from the public profile's
+ * follower/following stat blocks.
  */
 export default function NetworkScreen() {
   const theme = useTheme();
@@ -66,33 +89,119 @@ export default function NetworkScreen() {
   const [tab, setTab] = useState<NetworkTab>(
     tabParam === 'following' ? 'following' : 'followers',
   );
-  const [network, setNetwork] = useState<NetworkResponse | null>(null);
+  const [followers, setFollowers] = useState<NetworkUser[]>([]);
+  const [following, setFollowing] = useState<NetworkUser[]>([]);
+  const [totals, setTotals] = useState<{
+    followers: number;
+    following: number;
+  } | null>(null);
+  const [pages, setPages] = useState({ followers: 1, following: 1 });
+  const [hasMore, setHasMore] = useState({
+    followers: false,
+    following: false,
+  });
+  const [loaded, setLoaded] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   /* Caller-state overrides keyed by username: the optimistic flip
      lands here first, the server's answer reconciles it. */
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [busyFor, setBusyFor] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  /* In-flight page fetch for a tab (double-fire guard). */
+  const fetchingRef = useRef(false);
+
+  const applyPage = (
+    response: NetworkResponse,
+    only?: NetworkTab,
+    append = false,
+  ) => {
+    if (only !== 'following') {
+      const pageRows = visibleRows(response.followers);
+      setFollowers((prev) =>
+        append ? appendRows(prev, pageRows) : pageRows,
+      );
+    }
+    if (only !== 'followers') {
+      const pageRows = visibleRows(response.following);
+      setFollowing((prev) =>
+        append ? appendRows(prev, pageRows) : pageRows,
+      );
+    }
+    setTotals({
+      followers: response.followersTotal,
+      following: response.followingTotal,
+    });
+    setPages({
+      followers: response.followersPage,
+      following: response.followingPage,
+    });
+    setHasMore({
+      followers: response.followersHasMore,
+      following: response.followingHasMore,
+    });
+  };
 
   useEffect(() => {
     let live = true;
-    setNetwork(null);
+    setFollowers([]);
+    setFollowing([]);
+    setTotals(null);
+    setPages({ followers: 1, following: 1 });
+    setHasMore({ followers: false, following: false });
+    setLoaded(false);
+    setLoadingMore(false);
     setLoadError(null);
     setOverrides({});
     setActionError(null);
-    fetchUserNetwork(username)
-      .then((n) => live && setNetwork(n))
+    fetchingRef.current = true;
+    fetchUserNetwork(username, {
+      followersPage: 1,
+      followingPage: 1,
+      limit: PAGE_SIZE,
+    })
+      .then((n) => {
+        if (live) {
+          applyPage(n);
+          setLoaded(true);
+        }
+      })
       .catch((e: unknown) => {
         if (live) {
           setLoadError(
             e instanceof Error ? e.message : 'Could not load this network.',
           );
         }
+      })
+      .finally(() => {
+        fetchingRef.current = false;
       });
     return () => {
       live = false;
     };
+    // applyPage is a stable setState composer; username is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
+
+  const loadMore = () => {
+    if (!loaded || fetchingRef.current || !hasMore[tab]) return;
+    fetchingRef.current = true;
+    setLoadingMore(true);
+    fetchUserNetwork(username, {
+      followersPage: tab === 'followers' ? pages.followers + 1 : pages.followers,
+      followingPage: tab === 'following' ? pages.following + 1 : pages.following,
+      limit: PAGE_SIZE,
+    })
+      .then((n) => applyPage(n, tab, true))
+      .catch(() => {
+        /* A failed page fetch leaves hasMore set — the next
+           scroll to the end retries it. */
+      })
+      .finally(() => {
+        fetchingRef.current = false;
+        setLoadingMore(false);
+      });
+  };
 
   const goBack = () => {
     if (router.canGoBack()) router.back();
@@ -134,9 +243,8 @@ export default function NetworkScreen() {
       .finally(() => setBusyFor(null));
   };
 
-  const rows = (network?.[tab] ?? []).filter(
-    (u): u is NetworkUser => u !== null,
-  );
+  const rows = tab === 'followers' ? followers : following;
+  const total = totals === null ? rows.length : totals[tab];
 
   const segment = (value: NetworkTab, label: string) => (
     <Pressable
@@ -156,6 +264,93 @@ export default function NetworkScreen() {
       </Text>
     </Pressable>
   );
+
+  const renderPerson = ({
+    item: person,
+    index,
+  }: {
+    item: NetworkUser;
+    index: number;
+  }) => {
+    const isSelf =
+      signedIn &&
+      user.username.toLowerCase() === person.username.toLowerCase();
+    const followingState = isFollowingOf(person);
+    const showButton =
+      signedIn && !isSelf && person.isFollowing !== undefined;
+    return (
+      <Pressable
+        onPress={() => router.push(`/user/${person.username}`)}
+        accessibilityRole="button"
+        accessibilityLabel={`Open ${person.displayName || person.username}`}
+        style={({ pressed }) => [
+          styles.row,
+          index > 0 && styles.rowDivider,
+          pressed && styles.rowPressed,
+        ]}
+      >
+        <Avatar
+          url={person.avatarUrl}
+          name={person.displayName || person.username}
+          seed={person.id}
+          size={44}
+        />
+        <View style={styles.rowTexts}>
+          <Text style={styles.rowName} numberOfLines={1}>
+            {person.displayName || person.username}
+          </Text>
+          <Text style={styles.rowMeta} numberOfLines={1}>
+            @{person.username}
+            {person.tier ? (
+              <>
+                <Text style={styles.metaSeparator}> · </Text>
+                {tierLabel(person.tier)}
+              </>
+            ) : (
+              ''
+            )}
+          </Text>
+        </View>
+        {showButton && (
+          <Pressable
+            onPress={() => onToggleFollow(person)}
+            disabled={busyFor === person.username}
+            accessibilityRole="button"
+            accessibilityLabel={
+              followingState
+                ? `Unfollow ${person.username}`
+                : `Follow ${person.username}`
+            }
+            accessibilityState={{ selected: followingState }}
+            style={({ pressed }) => [
+              styles.followButton,
+              followingState
+                ? styles.followButtonOn
+                : styles.followButtonOff,
+              pressed && styles.pressed,
+            ]}
+          >
+            {busyFor === person.username ? (
+              <ActivityIndicator
+                size="small"
+                color={followingState ? theme.accent : theme.onAccent}
+              />
+            ) : (
+              <Text
+                style={
+                  followingState
+                    ? styles.followButtonTextOn
+                    : styles.followButtonTextOff
+                }
+              >
+                {followingState ? 'Following' : 'Follow'}
+              </Text>
+            )}
+          </Pressable>
+        )}
+      </Pressable>
+    );
+  };
 
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -180,17 +375,21 @@ export default function NetworkScreen() {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <View style={styles.content}>
         {loadError ? (
           <Text style={styles.note}>{loadError}</Text>
-        ) : network === null ? (
-          <View style={styles.center}>
-            <ActivityIndicator color={theme.accent} />
+        ) : !loaded ? (
+          <View style={styles.card}>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <View key={i} style={i > 0 && styles.rowDivider}>
+                <SkeletonPersonRow />
+              </View>
+            ))}
           </View>
         ) : (
           <>
             <Text style={styles.countLine}>
-              {rows.length} {tab === 'followers' ? 'Followers' : 'Following'}
+              {total} {tab === 'followers' ? 'Followers' : 'Following'}
             </Text>
             {actionError !== null && (
               <Text style={styles.errorText}>{actionError}</Text>
@@ -203,95 +402,25 @@ export default function NetworkScreen() {
               </Text>
             ) : (
               <View style={styles.card}>
-                {rows.map((person, i) => {
-                  const isSelf =
-                    signedIn &&
-                    user.username.toLowerCase() ===
-                      person.username.toLowerCase();
-                  const following = isFollowingOf(person);
-                  const showButton =
-                    signedIn && !isSelf && person.isFollowing !== undefined;
-                  return (
-                    <Pressable
-                      key={person.id}
-                      onPress={() => router.push(`/user/${person.username}`)}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Open ${person.displayName || person.username}`}
-                      style={({ pressed }) => [
-                        styles.row,
-                        i > 0 && styles.rowDivider,
-                        pressed && styles.rowPressed,
-                      ]}
-                    >
-                      <Avatar
-                        url={person.avatarUrl}
-                        name={person.displayName || person.username}
-                        seed={person.id}
-                        size={44}
-                      />
-                      <View style={styles.rowTexts}>
-                        <Text style={styles.rowName} numberOfLines={1}>
-                          {person.displayName || person.username}
-                        </Text>
-                        <Text style={styles.rowMeta} numberOfLines={1}>
-                          @{person.username}
-                          {person.tier ? (
-                            <>
-                              <Text style={styles.metaSeparator}> · </Text>
-                              {tierLabel(person.tier)}
-                            </>
-                          ) : (
-                            ''
-                          )}
-                        </Text>
+                <FlatList
+                  data={rows}
+                  keyExtractor={(person) => person.id}
+                  renderItem={renderPerson}
+                  onEndReached={loadMore}
+                  onEndReachedThreshold={0.5}
+                  ListFooterComponent={
+                    loadingMore ? (
+                      <View style={styles.rowDivider}>
+                        <SkeletonPersonRow />
                       </View>
-                      {showButton && (
-                        <Pressable
-                          onPress={() => onToggleFollow(person)}
-                          disabled={busyFor === person.username}
-                          accessibilityRole="button"
-                          accessibilityLabel={
-                            following
-                              ? `Unfollow ${person.username}`
-                              : `Follow ${person.username}`
-                          }
-                          accessibilityState={{ selected: following }}
-                          style={({ pressed }) => [
-                            styles.followButton,
-                            following
-                              ? styles.followButtonOn
-                              : styles.followButtonOff,
-                            pressed && styles.pressed,
-                          ]}
-                        >
-                          {busyFor === person.username ? (
-                            <ActivityIndicator
-                              size="small"
-                              color={
-                                following ? theme.accent : theme.onAccent
-                              }
-                            />
-                          ) : (
-                            <Text
-                              style={
-                                following
-                                  ? styles.followButtonTextOn
-                                  : styles.followButtonTextOff
-                              }
-                            >
-                              {following ? 'Following' : 'Follow'}
-                            </Text>
-                          )}
-                        </Pressable>
-                      )}
-                    </Pressable>
-                  );
-                })}
+                    ) : undefined
+                  }
+                />
               </View>
             )}
           </>
         )}
-      </ScrollView>
+      </View>
     </SafeAreaView>
   );
 }
@@ -377,16 +506,15 @@ const createStyles = (theme: Theme) =>
       color: theme.onAccent,
     },
     content: {
+      // The body under the fixed header/segmented: the count line
+      // and notes sit at the top, the card takes the rest and the
+      // FlatList scrolls inside it (audit S2 virtualisation).
+      flex: 1,
       width: '100%',
       maxWidth: CONTENT_MAX_WIDTH,
       alignSelf: 'center',
       paddingHorizontal: spacing.screenEdge,
       paddingBottom: spacing.xxl,
-    },
-    center: {
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: spacing.xxl,
     },
     countLine: {
       // network.html: px-1 (4), mb-3 (12), text-xs (12)
@@ -403,7 +531,9 @@ const createStyles = (theme: Theme) =>
     card: {
       // network.html: white, rounded-3xl (24), 1px hairline
       // border, overflow hidden so the dividers and the rows'
-      // pressed tint span/stop at the card's full width.
+      // pressed tint span/stop at the card's full width. Flexes
+      // to fill the body so the FlatList scrolls within it.
+      flex: 1,
       backgroundColor: theme.surface,
       borderRadius: radii.card,
       borderWidth: 1,

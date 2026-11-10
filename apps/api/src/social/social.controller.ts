@@ -80,13 +80,20 @@ export class SocialController {
   @Get('users/:username/network')
   @ApiOkResponse({
     description:
-      'Followers + following lists, fully populated, in the web’s unsorted, unpaginated order. Rows are enriched with the user’s rank tier, plus the caller’s follow state when a Bearer <redacted> is sent.',
+      'Followers + following lists, populated, in the web’s unsorted order. Rows are enriched with the user’s rank tier, plus the caller’s follow state when a Bearer <redacted> is sent. Optional pagination (?followersPage&followingPage&limit, per-list pages, limit defaults to 20 and caps at 50) — with no paging params the full lists are returned as before.',
   })
   network(
     @Param('username') username: string,
     @Headers('authorization') authorization?: string,
+    @Query('followersPage') followersPage?: string,
+    @Query('followingPage') followingPage?: string,
+    @Query('limit') limit?: string,
   ): Promise<NetworkResponse> {
-    return this.social.getNetwork(username, authorization);
+    return this.social.getNetwork(username, authorization, {
+      followersPage,
+      followingPage,
+      limit,
+    });
   }
 
   @Get('users/:username/activity')

@@ -12,6 +12,7 @@
     "build:api": "npm run build -w @kaikansen/api",
     "dev:api": "npm run start:dev -w @kaikansen/api",
     "test:api": "npm run test -w @kaikansen/api",
+    "test:mobile": "npm run test -w @kaikansen/mobile",
     "dev:mobile": "npm run start -w @kaikansen/mobile",
     "typecheck:mobile": "npm run typecheck -w @kaikansen/mobile"
   },

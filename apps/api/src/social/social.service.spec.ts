@@ -234,6 +234,8 @@ function makeModels() {
     failNextCreate: false as boolean | { code: number },
     find: (filter: Record<string, unknown>) =>
       chain(follows.filter((f) => matches(f, filter))),
+    countDocuments: (filter: Record<string, unknown>) =>
+      queryOf(follows.filter((f) => matches(f, filter)).length),
     findOne: (filter: Record<string, unknown>) =>
       queryOf(follows.find((f) => matches(f, filter)) ?? null),
     findOneAndDelete: (filter: Record<string, unknown>) => ({
@@ -600,6 +602,71 @@ describe('SocialService — network lists', () => {
     const forged = await service.getNetwork('alice', bearer('tok-forged'));
     expect(forged.followers[0]).not.toHaveProperty('isFollowing');
     expect(forged.followers[0]).toHaveProperty('tier');
+  });
+
+  it('legacy mode (no paging params) reports full totals with limit null', async () => {
+    const models = makeModels();
+    models.followModel.seed({ followerId: BOB, followeeId: ALICE });
+    models.followModel.seed({ followerId: CAROL, followeeId: ALICE });
+    models.followModel.seed({ followerId: ALICE, followeeId: BOB });
+    const { service } = makeService(models);
+
+    const network = await service.getNetwork('alice');
+    expect(network.followersTotal).toBe(2);
+    expect(network.followingTotal).toBe(1);
+    expect(network.followersHasMore).toBe(false);
+    expect(network.followingHasMore).toBe(false);
+    expect(network.followersPage).toBe(1);
+    expect(network.followingPage).toBe(1);
+    expect(network.limit).toBeNull();
+  });
+
+  it('pages each list independently with totals + hasMore (audit S2)', async () => {
+    const models = makeModels();
+    models.followModel.seed({ followerId: BOB, followeeId: ALICE });
+    models.followModel.seed({ followerId: CAROL, followeeId: ALICE });
+    models.followModel.seed({ followerId: ALICE, followeeId: BOB });
+    const { service } = makeService(models);
+
+    const page1 = await service.getNetwork('alice', undefined, {
+      limit: '1',
+    });
+    expect(page1.followers.map((u) => u?.username)).toEqual(['bob']);
+    expect(page1.followersTotal).toBe(2);
+    expect(page1.followersHasMore).toBe(true);
+    expect(page1.limit).toBe(1);
+    // The other list pages on its own page number (default 1).
+    expect(page1.following.map((u) => u?.username)).toEqual(['bob']);
+    expect(page1.followingTotal).toBe(1);
+    expect(page1.followingHasMore).toBe(false);
+
+    const page2 = await service.getNetwork('alice', undefined, {
+      followersPage: '2',
+      limit: '1',
+    });
+    expect(page2.followers.map((u) => u?.username)).toEqual(['carol']);
+    expect(page2.followersHasMore).toBe(false);
+    expect(page2.followersPage).toBe(2);
+    // Enrichment rides along on the page's rows.
+    expect(page2.followers[0]).toHaveProperty('tier', 'academy');
+  });
+
+  it('caps the page size at 50 and defaults garbage params', async () => {
+    const models = makeModels();
+    models.followModel.seed({ followerId: BOB, followeeId: ALICE });
+    const { service } = makeService(models);
+
+    const capped = await service.getNetwork('alice', undefined, {
+      limit: '500',
+    });
+    expect(capped.limit).toBe(50);
+
+    const garbage = await service.getNetwork('alice', undefined, {
+      followersPage: 'banana',
+      limit: '0',
+    });
+    expect(garbage.followersPage).toBe(1);
+    expect(garbage.limit).toBe(20);
   });
 
   it('404s unknown usernames', async () => {

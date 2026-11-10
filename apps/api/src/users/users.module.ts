@@ -12,7 +12,10 @@ import {
   ThemeCache,
   ThemeCacheSchema,
 } from '../themes/theme-cache.schema';
+import { Follow, FollowSchema } from '../social/follow.schema';
 import { AnilistHistoryClient } from './anilist-history.client';
+import { CountersController } from './counters.controller';
+import { CountersService } from './counters.service';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 
@@ -50,12 +53,14 @@ export class UsersModule {
               { name: Rating.name, schema: RatingSchema },
               { name: WatchHistory.name, schema: WatchHistorySchema },
               { name: ThemeCache.name, schema: ThemeCacheSchema },
+              { name: Follow.name, schema: FollowSchema },
             ]),
           ]
         : [],
-      controllers: [UsersController],
+      controllers: [UsersController, CountersController],
       providers: [
         UsersService,
+        CountersService,
         AnilistHistoryClient,
         AuthService,
         AnilistClient,

@@ -335,6 +335,17 @@ export interface ResetPasswordResponse {
 }
 
 /**
+ * Response body of POST /auth/logout — the caller's refresh
+ * sessions are revoked server-side (every tracked family cleared
+ * and the session generation bumped), so the stored refresh token
+ * is dead everywhere, not just deleted from this device. Access
+ * tokens are stateless and simply expire (≤15 minutes).
+ */
+export interface LogoutResponse {
+  ok: true;
+}
+
+/**
  * Request body of PATCH /auth/me — the web's profile edit (its
  * PATCH /api/users/me zod schema, ported): a PARTIAL update in which
  * omitted fields keep their stored values and unknown fields are
@@ -1190,9 +1201,9 @@ export interface ProfileStats {
    * Clients format hours from this (seconds / 3600, 1 decimal).
    */
   totalListenedSeconds: number;
-  /** The user document's stored follower counter (as served by the profile/stats projections). */
+  /** Follower count, counted live from the follows collection (the source of truth — audit S3). */
   followersCount: number;
-  /** The user document's stored following counter (as served by the profile/stats projections). */
+  /** Following count, counted live from the follows collection (the source of truth — audit S3). */
   followingCount: number;
 }
 
@@ -1230,13 +1241,34 @@ export interface UserStats {
 /**
  * Response body of GET /users/:username/network — BOTH lists, in the
  * web's order: the Follow queries carry no sort, so rows come back
- * in storage (insertion) order, unpaginated however long they get.
- * An element is null when the other account no longer exists — the
- * web's populate yields exactly that.
+ * in storage (insertion) order. An element is null when the other
+ * account no longer exists — the web's populate yields exactly that.
+ *
+ * Pagination (app addition, audit S2 — the full lists froze the
+ * Network screen exactly like the Library's AniList segment did):
+ * send `followersPage` / `followingPage` (1-based, independent per
+ * list) and `limit` (default 20, max 50) to page; the meta fields
+ * below are ALWAYS present. With NO pagination params at all the
+ * endpoint answers the web's full lists (the mode the Home/Social
+ * rails still read), with `limit: null` and both hasMore false.
  */
 export interface NetworkResponse {
   followers: (NetworkUser | null)[];
   following: (NetworkUser | null)[];
+  /** Total follower rows (including any since-deleted accounts). */
+  followersTotal: number;
+  /** Total following rows (including any since-deleted accounts). */
+  followingTotal: number;
+  /** Another followers page exists after the one served. */
+  followersHasMore: boolean;
+  /** Another following page exists after the one served. */
+  followingHasMore: boolean;
+  /** The followers page served (1 in legacy mode). */
+  followersPage: number;
+  /** The following page served (1 in legacy mode). */
+  followingPage: number;
+  /** The per-list page size served, or null in legacy mode. */
+  limit: number | null;
 }
 
 /**

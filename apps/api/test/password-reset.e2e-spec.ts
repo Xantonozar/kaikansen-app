@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { getModelToken } from '@nestjs/mongoose';
+import { ThrottlerGuard } from '@nestjs/throttler';
 import request from 'supertest';
 import { AppModule } from './../src/app.module';
 import { AuthController } from './../src/auth/auth.controller';
@@ -162,7 +163,14 @@ describe('Password reset flow with a mocked model (e2e)', () => {
         { provide: getModelToken(User.name), useValue: model },
         { provide: MailerService, useValue: mailer },
       ],
-    }).compile();
+    })
+      // This suite wires the controller by hand (no AuthModule, so
+      // no throttler buckets are registered): the controller's
+      // ThrottlerGuard is stood down — throttling has its own
+      // dedicated suite (auth-throttle.e2e-spec.ts).
+      .overrideGuard(ThrottlerGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
     app = moduleFixture.createNestApplication();
     await app.init();
 

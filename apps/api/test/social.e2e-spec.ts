@@ -289,6 +289,8 @@ function makeFakeModels() {
     docs: follows,
     find: (filter: Record<string, unknown>) =>
       chain(follows.filter((f) => matches(f, filter))),
+    countDocuments: (filter: Record<string, unknown>) =>
+      queryOf(follows.filter((f) => matches(f, filter)).length),
     findOne: (filter: Record<string, unknown>) =>
       queryOf(follows.find((f) => matches(f, filter)) ?? null),
     findOneAndDelete: (filter: Record<string, unknown>) => ({
@@ -579,7 +581,17 @@ describe('Social flow with mocked models (e2e)', () => {
     });
 
     const network = await http.get('/users/bob/network').expect(200);
-    expect(network.body).toEqual({ followers: [], following: [] });
+    expect(network.body).toEqual({
+      followers: [],
+      following: [],
+      followersTotal: 0,
+      followingTotal: 0,
+      followersHasMore: false,
+      followingHasMore: false,
+      followersPage: 1,
+      followingPage: 1,
+      limit: null,
+    });
   });
 
   it('runs the follow cycle: counters, notification, idempotency, unfollow', async () => {
@@ -706,6 +718,79 @@ describe('Social flow with mocked models (e2e)', () => {
     const anon = await http.get('/users/carol/network').expect(200);
     expect(anon.body.followers[0].tier).toBe('genin');
     expect(anon.body.followers[0]).not.toHaveProperty('isFollowing');
+  });
+
+  it('pages the network lists with totals + hasMore (audit S2)', async () => {
+    const http = request(app.getHttpServer());
+    // A fresh target with a deterministic network, seeded straight
+    // into the fakes (insertion order is the served order).
+    const HENRY = '507f1f77bcf86cd7994390d4';
+    const extras = [
+      ['dave', '507f1f77bcf86cd7994390e5'],
+      ['erin', '507f1f77bcf86cd7994390e6'],
+      ['frank', '507f1f77bcf86cd7994390e7'],
+      ['gwen', '507f1f77bcf86cd7994390e8'],
+    ] as const;
+    models.userModel.docs.push({
+      _id: HENRY,
+      username: 'henry',
+      displayName: 'Henry H',
+      email: 'henry@example.com',
+      avatarUrl: null,
+      bio: '',
+      totalRatings: 0,
+      totalFollowers: 0,
+      totalFollowing: 0,
+      totalTime: 0,
+      isPublic: true,
+    });
+    for (const [name, id] of extras) {
+      models.userModel.docs.push({
+        _id: id,
+        username: name,
+        displayName: name,
+        email: `${name}@example.com`,
+        avatarUrl: null,
+        bio: '',
+        totalRatings: 0,
+        totalFollowers: 0,
+        totalFollowing: 0,
+        totalTime: 0,
+        isPublic: true,
+      });
+      models.followModel.docs.push({ followerId: id, followeeId: HENRY });
+    }
+    models.followModel.docs.push({ followerId: ALICE, followeeId: HENRY });
+    models.followModel.docs.push({ followerId: HENRY, followeeId: CAROL });
+
+    const page1 = await http.get('/users/henry/network?limit=2').expect(200);
+    expect(page1.body.followers.map((u: { username: string }) => u.username)).toEqual([
+      'dave',
+      'erin',
+    ]);
+    expect(page1.body.followersTotal).toBe(5);
+    expect(page1.body.followersHasMore).toBe(true);
+    expect(page1.body.following.map((u: { username: string }) => u.username)).toEqual([
+      'carol',
+    ]);
+    expect(page1.body.followingTotal).toBe(1);
+    expect(page1.body.followingHasMore).toBe(false);
+    expect(page1.body.limit).toBe(2);
+
+    const page3 = await http
+      .get('/users/henry/network?followersPage=3&limit=2')
+      .expect(200);
+    expect(page3.body.followers.map((u: { username: string }) => u.username)).toEqual([
+      'alice',
+    ]);
+    expect(page3.body.followersHasMore).toBe(false);
+    expect(page3.body.followersPage).toBe(3);
+
+    // No params: the legacy full list, limit null.
+    const legacy = await http.get('/users/henry/network').expect(200);
+    expect(legacy.body.followers).toHaveLength(5);
+    expect(legacy.body.limit).toBeNull();
+    expect(legacy.body.followersHasMore).toBe(false);
   });
 
   it('gates profile activity and composes the friends feed', async () => {

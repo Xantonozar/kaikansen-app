@@ -166,16 +166,9 @@ export function queueItemsFromSummaries(
   return items.map(queueItemFromSummary);
 }
 
-/**
- * Which surface family claimed the queue (owner ruling
- * 2026-11-10): 'playlist' and 'offline' are the two origins
- * allowed to open the player route; 'other' covers every other
- * surface (Home, Search, Season, Anime/Artist detail, Library's
- * non-offline segments, Favourites, theme detail itself) and is
- * also the default for untagged and queue-less sessions — the
- * safe side of the ruling.
- */
-export type QueueOrigin = 'playlist' | 'offline' | 'other';
+export type { QueueOrigin } from './queueOrigin';
+export { isPlayerRouteOrigin } from './queueOrigin';
+import type { QueueOrigin } from './queueOrigin';
 
 export interface PlaybackQueue {
   items: QueueItem[];

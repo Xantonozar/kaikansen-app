@@ -127,6 +127,38 @@ const feedRowStyles = StyleSheet.create({
   },
 });
 
+/**
+ * Person-row skeleton — one Network row: the 44pt avatar
+ * circle, two text bars and the follow pill, in the Network
+ * card's own row frame (16pt padding — the screen's rows).
+ */
+export function SkeletonPersonRow() {
+  return (
+    <View style={personRowStyles.row}>
+      <SkeletonBlock width={44} height={44} radius={radii.pill} />
+      <View style={personRowStyles.main}>
+        <SkeletonBlock width="46%" height={13} radius={6} />
+        <SkeletonBlock width="30%" height={11} radius={5} />
+      </View>
+      <SkeletonBlock width={64} height={28} radius={radii.pill} />
+    </View>
+  );
+}
+
+const personRowStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.lg,
+  },
+  main: {
+    flex: 1,
+    gap: 6,
+  },
+});
+
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
     rowCard: {

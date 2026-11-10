@@ -3,6 +3,7 @@ import { INestApplication } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { getModelToken } from '@nestjs/mongoose';
 import * as jwt from 'jsonwebtoken';
+import { ThrottlerGuard } from '@nestjs/throttler';
 import request from 'supertest';
 import { AppModule } from './../src/app.module';
 import { AnilistClient } from './../src/auth/anilist.client';
@@ -192,7 +193,13 @@ describe('AniList flow with mocked client + model (e2e)', () => {
         { provide: AnilistClient, useValue: fakeAnilistClient },
         { provide: getModelToken(User.name), useValue: model },
       ],
-    }).compile();
+    })
+      // Hand-wired controllers (no AuthModule): the auth
+      // controller's ThrottlerGuard is stood down — throttling has
+      // its own dedicated suite (auth-throttle.e2e-spec.ts).
+      .overrideGuard(ThrottlerGuard)
+      .useValue({ canActivate: () => true })
+    .compile();
     app = moduleFixture.createNestApplication();
     await app.init();
   });
