@@ -403,7 +403,10 @@ export default function LibraryScreen() {
      the segment's loaded list becomes the provider queue at the
      tapped row, then navigation follows the ruling above (theme
      detail by default; the Offline segment passes 'player'). The
-     mode claimed is the mode that row would have opened with. */
+     mode claimed is the mode that row would have opened with.
+     The queue's origin tag mirrors the destination: only the
+     Offline segment's claim is 'offline' — every other segment
+     is 'other', so the mini player follows the same ruling. */
   const { session, playback, startQueue } = usePlaybackSession();
   const playWithQueue = useCallback(
     (
@@ -415,7 +418,12 @@ export default function LibraryScreen() {
       destination?: PlayDestination,
     ) => {
       if (items.length > 0 && index >= 0) {
-        startQueue(items, index, mode);
+        startQueue(
+          items,
+          index,
+          mode,
+          destination === 'player' ? 'offline' : 'other',
+        );
       }
       playTheme(slug, mode, atEntryId, destination);
     },

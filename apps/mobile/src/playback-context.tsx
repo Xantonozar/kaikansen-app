@@ -88,6 +88,21 @@ import { usePlayback } from './usePlayback';
  * keeps the original advance-or-stop behaviour. Manual next()
  * wraps the same way in 'queue' mode, so the mini player and the
  * player route agree.
+ *
+ * QUEUE ORIGIN (owner ruling 2026-11-10, completed): the player
+ * route may open ONLY for playback started from a Playlist or
+ * from Offline/Downloads; every other start lands on the theme
+ * detail. Direct entry points have followed that since d450320;
+ * the queue now also records WHERE it was claimed (`origin` on
+ * PlaybackQueue, set by startQueue / startSession) so the one
+ * surface that re-opens a live session — the mini player — can
+ * follow the same rule: a 'playlist' or 'offline' origin reopens
+ * the player route; anything else (including no queue at all)
+ * navigates to the current track's theme detail instead.
+ * Advancing never changes the origin: a playlist queue stays a
+ * playlist queue to its last track. A fresh claim replaces it —
+ * theme detail's queue claim and any queue-less claim are
+ * 'other' by construction.
  */
 export interface PlaybackSession {
   slug: string | null;
@@ -151,9 +166,23 @@ export function queueItemsFromSummaries(
   return items.map(queueItemFromSummary);
 }
 
+/**
+ * Which surface family claimed the queue (owner ruling
+ * 2026-11-10): 'playlist' and 'offline' are the two origins
+ * allowed to open the player route; 'other' covers every other
+ * surface (Home, Search, Season, Anime/Artist detail, Library's
+ * non-offline segments, Favourites, theme detail itself) and is
+ * also the default for untagged and queue-less sessions — the
+ * safe side of the ruling.
+ */
+export type QueueOrigin = 'playlist' | 'offline' | 'other';
+
 export interface PlaybackQueue {
   items: QueueItem[];
   index: number;
+  /** The surface family that claimed this queue. Set at claim
+      time, preserved across advances and entry switches. */
+  origin: QueueOrigin;
 }
 
 /** Repeat modes the player route's control cycles through. */
@@ -208,12 +237,20 @@ interface PlaybackContextValue {
   /** Alias of hasPrev (queue-spec naming). */
   hasPrevious: boolean;
   /** Claim playback of a list: session starts on `items[startIndex]`
-      in `mode`, and the rest becomes the queue. */
+      in `mode`, and the rest becomes the queue. `origin` tags
+      which surface family claimed it (defaults to 'other'); only
+      'playlist' and 'offline' claims may open the player route —
+      see the header's QUEUE ORIGIN note. */
   startQueue: (
     items: QueueItem[],
     startIndex: number,
     mode: PlaybackMode,
+    origin?: QueueOrigin,
   ) => void;
+  /** The live queue's origin, or 'other' when there is no queue —
+      the mini player routes its tap on this (player route for
+      'playlist'/'offline', theme detail otherwise). */
+  queueOrigin: QueueOrigin;
   /** Alias of startQueue in the session's current mode (watch when
       the session is idle) — for claim sites that think in terms of
       "the list this row belongs to" rather than a mode switch. */
@@ -331,7 +368,10 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           Math.max(queueClaim.index, 0),
           queueClaim.items.length - 1,
         );
-        setQueue({ items: queueClaim.items, index });
+        // A session claim's queue is 'other' by construction —
+        // its only caller is theme detail ([theme, ...similar]),
+        // which is not a player-route origin.
+        setQueue({ items: queueClaim.items, index, origin: 'other' });
       } else {
         setQueue(null);
       }
@@ -371,7 +411,12 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const startQueue = useCallback(
-    (items: QueueItem[], startIndex: number, mode: PlaybackMode) => {
+    (
+      items: QueueItem[],
+      startIndex: number,
+      mode: PlaybackMode,
+      origin: QueueOrigin = 'other',
+    ) => {
       if (items.length === 0) return;
       const index = Math.min(Math.max(startIndex, 0), items.length - 1);
       chainRef.current = {
@@ -381,7 +426,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         direction: 1,
         restartFrom: null,
       };
-      setQueue({ items, index });
+      setQueue({ items, index, origin });
       claimQueueItem(items[index], mode);
     },
     [claimQueueItem],
@@ -426,7 +471,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         chainRef.current.tried.add(index);
         chainRef.current.direction = direction;
       }
-      setQueue({ items: currentQueue.items, index });
+      // The spread keeps the queue's origin: advancing within a
+      // playlist/offline queue never re-tags it.
+      setQueue({ ...currentQueue, index });
       // The mode is whatever the session runs in — advancing
       // never flips watch/listen. The claim's W2 opt-in rides
       // along for the same reason: the degradation a screen
@@ -677,6 +724,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       updateSession,
       endSession,
       queue,
+      queueOrigin: queue?.origin ?? 'other',
       queueIndex: queue?.index ?? 0,
       currentQueueItem,
       nextQueueItem,

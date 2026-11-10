@@ -109,7 +109,7 @@ export default function AnimeDetailScreen() {
         );
         const index = ordered.findIndex((t) => t.slug === slug);
         if (index >= 0) {
-          startQueue(queueItemsFromSummaries(ordered), index, 'watch');
+          startQueue(queueItemsFromSummaries(ordered), index, 'watch', 'other');
         }
       }
       openTheme(slug);

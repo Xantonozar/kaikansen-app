@@ -118,7 +118,7 @@ export default function FavouritesScreen() {
   const playAt = useCallback(
     (index: number, slug: string) => {
       if (fav && fav.themes.length > 0) {
-        startQueue(queueItemsFromSummaries(fav.themes), index, 'watch');
+        startQueue(queueItemsFromSummaries(fav.themes), index, 'watch', 'other');
       }
       // Theme detail, not the player route — the player route is
       // playlist/offline-only (owner ruling 2026-11-10).

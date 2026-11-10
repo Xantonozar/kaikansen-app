@@ -265,7 +265,7 @@ export default function SearchScreen() {
   const playFromList = (items: ThemeSummary[], index: number) => {
     const item = items[index];
     if (!item) return;
-    startQueue(queueItemsFromSummaries(items), index, 'watch');
+    startQueue(queueItemsFromSummaries(items), index, 'watch', 'other');
     // Theme detail, not the player route — the player route is
     // playlist/offline-only (owner ruling 2026-11-10).
     router.push(`/theme/${item.slug}`);

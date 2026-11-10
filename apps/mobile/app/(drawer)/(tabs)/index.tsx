@@ -196,7 +196,7 @@ export default function HomeScreen() {
           atEntryId: e.atEntryId,
         }));
         const index = playable.findIndex((e) => e.id === entry.id);
-        if (index >= 0) startQueue(items, index, entry.mode);
+        if (index >= 0) startQueue(items, index, entry.mode, 'other');
       }
       router.push(`/theme/${entry.theme.slug}`);
     },
@@ -879,7 +879,7 @@ export default function HomeScreen() {
                 // player route is playlist/offline-only (owner
                 // ruling 2026-11-10), and the detail hero renders
                 // the claimed session inline.
-                startQueue(queueItemsFromSummaries(popular), index, 'watch');
+                startQueue(queueItemsFromSummaries(popular), index, 'watch', 'other');
                 openTheme(item.slug);
               }}
               saved={favorites.isFavorite(item.slug)}

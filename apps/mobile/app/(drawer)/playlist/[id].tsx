@@ -217,7 +217,7 @@ export default function PlaylistDetailScreen() {
       row play does. */
   const playAll = useCallback(() => {
     if (!playlist || playlist.items.length === 0) return;
-    startQueue(queueItemsFromSummaries(playlist.items), 0, 'watch');
+    startQueue(queueItemsFromSummaries(playlist.items), 0, 'watch', 'playlist');
     router.push({
       pathname: '/player',
       params: { slug: playlist.items[0].slug, mode: 'watch' },
@@ -232,7 +232,7 @@ export default function PlaylistDetailScreen() {
       const j = Math.floor(Math.random() * (i + 1));
       [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
     }
-    startQueue(queueItemsFromSummaries(shuffled), 0, 'watch');
+    startQueue(queueItemsFromSummaries(shuffled), 0, 'watch', 'playlist');
     router.push({
       pathname: '/player',
       params: { slug: shuffled[0].slug, mode: 'watch' },
@@ -625,6 +625,7 @@ export default function PlaylistDetailScreen() {
                     queueItemsFromSummaries(playlist.items),
                     index,
                     'watch',
+                    'playlist',
                   );
                   router.push({
                     pathname: '/player',

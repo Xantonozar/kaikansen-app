@@ -97,7 +97,7 @@ export default function ArtistDetailScreen() {
       // 2026-11-10).
       const index = list.findIndex((t) => t.slug === themeSlug);
       if (index >= 0) {
-        startQueue(queueItemsFromSummaries(list), index, 'watch');
+        startQueue(queueItemsFromSummaries(list), index, 'watch', 'other');
       }
       openTheme(themeSlug);
     },

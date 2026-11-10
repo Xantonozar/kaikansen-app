@@ -62,10 +62,11 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * to the theme detail route (/theme/<slug>) instead; the detail
  * hero renders the claimed session inline, so nothing is lost.
  * Do not add new pushes to this route outside the two allowed
- * origins. One known exception stands unresolved: the mini player
- * still reopens this route for ANY session, because the playback
- * queue carries no origin (see src/components/MiniPlayer.tsx) —
- * fixing that needs queue-origin tracking, a separate decision.
+ * origins. The mini player follows the same rule: the playback
+ * queue records its origin at claim time (see
+ * src/playback-context.tsx, QUEUE ORIGIN), and the bar reopens
+ * this route only for 'playlist'/'offline' sessions — any other
+ * session's tap lands on the current track's theme detail.
  *
  * Composition follows the Lavender Dusk player mock (design
  * polish pass): NO header bar — the media carries two dark-glass

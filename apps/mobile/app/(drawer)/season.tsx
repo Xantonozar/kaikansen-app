@@ -145,7 +145,7 @@ export default function SeasonScreen() {
       // playlist/offline-only (owner ruling 2026-11-10).
       const index = list.findIndex((t) => t.slug === slug);
       if (index >= 0) {
-        startQueue(queueItemsFromSummaries(list), index, 'watch');
+        startQueue(queueItemsFromSummaries(list), index, 'watch', 'other');
       }
       openTheme(slug);
     },

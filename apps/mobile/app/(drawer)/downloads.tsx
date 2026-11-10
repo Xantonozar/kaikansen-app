@@ -93,7 +93,7 @@ export default function DownloadsScreen() {
     }));
     const index = healthy.findIndex((r) => r.id === record.id);
     if (queueItems.length > 0 && index >= 0) {
-      startQueue(queueItems, index, record.mode);
+      startQueue(queueItems, index, record.mode, 'offline');
     }
     router.push({
       pathname: '/player',

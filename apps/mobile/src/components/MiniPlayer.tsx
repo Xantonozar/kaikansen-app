@@ -37,9 +37,14 @@ const HIDDEN_ROUTES: readonly string[] = ['/player', '/quiz/solo', '/quiz/room']
  * Mini player (Lavender Dusk handoff §4) — the floating white bar
  * from the finalized mocks: surface card, a thin mauve progress
  * line on its top edge, rounded cover thumb, title + artist, and
- * the mauveDeep pause/play disc. The whole bar opens the player
- * route with the live session (slug / mode / entry — the same
- * params the route already accepts).
+ * the mauveDeep pause/play disc. Tapping the bar follows the
+ * owner ruling of 2026-11-10 (the player route is
+ * playlist/offline-only): a session whose queue origin is
+ * 'playlist' or 'offline' reopens the player route with the live
+ * session (slug / mode / entry — the same params the route
+ * already accepts); any other session navigates to the current
+ * track's theme detail instead. Either way it is navigation
+ * only — playback is never interrupted.
  *
  * Two mounts, one component (see app/(drawer)/_layout.tsx and
  * src/components/TabBar.tsx):
@@ -64,7 +69,7 @@ export function MiniPlayer({
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
   const pathname = usePathname();
-  const { session, playback, nowPlaying, hasNext, next } =
+  const { session, playback, nowPlaying, hasNext, next, queueOrigin } =
     usePlaybackSession();
 
   if (!session.active || !nowPlaying || playback.unavailable) return null;
@@ -74,17 +79,19 @@ export function MiniPlayer({
   const entryId =
     session.entry?.atEntryId ?? session.entryIdOverride ?? null;
 
-  const openPlayer = () => {
+  // The ruling's last surface, resolved by queue-origin tracking
+  // (see src/playback-context.tsx): 'playlist'/'offline' sessions
+  // reopen the player route; every other origin — and queue-less
+  // sessions, which read as 'other' — go to the current track's
+  // theme detail, whose hero renders the live session inline.
+  const playerOrigin = queueOrigin === 'playlist' || queueOrigin === 'offline';
+
+  const openNowPlaying = () => {
     if (!session.slug) return;
-    // KNOWN EXCEPTION to the owner ruling of 2026-11-10 (the
-    // player route is playlist/offline-only; every other entry
-    // point now lands on the theme detail): the bar still reopens
-    // the player route for any session because the playback queue
-    // carries NO origin — PlaybackQueue is { items, index } and
-    // startQueue records nothing about which surface claimed it,
-    // so a playlist-born session cannot be told apart from a
-    // Home-born one here. Left as is deliberately; resolving it
-    // needs queue-origin tracking, a separate owner decision.
+    if (!playerOrigin) {
+      router.push(`/theme/${session.slug}`);
+      return;
+    }
     router.push({
       pathname: '/player',
       params: {
@@ -97,9 +104,11 @@ export function MiniPlayer({
 
   return (
     <Pressable
-      onPress={openPlayer}
+      onPress={openNowPlaying}
       accessibilityRole="button"
-      accessibilityLabel={`Now playing: ${nowPlaying.title}. Open the player`}
+      accessibilityLabel={`Now playing: ${nowPlaying.title}. ${
+        playerOrigin ? 'Open the player' : 'Open the theme'
+      }`}
       style={({ pressed }) => [
         styles.card,
         placement === 'overlay' ? styles.cardOverlay : styles.cardInBar,
