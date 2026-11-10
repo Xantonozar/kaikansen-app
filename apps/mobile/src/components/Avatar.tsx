@@ -17,7 +17,12 @@ import { pickDefaultAvatar } from '../defaultAvatars';
  *   Image cannot draw) ALSO gets the deterministic chibi (owner
  *   decision 2026-11-09): in the app there is no renderable stored
  *   avatar to show, so the chibi stands in — on the web the same
- *   user's DiceBear still renders normally.
+ *   user's DiceBear still renders normally. DiceBear carries the
+ *   format as a PATH segment (`.../7.x/adventurer/svg?seed=...`),
+ *   never as a '.svg' substring — the usability test below checks
+ *   the path ending, not a substring (the substring version let
+ *   every DiceBear URL through to Image and rendered blank,
+ *   owner-reported on the Social/Home activity feeds 2026-11-10).
  * `disableDefaultAvatar` opts a non-user borrower (the artist hero)
  * out of the chibi and back to the initial disc — for every
  * unusable-avatar case above.
@@ -38,7 +43,9 @@ export function Avatar({
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const hasUrl = url !== null && url.length > 0;
-  const usable = hasUrl && !url.toLowerCase().includes('.svg');
+  const urlPath = hasUrl ? url.toLowerCase().split(/[?#]/)[0] : '';
+  const usable =
+    hasUrl && !urlPath.endsWith('.svg') && !urlPath.endsWith('/svg');
   const initial = (name.trim().charAt(0) || '?').toUpperCase();
   const box = {
     width: size,
