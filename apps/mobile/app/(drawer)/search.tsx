@@ -9,6 +9,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import {
   ArrowLeft,
@@ -343,8 +344,14 @@ export default function SearchScreen() {
     </Pressable>
   );
 
+  // The drawer navigator shows no header, so the screen clears the
+  // status bar / notch itself — the sibling drawer screens' pattern
+  // (season, anime, artist): SafeAreaView with the top edge. Search
+  // shipped with a plain View root, so its header collided with the
+  // status bar (owner report 2026-11-10). Bottom needs no edge: the
+  // scroll content already pads itself (resultsContent).
   return (
-    <View style={styles.screen}>
+    <SafeAreaView style={styles.screen} edges={['top']}>
       <View style={styles.column}>
         <View style={styles.topBar}>
           <Pressable
@@ -560,7 +567,7 @@ export default function SearchScreen() {
           </ScrollView>
         ) : null}
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
