@@ -36,6 +36,10 @@ import {
   type ArtistCacheDocument,
 } from '../sync/artist-cache.schema';
 import { ThemeCache, type ThemeCacheDocument } from './theme-cache.schema';
+import {
+  SearchIndexService,
+  type SearchReadinessProbe,
+} from './search-index.service';
 import { currentSeason, previousSeason, SEASON_ORDER } from './season';
 import { toRelatedAnime, type AnimeDoc } from './anime.mapper';
 import { toThemeDetail, toThemeSummary, type ThemeDoc } from './theme.mapper';
@@ -64,9 +68,11 @@ const MAX_TERMS = 6;
 const MAX_TERM_LENGTH = 32;
 
 /* Option B (MongoDB Search) constants — spec 2026-11-10. The index
-   names match apps/api/search-indexes/*.json, created at rollout;
-   until they are Active every Atlas attempt fails into the regex
-   fallback, by design. */
+   names match apps/api/search-indexes/*.json, created at rollout.
+   A group uses its index only once the SearchIndexService probe
+   reports it READY — a missing/BUILDING index silently answers
+   $search with an empty set, it does not fail into anything
+   (rollout finding 2026-11-10). */
 const SEARCH_GROUPS: readonly SearchGroup[] = [
   'all',
   'themes',
@@ -87,6 +93,24 @@ const ARTIST_SEARCH_FIELDS = ['name', 'aliases'];
 interface GroupPage<T> {
   rows: T[];
   total: number;
+}
+
+/**
+ * What the Atlas attempt actually did, group by group — the raw
+ * material for the response's `searchType`. The label is honest
+ * (rollout finding 2026-11-10): 'atlas' only when EVERY catalogue
+ * group in view served through `$search`; a single regex-served
+ * group makes the whole response 'regex'.
+ */
+interface AtlasOutcome {
+  themes: GroupPage<ThemeSummary>;
+  themesServedAtlas: boolean;
+  themesSkip: number;
+  anime: GroupPage<SearchAnimeResult>;
+  animeServedAtlas: boolean;
+  artists: GroupPage<SearchArtistResult>;
+  artistsServedAtlas: boolean;
+  users: GroupPage<NetworkUser>;
 }
 
 /** A parsed GET /search request, shared by the Atlas and regex paths. */
@@ -240,7 +264,41 @@ export class ThemesService {
     @Optional()
     @InjectModel(User.name)
     private readonly userModel?: Model<UserDocument>,
+    /**
+     * The Atlas Search readiness probe (index exists + queryable
+     * + READY, cached ~60s). Optional like the models: unit specs
+     * construct this service positionally without it, and "no
+     * probe" must behave exactly like "no index is ready" — the
+     * regex path — never like readiness.
+     */
+    @Optional()
+    private readonly searchIndexes?: SearchReadinessProbe,
   ) {}
+
+  /**
+   * May this catalogue group use its `$search` pipeline right
+   * now? Only on a POSITIVE probe answer — see SearchIndexService
+   * for the empty-$search trap that makes "unknown" mean no.
+   *
+   * A service constructed WITHOUT the probe (older unit specs do
+   * this positionally) keeps the pre-probe behaviour — pipelines
+   * attempted, errors degrading to regex — because those specs
+   * assert exactly that contract against bare model doubles.
+   * Production always injects the probe (ThemesModule), and
+   * there "no positive answer" (absent index, BUILDING, probe
+   * failure) means regex.
+   */
+  private async atlasReady(
+    model: 'themes' | 'anime' | 'artists',
+    index: string,
+  ): Promise<boolean> {
+    if (!this.searchIndexes) return true;
+    try {
+      return await this.searchIndexes.isIndexReady(model, index);
+    } catch {
+      return false;
+    }
+  }
 
   private requireModel(): Model<ThemeCacheDocument> {
     if (!this.themeModel) {
@@ -431,17 +489,23 @@ export class ThemesService {
    * are not search words in either matcher: they parse into
    * type/sequence filters and suppress the non-theme groups.
    *
-   * FALLBACK: Atlas Search exists only once the indexes are
-   * created at rollout and Active. Any `$search` failure — index
-   * missing, still building, Atlas unreachable — falls back to
-   * searchRegex (the web-parity two-stage regex, kept whole) and
-   * the response reports `searchType: 'regex'`; the app never
-   * breaks because Atlas is unavailable. A modifier-only query
-   * ("op 9", no words) and the users view also go straight to the
-   * regex path: `$search` needs text to match. `searchType`
-   * reports the matcher behind the served view's primary group
-   * (themes for 'all'/'themes', the group itself for a
-   * catalogue-group view; always 'regex' for the users view).
+   * READINESS + FALLBACK: a catalogue group may use its `$search`
+   * pipeline ONLY when the readiness probe (SearchIndexService)
+   * reports its index exists, queryable and READY. Probing —
+   * not error handling — is the gate, because `$search` against
+   * a missing or BUILDING index does NOT throw: Atlas answers
+   * an EMPTY set (rollout finding 2026-11-10 ~18:47), which an
+   * error-only fallback would happily serve as an 'atlas'
+   * result. A group whose index is not ready serves its regex
+   * implementation (per-group, in preview; whole-view in a
+   * strict group view); a group whose READY pipeline still
+   * throws (Atlas unreachable) degrades the same way. The
+   * response's `searchType` is 'atlas' only when every
+   * catalogue group in view actually served via `$search` —
+   * any regex-served group makes it 'regex'. A modifier-only
+   * query ("op 9", no words) and the users view always go
+   * straight to the regex path: `$search` needs text to match,
+   * and the users group is regex by design.
    */
   async search(
     rawQuery: string,
@@ -495,11 +559,51 @@ export class ThemesService {
     if (cleanWords.length === 0 || view === 'users') {
       return this.searchRegex(ctx);
     }
+    let outcome: AtlasOutcome;
     try {
-      return await this.searchAtlas(ctx);
+      outcome = await this.searchAtlas(ctx);
     } catch {
+      // A READY pipeline threw (Atlas unreachable), or a strict
+      // group view's index is not ready: the whole view degrades
+      // to the web-parity regex path.
       return this.searchRegex(ctx);
     }
+    // Honest labelling: 'atlas' only when every catalogue group
+    // in view served through $search. (A strict catalogue-group
+    // view whose index is not ready never reaches searchAtlas —
+    // searchRegex serves it whole, labelled 'regex' there.)
+    const servedAtlas: boolean[] = [];
+    if (view === 'all' || view === 'themes') {
+      servedAtlas.push(outcome.themesServedAtlas);
+    }
+    if (!ctx.themeModifierUsed) {
+      // A group is only "in view" for labelling when it could
+      // have served at all: a group whose model was never
+      // injected (no catalogue rows exist to match — the no-model
+      // case in the group matchers, and the service's single-model
+      // construction in the older specs) answers empty either way,
+      // and labelling the view regex over its absence would blame
+      // the search engine for an empty catalogue.
+      if ((view === 'all' || view === 'anime') && this.animeModel) {
+        servedAtlas.push(outcome.animeServedAtlas);
+      }
+      if ((view === 'all' || view === 'artists') && this.artistModel) {
+        servedAtlas.push(outcome.artistsServedAtlas);
+      }
+    }
+    const searchType =
+      servedAtlas.length > 0 && servedAtlas.every(Boolean)
+        ? 'atlas'
+        : 'regex';
+    return this.assembleSearch(
+      ctx,
+      searchType,
+      outcome.themes,
+      outcome.themesSkip,
+      outcome.anime,
+      outcome.artists,
+      outcome.users,
+    );
   }
 
   /** The themes page size for a view (preview cap / SONGS sizes / client limit). */
@@ -523,64 +627,158 @@ export class ThemesService {
   }
 
   /**
-   * The Atlas path: themes (when in view) are the primary matcher
-   * — a failure there fails the whole view into the regex fallback.
-   * The anime/artist groups degrade individually to their regex
-   * form (their own index may lag the themes one at rollout),
-   * except when the group IS the view, where its failure fails the
-   * view. OP/ED modifiers ride the themes pipeline as a `$match`
-   * stage and suppress the other groups, as on the web.
+   * The themes group, regex form — the stage-1/stage-2 half of
+   * searchRegex lifted into a group-shaped helper so the
+   * Atlas-first assembly can serve themes via regex when the
+   * themes index is not READY (preview degradation). searchRegex
+   * itself is untouched and still serves strict views whole.
    */
-  private async searchAtlas(ctx: SearchView): Promise<SearchResponse> {
+  private async searchThemesRegexGroup(
+    ctx: SearchView,
+    limit: number,
+    skip: number,
+  ): Promise<GroupPage<ThemeSummary>> {
+    const model = this.requireModel();
+    const { cleanWords, themeTypeFilter, themeSeqFilter, themeModifierUsed } =
+      ctx;
+    const contains = (word: string) => new RegExp(escapeRegExp(word), 'i');
+    const wordConditions = cleanWords.map((word) => ({
+      $or: [
+        { animeTitle: contains(word) },
+        { songTitle: contains(word) },
+        { artistName: contains(word) },
+      ],
+    }));
+    // The filter is assembled dynamically, exactly as on the web.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let themeFilter: any =
+      wordConditions.length === 1
+        ? wordConditions[0]
+        : wordConditions.length > 1
+          ? { $and: wordConditions }
+          : {};
+    if (themeTypeFilter) themeFilter.type = themeTypeFilter;
+    if (themeSeqFilter !== null) themeFilter.sequence = themeSeqFilter;
+
+    // — Stage 1: prefix narrowing to candidate ids —
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let effectiveFilter: any = themeFilter;
+    if (!themeModifierUsed && cleanWords.length > 0) {
+      const prefix = new RegExp(`^${escapeRegExp(cleanWords[0])}`, 'i');
+      const candidates = (await model
+        .find({
+          $or: [
+            { animeTitle: prefix },
+            { songTitle: prefix },
+            { artistName: prefix },
+          ],
+        })
+        .select('_id')
+        .limit(SONG_CANDIDATE_LIMIT)
+        .lean()
+        .exec()) as Array<{ _id: unknown }>;
+      if (candidates.length > 0) {
+        effectiveFilter = {
+          $and: [
+            { _id: { $in: candidates.map((c) => c._id) } },
+            themeFilter,
+          ],
+        };
+      }
+    }
+
+    // — Stage 2: full regex over the (possibly narrowed) filter —
+    const [docs, total] = await Promise.all([
+      model
+        .find(effectiveFilter)
+        .sort({ totalWatches: -1, avgRating: -1, _id: 1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+        .exec(),
+      model.countDocuments(effectiveFilter).exec(),
+    ]);
+    return { rows: (docs as ThemeDoc[]).map(toThemeSummary), total };
+  }
+
+  /**
+   * The Atlas-first assembly: every catalogue group consults the
+   * readiness probe and runs its `$search` pipeline only when
+   * its index is READY (see `search` for why probing, not error
+   * handling, gates this); a not-ready group serves its regex
+   * implementation in place (per-group degradation). A READY
+   * group's pipeline that still throws degrades the same way —
+   * except themes, whose failure fails the caller into the
+   * whole-view regex fallback (`search` re-serves via
+   * searchRegex), as before. OP/ED modifiers ride the themes
+   * pipeline as a `$match` stage and suppress the other groups,
+   * as on the web. The per-group servedVia flags feed the
+   * response's honest `searchType`.
+   */
+  private async searchAtlas(ctx: SearchView): Promise<AtlasOutcome> {
     const inView = (g: SearchGroup) => ctx.view === 'all' || ctx.view === g;
-    let themesRows: ThemeSummary[] = [];
-    let themesTotal = 0;
+    let themes: GroupPage<ThemeSummary> = { rows: [], total: 0 };
+    let themesServedAtlas = true;
     let themesSkip = 0;
     if (inView('themes')) {
       const size = this.themesPageSize(ctx);
       themesSkip = (ctx.page - 1) * size;
-      const themes = await this.searchThemesAtlas(ctx, size, themesSkip);
-      themesRows = themes.rows;
-      themesTotal = themes.total;
+      if (await this.atlasReady('themes', THEMES_SEARCH_INDEX)) {
+        themes = await this.searchThemesAtlas(ctx, size, themesSkip);
+      } else if (ctx.view === 'themes') {
+        // Strict view: the whole view is this group, so signal
+        // the caller to serve the whole view via regex.
+        throw new Error('themes search index not ready');
+      } else {
+        themes = await this.searchThemesRegexGroup(ctx, size, themesSkip);
+        themesServedAtlas = false;
+      }
     }
 
     const empty: GroupPage<never> = { rows: [], total: 0 };
     let anime: GroupPage<SearchAnimeResult> = empty;
+    let animeServedAtlas = false;
     let artists: GroupPage<SearchArtistResult> = empty;
+    let artistsServedAtlas = false;
     let users: GroupPage<NetworkUser> = empty;
     if (!ctx.themeModifierUsed) {
       const size = this.groupPageSize(ctx);
       const skip = (ctx.page - 1) * size;
       if (inView('anime')) {
-        anime = await this.searchAnimeGroupAtlas(
+        const served = await this.searchAnimeGroupAtlas(
           ctx,
           size,
           skip,
           ctx.view === 'anime',
         );
+        anime = served.page;
+        animeServedAtlas = served.viaAtlas;
       }
       if (inView('artists')) {
-        artists = await this.searchArtistGroupAtlas(
+        const served = await this.searchArtistGroupAtlas(
           ctx,
           size,
           skip,
           ctx.view === 'artists',
         );
+        artists = served.page;
+        artistsServedAtlas = served.viaAtlas;
       }
       if (inView('users')) {
         users = await this.searchUserGroupRegex(ctx.cleanWords, size, skip);
       }
     }
 
-    return this.assembleSearch(
-      ctx,
-      'atlas',
-      { rows: themesRows, total: themesTotal },
+    return {
+      themes,
+      themesServedAtlas,
       themesSkip,
       anime,
+      animeServedAtlas,
       artists,
+      artistsServedAtlas,
       users,
-    );
+    };
   }
 
   /**
@@ -662,8 +860,23 @@ export class ThemesService {
     limit: number,
     skip: number,
     strict: boolean,
-  ): Promise<GroupPage<SearchAnimeResult>> {
-    if (!this.animeModel) return { rows: [], total: 0 };
+  ): Promise<{ page: GroupPage<SearchAnimeResult>; viaAtlas: boolean }> {
+    if (!this.animeModel) return { page: { rows: [], total: 0 }, viaAtlas: false };
+    // Not ready → regex for this group; in a strict view the
+    // caller (searchAtlas) still sees viaAtlas:false — but the
+    // strict contract is stronger: the whole view goes regex, so
+    // signal it the way a pipeline failure used to.
+    if (!(await this.atlasReady('anime', ANIME_SEARCH_INDEX))) {
+      if (strict) throw new Error('anime search index not ready');
+      return {
+        page: await this.searchAnimeGroupRegex(
+          regexGroupFilter(ANIME_SEARCH_FIELDS, ctx.cleanWords),
+          limit,
+          skip,
+        ),
+        viaAtlas: false,
+      };
+    }
     try {
       const facet = await this.runSearchFacet(
         this.animeModel,
@@ -676,16 +889,22 @@ export class ThemesService {
         skip,
       );
       return {
-        rows: await this.toAnimeResults(facet.rows as AnimeDoc[]),
-        total: facet.total,
+        page: {
+          rows: await this.toAnimeResults(facet.rows as AnimeDoc[]),
+          total: facet.total,
+        },
+        viaAtlas: true,
       };
     } catch (err) {
       if (strict) throw err;
-      return this.searchAnimeGroupRegex(
-        regexGroupFilter(ANIME_SEARCH_FIELDS, ctx.cleanWords),
-        limit,
-        skip,
-      );
+      return {
+        page: await this.searchAnimeGroupRegex(
+          regexGroupFilter(ANIME_SEARCH_FIELDS, ctx.cleanWords),
+          limit,
+          skip,
+        ),
+        viaAtlas: false,
+      };
     }
   }
 
@@ -694,8 +913,19 @@ export class ThemesService {
     limit: number,
     skip: number,
     strict: boolean,
-  ): Promise<GroupPage<SearchArtistResult>> {
-    if (!this.artistModel) return { rows: [], total: 0 };
+  ): Promise<{ page: GroupPage<SearchArtistResult>; viaAtlas: boolean }> {
+    if (!this.artistModel) return { page: { rows: [], total: 0 }, viaAtlas: false };
+    if (!(await this.atlasReady('artists', ARTISTS_SEARCH_INDEX))) {
+      if (strict) throw new Error('artists search index not ready');
+      return {
+        page: await this.searchArtistGroupRegex(
+          regexGroupFilter(ARTIST_SEARCH_FIELDS, ctx.cleanWords),
+          limit,
+          skip,
+        ),
+        viaAtlas: false,
+      };
+    }
     try {
       const facet = await this.runSearchFacet(
         this.artistModel,
@@ -708,16 +938,22 @@ export class ThemesService {
         skip,
       );
       return {
-        rows: await this.toArtistResults(facet.rows as ArtistCacheDocument[]),
-        total: facet.total,
+        page: {
+          rows: await this.toArtistResults(facet.rows as ArtistCacheDocument[]),
+          total: facet.total,
+        },
+        viaAtlas: true,
       };
     } catch (err) {
       if (strict) throw err;
-      return this.searchArtistGroupRegex(
-        regexGroupFilter(ARTIST_SEARCH_FIELDS, ctx.cleanWords),
-        limit,
-        skip,
-      );
+      return {
+        page: await this.searchArtistGroupRegex(
+          regexGroupFilter(ARTIST_SEARCH_FIELDS, ctx.cleanWords),
+          limit,
+          skip,
+        ),
+        viaAtlas: false,
+      };
     }
   }
 

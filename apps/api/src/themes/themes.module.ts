@@ -10,6 +10,7 @@ import {
   ArtistCacheSchema,
 } from '../sync/artist-cache.schema';
 import { ThemeCache, ThemeCacheSchema } from './theme-cache.schema';
+import { SearchIndexService } from './search-index.service';
 import { ThemesController } from './themes.controller';
 import { ThemesService } from './themes.service';
 
@@ -42,7 +43,11 @@ export class ThemesModule {
           ]
         : [],
       controllers: [ThemesController],
-      providers: [ThemesService],
+      providers: [ThemesService, SearchIndexService],
+      // ThemesService (the search readiness wiring) and
+      // SearchIndexService (probe + ensure) are consumed by the
+      // internal search-indexes module.
+      exports: [ThemesService, SearchIndexService],
     };
   }
 }

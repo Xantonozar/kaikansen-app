@@ -9,6 +9,7 @@ import { PlaylistsModule } from './playlists/playlists.module';
 import { CommentsModule } from './comments/comments.module';
 import { QuizModule } from './quiz/quiz.module';
 import { RankModule } from './rank/rank.module';
+import { SearchIndexesModule } from './search-indexes/search-indexes.module';
 import { SocialModule } from './social/social.module';
 import { StatsModule } from './stats/stats.module';
 import { SyncModule } from './sync/sync.module';
@@ -39,6 +40,7 @@ const hasDatabase = typeof mongodbUri === 'string' && mongodbUri.length > 0;
     RankModule.register(hasDatabase),
     StatsModule.register(hasDatabase),
     SyncModule.register(hasDatabase),
+    SearchIndexesModule.register(hasDatabase),
   ],
   controllers: [HealthController],
 })

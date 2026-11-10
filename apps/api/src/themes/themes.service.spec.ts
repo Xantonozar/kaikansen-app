@@ -7,8 +7,35 @@ import type { Model } from 'mongoose';
 import type { UserDocument } from '../auth/user.schema';
 import type { AnimeCacheDocument } from '../sync/anime-cache.schema';
 import type { ArtistCacheDocument } from '../sync/artist-cache.schema';
+import type {
+  SearchIndexModel,
+  SearchReadinessProbe,
+} from './search-index.service';
 import type { ThemeCacheDocument } from './theme-cache.schema';
 import { ThemesService } from './themes.service';
+
+/**
+ * Readiness-probe stub for the search specs: reports exactly the
+ * listed per-model index names as READY (everything else absent).
+ * Injected as ThemesService's 5th constructor argument — the
+ * SearchIndexService slot — the same way production wires the
+ * real probe; specs that omit it exercise the no-probe
+ * (pipeline-attempt) construction instead.
+ */
+function probeWith(ready: Partial<Record<SearchIndexModel, string[]>> = {}) {
+  const isIndexReady = jest.fn(
+    async (model: SearchIndexModel, indexName: string) =>
+      (ready[model] ?? []).includes(indexName),
+  );
+  const probe: SearchReadinessProbe = { isIndexReady };
+  return { probe, isIndexReady };
+}
+
+const ALL_INDEXES_READY = probeWith({
+  themes: ['kaikansen_themes_search'],
+  anime: ['kaikansen_anime_search'],
+  artists: ['kaikansen_artists_search'],
+}).probe;
 
 /* Chainable Mongoose-query stand-in: every builder returns the same object. */
 function queryOf(result: unknown) {
@@ -66,8 +93,17 @@ function makeDoc(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function serviceWith(model: unknown): ThemesService {
-  return new ThemesService(model as Model<ThemeCacheDocument>);
+function serviceWith(
+  model: unknown,
+  probe: SearchReadinessProbe = ALL_INDEXES_READY,
+): ThemesService {
+  return new ThemesService(
+    model as Model<ThemeCacheDocument>,
+    undefined,
+    undefined,
+    undefined,
+    probe,
+  );
 }
 
 describe('ThemesService — no database configured', () => {
@@ -1284,6 +1320,7 @@ describe('ThemesService.search — Option B (Atlas Search)', () => {
     });
 
     const res = await service.search('naruto shippuden', 1, 'themes');
+    expect(res.searchType).toBe('atlas');
 
     const search = searchStageOf(aggregate);
     expect(search.compound.must).toHaveLength(2);
@@ -1319,6 +1356,7 @@ describe('ThemesService.search — Option B (Atlas Search)', () => {
         find: userFind,
         countDocuments: jest.fn(() => queryOf(0)),
       } as unknown as Model<UserDocument>,
+      ALL_INDEXES_READY,
     );
 
     const res = await service.search('op 9 naruto', 1, 'themes');
@@ -1398,6 +1436,7 @@ describe('ThemesService.search — Option B (Atlas Search)', () => {
         find: jest.fn(() => queryOf([makeUserDoc({})])),
         countDocuments: jest.fn(() => queryOf(12)),
       } as unknown as Model<UserDocument>,
+      ALL_INDEXES_READY,
     );
 
     const res = await service.search('test');
@@ -1436,6 +1475,7 @@ describe('ThemesService.search — Option B (Atlas Search)', () => {
       } as unknown as Model<AnimeCacheDocument>,
       undefined,
       undefined,
+      ALL_INDEXES_READY,
     );
 
     const res = await service.search('test', 1, 'anime');
@@ -1590,6 +1630,7 @@ describe('ThemesService.search — Option B (Atlas Search)', () => {
         find: userFind,
         countDocuments: jest.fn(() => queryOf(userDocs.length)),
       } as unknown as Model<UserDocument>,
+      ALL_INDEXES_READY,
     );
 
     const p1 = await service.search('user', 1, 'users', 15);
@@ -1985,5 +2026,262 @@ describe('ThemesService.getArtistDetail', () => {
       imageUrl: null,
       totalThemes: 1,
     });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Readiness probe gating — the empty-$search silent-empty trap. A    */
+/* missing / BUILDING index answers $search with an EMPTY set (it     */
+/* does not throw), so Atlas may only run on a POSITIVE probe         */
+/* answer (rollout finding 2026-11-10). These specs inject a probe    */
+/* double as the 5th constructor argument — production injects the    */
+/* real SearchIndexService via ThemesService's optional probe.        */
+/* ------------------------------------------------------------------ */
+
+function readyIndexes(): ReturnType<typeof probeWith>['probe'] {
+  return {
+    isIndexReady: jest.fn(async () => true),
+  };
+}
+
+describe('ThemesService.search — readiness probe', () => {
+  it('no indexes yet → regex serves real results, honestly labelled (the live bug)', async () => {
+    const { model, find } = searchModel({
+      candidates: [],
+      results: [makeDoc({ slug: 'regex-hit' })],
+      total: 1,
+    });
+    // The aggregate would answer (silently empty against a real
+    // cluster) — the probe must keep the pipeline from running at
+    // all when nothing is READY.
+    const aggregate = jest.fn(async () => []);
+    (model as Record<string, unknown>).aggregate = aggregate;
+    const probe = { isIndexReady: jest.fn(async () => false) };
+    const service = new ThemesService(
+      model as unknown as Model<ThemeCacheDocument>,
+      undefined,
+      undefined,
+      undefined,
+      probe,
+    );
+
+    const res = await service.search('test');
+
+    expect(res.searchType).toBe('regex');
+    expect(res.results.map((r) => r.slug)).toEqual(['regex-hit']);
+    expect(aggregate).not.toHaveBeenCalled();
+    expect(probe.isIndexReady).toHaveBeenCalledWith(
+      'themes',
+      'kaikansen_themes_search',
+    );
+    expect(find).toHaveBeenCalled(); // the regex stages ran
+  });
+
+  it('all indexes ready → Atlas serves and the label says atlas', async () => {
+    const service = new ThemesService(
+      {
+        aggregate: facetApplyingAggregate([makeDoc({ slug: 'atlas-hit' })], 1),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ThemeCacheDocument>,
+      {
+        aggregate: facetApplyingAggregate([makeAnimeDoc({ anilistId: 42 })], 1),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<AnimeCacheDocument>,
+      {
+        aggregate: facetApplyingAggregate(
+          [
+            {
+              slug: 'test_artist',
+              name: 'Test Artist',
+              aliases: [],
+              imageUrl: null,
+              totalThemes: 1,
+            },
+          ],
+          1,
+        ),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ArtistCacheDocument>,
+      {
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<UserDocument>,
+      readyIndexes(),
+    );
+
+    const res = await service.search('test');
+
+    expect(res.searchType).toBe('atlas');
+    expect(res.results.map((r) => r.slug)).toEqual(['atlas-hit']);
+    expect(res.anime.map((a) => a.anilistId)).toEqual([42]);
+    expect(res.artists.map((a) => a.slug)).toEqual(['test_artist']);
+  });
+
+  it('themes ready but anime not → anime group serves regex and the label is regex', async () => {
+    const probe = probeWith({
+      themes: ['kaikansen_themes_search'],
+      artists: ['kaikansen_artists_search'],
+    }).probe;
+    const animeFind = jest.fn(() =>
+      queryOf([makeAnimeDoc({ anilistId: 42 })]),
+    );
+    const animeAggregate = jest.fn(async () => []);
+    const service = new ThemesService(
+      {
+        aggregate: facetApplyingAggregate([makeDoc({ slug: 'atlas-hit' })], 1),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ThemeCacheDocument>,
+      {
+        aggregate: animeAggregate,
+        find: animeFind,
+        countDocuments: jest.fn(() => queryOf(1)),
+      } as unknown as Model<AnimeCacheDocument>,
+      {
+        aggregate: facetApplyingAggregate(
+          [
+            {
+              slug: 'test_artist',
+              name: 'Test Artist',
+              aliases: [],
+              imageUrl: null,
+              totalThemes: 1,
+            },
+          ],
+          1,
+        ),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ArtistCacheDocument>,
+      {
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<UserDocument>,
+      probe,
+    );
+
+    const res = await service.search('test');
+
+    // Themes + artists via Atlas, anime via its regex matcher —
+    // one regex catalogue group is enough to label the view regex.
+    expect(res.results.map((r) => r.slug)).toEqual(['atlas-hit']);
+    expect(res.artists.map((a) => a.slug)).toEqual(['test_artist']);
+    expect(res.anime.map((a) => a.anilistId)).toEqual([42]);
+    expect(animeAggregate).not.toHaveBeenCalled();
+    expect(animeFind).toHaveBeenCalled();
+    expect(res.searchType).toBe('regex');
+  });
+
+  it('probe errors count as not-ready — regex, never a crashed search', async () => {
+    const { model } = searchModel({
+      candidates: [],
+      results: [makeDoc({ slug: 'regex-hit' })],
+      total: 1,
+    });
+    const aggregate = jest.fn(async () => []);
+    (model as Record<string, unknown>).aggregate = aggregate;
+    const service = new ThemesService(
+      model as unknown as Model<ThemeCacheDocument>,
+      undefined,
+      undefined,
+      undefined,
+      {
+        isIndexReady: jest.fn(async () => {
+          throw new Error('listSearchIndexes exploded');
+        }),
+      },
+    );
+
+    const res = await service.search('test');
+
+    expect(res.searchType).toBe('regex');
+    expect(res.results.map((r) => r.slug)).toEqual(['regex-hit']);
+    expect(aggregate).not.toHaveBeenCalled();
+  });
+
+  it('a strict view whose index is not ready serves the whole view via regex', async () => {
+    const animeFind = jest.fn(() =>
+      queryOf([makeAnimeDoc({ anilistId: 42 })]),
+    );
+    const animeAggregate = jest.fn(async () => []);
+    const service = new ThemesService(
+      {
+        aggregate: facetApplyingAggregate([makeDoc({})], 1),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ThemeCacheDocument>,
+      {
+        aggregate: animeAggregate,
+        find: animeFind,
+        countDocuments: jest.fn(() => queryOf(1)),
+      } as unknown as Model<AnimeCacheDocument>,
+      undefined,
+      undefined,
+      { isIndexReady: jest.fn(async () => false) },
+    );
+
+    const res = await service.search('test', 1, 'anime');
+
+    expect(res.searchType).toBe('regex');
+    expect(res.group).toBe('anime');
+    expect(res.anime.map((a) => a.anilistId)).toEqual([42]);
+    expect(animeAggregate).not.toHaveBeenCalled();
+  });
+
+  it('a not-ready themes group in the preview serves its regex half, not empties', async () => {
+    // Themes not ready, anime/artists ready: the preview must
+    // show REAL theme rows from the regex half (the searchRegex
+    // stage pipeline) while the other groups still ride Atlas.
+    const { model, find } = searchModel({
+      candidates: [],
+      results: [makeDoc({ slug: 'regex-theme' })],
+      total: 1,
+    });
+    const aggregate = jest.fn(async () => []);
+    (model as Record<string, unknown>).aggregate = aggregate;
+    const service = new ThemesService(
+      model as unknown as Model<ThemeCacheDocument>,
+      {
+        aggregate: facetApplyingAggregate([makeAnimeDoc({ anilistId: 42 })], 1),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<AnimeCacheDocument>,
+      {
+        aggregate: facetApplyingAggregate(
+          [
+            {
+              slug: 'test_artist',
+              name: 'Test Artist',
+              aliases: [],
+              imageUrl: null,
+              totalThemes: 1,
+            },
+          ],
+          1,
+        ),
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<ArtistCacheDocument>,
+      {
+        find: jest.fn(() => queryOf([])),
+        countDocuments: jest.fn(() => queryOf(0)),
+      } as unknown as Model<UserDocument>,
+      probeWith({
+        anime: ['kaikansen_anime_search'],
+        artists: ['kaikansen_artists_search'],
+      }).probe,
+    );
+
+    const res = await service.search('test');
+
+    expect(res.results.map((r) => r.slug)).toEqual(['regex-theme']);
+    expect(res.anime.map((a) => a.anilistId)).toEqual([42]);
+    expect(res.artists.map((a) => a.slug)).toEqual(['test_artist']);
+    expect(aggregate).not.toHaveBeenCalled();
+    expect(find).toHaveBeenCalled(); // stage 1 + stage 2 ran
+    expect(res.searchType).toBe('regex');
   });
 });
