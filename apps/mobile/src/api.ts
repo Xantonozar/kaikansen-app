@@ -216,12 +216,13 @@ function fixtureSearch(query: string): SearchResponse {
   const base: SearchResponse = {
     query: trimmed,
     results: [],
-    // The bundled snapshot holds no AnimeCache/ArtistCache data, so
-    // fixture mode honestly serves empty groups — the search screen
-    // renders its Themes group alone, as it does for a live search
-    // with no anime/artist matches.
+    // The bundled snapshot holds no AnimeCache/ArtistCache/user
+    // data, so fixture mode honestly serves empty groups — the
+    // search screen renders its Themes group alone, as it does for
+    // a live search with no anime/artist/user matches.
     anime: [],
     artists: [],
+    users: [],
     searchType: 'regex',
     page: 1,
     total: 0,

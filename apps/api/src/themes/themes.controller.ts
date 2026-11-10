@@ -54,7 +54,7 @@ export class ThemesController {
   @Get('search')
   @ApiOkResponse({
     description:
-      'Two-stage regex theme search (web parity, searchType: regex); page 1 also carries the web ALL-view anime and artist groups.',
+      'Two-stage regex theme search (web parity, searchType: regex); page 1 also carries the web ALL-view anime and artist groups plus the users group (public accounts, NetworkUser projection).',
   })
   search(
     @Query('q') q = '',

@@ -4,6 +4,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import type { Model } from 'mongoose';
+import type { UserDocument } from '../auth/user.schema';
 import type { AnimeCacheDocument } from '../sync/anime-cache.schema';
 import type { ArtistCacheDocument } from '../sync/artist-cache.schema';
 import type { ThemeCacheDocument } from './theme-cache.schema';
@@ -779,6 +780,7 @@ describe('ThemesService.search', () => {
       results: [],
       anime: [],
       artists: [],
+      users: [],
       searchType: 'regex',
       page: 1,
       total: 0,
@@ -792,11 +794,26 @@ describe('ThemesService.search', () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* Grouped search — the web's ALL-view anime + artist groups           */
+/* Grouped search — the web's ALL-view anime + artist + user groups    */
 /* ------------------------------------------------------------------ */
 
+function makeUserDoc(overrides: Record<string, unknown> = {}) {
+  return {
+    _id: '507f1f77bcf86cd7994390d1',
+    username: 'tester',
+    displayName: 'Test Person',
+    email: 'tester@example.com',
+    passwordHash: 'never-served',
+    avatarUrl: 'https://example.com/person.png',
+    bio: 'Person bio',
+    isPublic: true,
+    anilist: { accessToken: 'anilist-secret-token' },
+    ...overrides,
+  };
+}
+
 /**
- * Three-model stand-in for grouped-search tests. The theme model's
+ * Four-model stand-in for grouped-search tests. The theme model's
  * `find` dispatches by filter shape: the two group count projections
  * (an `anilistId` / `artistSlugs` key), the stage-1 prefix query
  * ($or whose first value is a ^-anchored RegExp), and stage 2
@@ -810,6 +827,7 @@ function groupedSearchModels(opts: {
   artistDocs?: unknown[];
   animeThemeDocs?: unknown[];
   artistThemeDocs?: unknown[];
+  userDocs?: unknown[];
 }) {
   const themeQueries: ReturnType<typeof queryOf>[] = [];
   const themeFind = jest.fn((filter: Record<string, unknown>) => {
@@ -842,6 +860,12 @@ function groupedSearchModels(opts: {
     artistQueries.push(q);
     return q;
   });
+  const userQueries: ReturnType<typeof queryOf>[] = [];
+  const userFind = jest.fn((_filter: Record<string, unknown>) => {
+    const q = queryOf(opts.userDocs ?? []);
+    userQueries.push(q);
+    return q;
+  });
   const service = new ThemesService(
     {
       find: themeFind,
@@ -849,11 +873,22 @@ function groupedSearchModels(opts: {
     } as unknown as Model<ThemeCacheDocument>,
     { find: animeFind } as unknown as Model<AnimeCacheDocument>,
     { find: artistFind } as unknown as Model<ArtistCacheDocument>,
+    { find: userFind } as unknown as Model<UserDocument>,
   );
-  return { service, themeFind, themeQueries, animeFind, animeQueries, artistFind, artistQueries };
+  return {
+    service,
+    themeFind,
+    themeQueries,
+    animeFind,
+    animeQueries,
+    artistFind,
+    artistQueries,
+    userFind,
+    userQueries,
+  };
 }
 
-describe('ThemesService.search — anime/artist groups', () => {
+describe('ThemesService.search — anime/artist/user groups', () => {
   it('serves both groups, projected, with theme counts from the theme collection', async () => {
     const { service, animeFind, animeQueries, artistFind, artistQueries } =
       groupedSearchModels({
@@ -960,7 +995,8 @@ describe('ThemesService.search — anime/artist groups', () => {
   });
 
   it('every word must match in the groups ($and across words)', async () => {
-    const { service, animeFind, artistFind } = groupedSearchModels({});
+    const { service, animeFind, artistFind, userFind } =
+      groupedSearchModels({});
 
     await service.search('test anime');
 
@@ -977,10 +1013,76 @@ describe('ThemesService.search — anime/artist groups', () => {
       'name',
       'aliases',
     ]);
+    // Users: same $and across words, under the public-only gate.
+    const userFilter = userFind.mock.calls[0][0] as {
+      isPublic: boolean;
+      $and: { $or: Record<string, RegExp>[] }[];
+    };
+    expect(userFilter.isPublic).toBe(true);
+    expect(userFilter.$and).toHaveLength(2);
+    expect(userFilter.$and[1].$or[0].username.source).toBe('anime');
+  });
+
+  it('serves the users group, projected to the people-search shape', async () => {
+    const { service, userFind, userQueries } = groupedSearchModels({
+      results: [makeDoc({ slug: 'song-hit' })],
+      total: 1,
+      userDocs: [
+        makeUserDoc({}),
+        makeUserDoc({
+          _id: '507f1f77bcf86cd7994390d2',
+          username: 'test_fan',
+          displayName: 'Quiet Listener',
+          avatarUrl: null,
+          bio: undefined,
+        }),
+      ],
+    });
+
+    const res = await service.search('test');
+
+    // One word → a bare $or over the web's two user fields, gated
+    // to public accounts, capped like the other groups.
+    const userFilter = userFind.mock.calls[0][0] as {
+      isPublic: boolean;
+      $or: Record<string, RegExp>[];
+    };
+    expect(userFilter.isPublic).toBe(true);
+    expect(userFilter.$or.map((c) => Object.keys(c)[0])).toEqual([
+      'username',
+      'displayName',
+    ]);
+    expect(userFilter.$or[0].username.source).toBe('test');
+    expect(userFilter.$or[0].username.flags).toContain('i');
+    expect(userQueries[0].limit).toHaveBeenCalledWith(5);
+
+    // The people search's projection, field for field — and
+    // nothing private rides along (email, passwordHash, AniList
+    // token all stay on the document).
+    expect(res.users).toEqual([
+      {
+        id: '507f1f77bcf86cd7994390d1',
+        username: 'tester',
+        displayName: 'Test Person',
+        avatarUrl: 'https://example.com/person.png',
+        bio: 'Person bio',
+      },
+      {
+        id: '507f1f77bcf86cd7994390d2',
+        username: 'test_fan',
+        displayName: 'Quiet Listener',
+        avatarUrl: null,
+        bio: '',
+      },
+    ]);
+    const raw = JSON.stringify(res.users);
+    expect(raw).not.toContain('tester@example.com');
+    expect(raw).not.toContain('never-served');
+    expect(raw).not.toContain('anilist-secret-token');
   });
 
   it('an OP/ED modifier empties the groups and never queries the caches (web parity)', async () => {
-    const { service, animeFind, artistFind } = groupedSearchModels({
+    const { service, animeFind, artistFind, userFind } = groupedSearchModels({
       results: [makeDoc({ slug: 'op9-hit' })],
       total: 1,
     });
@@ -989,12 +1091,14 @@ describe('ThemesService.search — anime/artist groups', () => {
 
     expect(res.anime).toEqual([]);
     expect(res.artists).toEqual([]);
+    expect(res.users).toEqual([]);
     expect(animeFind).not.toHaveBeenCalled();
     expect(artistFind).not.toHaveBeenCalled();
+    expect(userFind).not.toHaveBeenCalled();
   });
 
   it('the groups are page-1 only', async () => {
-    const { service, animeFind, artistFind } = groupedSearchModels({
+    const { service, animeFind, artistFind, userFind } = groupedSearchModels({
       candidates: [makeDoc({ _id: 'cand-a' })],
       results: [makeDoc({ slug: 'page-2-hit' })],
       total: 21,
@@ -1004,8 +1108,10 @@ describe('ThemesService.search — anime/artist groups', () => {
 
     expect(res.anime).toEqual([]);
     expect(res.artists).toEqual([]);
+    expect(res.users).toEqual([]);
     expect(animeFind).not.toHaveBeenCalled();
     expect(artistFind).not.toHaveBeenCalled();
+    expect(userFind).not.toHaveBeenCalled();
   });
 
   it('a service without cache models serves themes with empty groups', async () => {
@@ -1020,6 +1126,7 @@ describe('ThemesService.search — anime/artist groups', () => {
     expect(res.results.map((r) => r.slug)).toEqual(['themes-only-hit']);
     expect(res.anime).toEqual([]);
     expect(res.artists).toEqual([]);
+    expect(res.users).toEqual([]);
   });
 });
 

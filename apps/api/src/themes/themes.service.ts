@@ -6,11 +6,12 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import type { Model } from 'mongoose';
+import type { Model, Types } from 'mongoose';
 import type {
   AnimeDetailResponse,
   ArtistDetailResponse,
   HomeResponse,
+  NetworkUser,
   RelatedAnime,
   RelatedAnimeResponse,
   SearchAnimeResult,
@@ -22,6 +23,7 @@ import type {
   ThemeDetail,
   ThemeType,
 } from '@kaikansen/contracts';
+import { User, type UserDocument } from '../auth/user.schema';
 import {
   AnimeCache,
   type AnimeCacheDocument,
@@ -119,6 +121,9 @@ function parseThemeModifiers(words: string[]): {
  * with `undefined`, and every endpoint answers 503 — while /health and the
  * rest of the app keep working. All queries are reads; nothing here writes.
  */
+/** A `users` row as the search users group reads it (lean). */
+type SearchUserDoc = User & { _id: Types.ObjectId };
+
 @Injectable()
 export class ThemesService {
   constructor(
@@ -131,6 +136,9 @@ export class ThemesService {
     @Optional()
     @InjectModel(ArtistCache.name)
     private readonly artistModel?: Model<ArtistCacheDocument>,
+    @Optional()
+    @InjectModel(User.name)
+    private readonly userModel?: Model<UserDocument>,
   ) {}
 
   private requireModel(): Model<ThemeCacheDocument> {
@@ -326,8 +334,9 @@ export class ThemesService {
    * total is counted on every search (the web counts it for that view).
    *
    * Alongside the songs, page 1 carries the web's ALL-view anime and
-   * artist groups (see searchGroups) — the grouped results the app's
-   * search screen renders under the Themes list.
+   * artist groups plus the users group (see searchGroups) — the
+   * grouped results the app's search screen renders under the
+   * Themes list.
    */
   async search(rawQuery: string, page = 1): Promise<SearchResponse> {
     const model = this.requireModel();
@@ -339,6 +348,7 @@ export class ThemesService {
         results: [],
         anime: [],
         artists: [],
+        users: [],
         searchType: 'regex',
         page: safePage,
         total: 0,
@@ -422,16 +432,17 @@ export class ThemesService {
     ]);
 
     const results = (docs as ThemeDoc[]).map(toThemeSummary);
-    // The anime/artist groups are the web's ALL view: page 1 only.
+    // The anime/artist/user groups are the web's ALL view: page 1 only.
     const groups =
       safePage === 1
         ? await this.searchGroups(cleanWords, themeModifierUsed)
-        : { anime: [], artists: [] };
+        : { anime: [], artists: [], users: [] };
     return {
       query,
       results,
       anime: groups.anime,
       artists: groups.artists,
+      users: groups.users,
       searchType: 'regex',
       page: safePage,
       total,
@@ -442,14 +453,16 @@ export class ThemesService {
   }
 
   /**
-   * The anime + artist groups of GET /search — the web's ALL-view
-   * filters (app/api/search/route.ts): every clean word must appear
-   * (escaped, case-insensitive substring) in at least one of the
-   * group's fields — anime: titleRomaji / titleEnglish / synonyms;
-   * artists: name / aliases — capped at the web's ALL-view 5 per
-   * group, in the collection's natural order (the web sorts neither
-   * group). The web skips both groups when an OP/ED modifier was
-   * parsed out of the query, and so does this port.
+   * The anime + artist + user groups of GET /search — the web's
+   * ALL-view filters (app/api/search/route.ts): every clean word
+   * must appear (escaped, case-insensitive substring) in at least
+   * one of the group's fields — anime: titleRomaji / titleEnglish /
+   * synonyms; artists: name / aliases; users: username /
+   * displayName (public accounts only, the people search's own
+   * filter — see searchUserGroup) — capped at the web's ALL-view 5
+   * per group, in the collection's natural order (the web sorts
+   * none of the groups). The web skips the groups when an OP/ED
+   * modifier was parsed out of the query, and so does this port.
    *
    * Theme counts come from the theme collection itself (one light
    * projection find per group, counted in memory — the groups cap
@@ -459,15 +472,19 @@ export class ThemesService {
    * the cache counter drifts (see getArtistDetail), so a search row
    * never reports fewer themes than the artist page would.
    *
-   * A cache model the service was constructed without simply yields
-   * an empty group — the themes slice never depends on them.
+   * A model the service was constructed without simply yields an
+   * empty group — the themes slice never depends on them.
    */
   private async searchGroups(
     cleanWords: string[],
     themeModifierUsed: boolean,
-  ): Promise<{ anime: SearchAnimeResult[]; artists: SearchArtistResult[] }> {
+  ): Promise<{
+    anime: SearchAnimeResult[];
+    artists: SearchArtistResult[];
+    users: NetworkUser[];
+  }> {
     if (themeModifierUsed || cleanWords.length === 0) {
-      return { anime: [], artists: [] };
+      return { anime: [], artists: [], users: [] };
     }
     const contains = (word: string) => new RegExp(escapeRegExp(word), 'i');
     // The filters are assembled dynamically, exactly as on the web.
@@ -479,13 +496,14 @@ export class ThemesService {
       return conditions.length === 1 ? conditions[0] : { $and: conditions };
     };
 
-    const [anime, artists] = await Promise.all([
+    const [anime, artists, users] = await Promise.all([
       this.searchAnimeGroup(
         groupFilter(['titleRomaji', 'titleEnglish', 'synonyms']),
       ),
       this.searchArtistGroup(groupFilter(['name', 'aliases'])),
+      this.searchUserGroup(cleanWords),
     ]);
-    return { anime, artists };
+    return { anime, artists, users };
   }
 
   private async searchAnimeGroup(
@@ -557,6 +575,58 @@ export class ThemesService {
       imageUrl: d.imageUrl ?? null,
       totalThemes: Math.max(d.totalThemes ?? 0, counts.get(d.slug) ?? 0),
     }));
+  }
+
+  /**
+   * The users group of GET /search (owner order 2026-11-10: the
+   * app's search shows users as a result group, as the web's own
+   * search does). The matching is the people search's own
+   * (SocialService.searchUsers, the USERS branch of the web's
+   * /api/search): public accounts only (isPublic), every clean
+   * word a case-insensitive substring of the username or the
+   * display name. Two group-level differences from the dedicated
+   * endpoint, both following the other ALL-view groups: the cap
+   * is the groups' 5 (not the endpoint's 20-per-page), and there
+   * is no 2-character minimum — /search answers one-character
+   * queries for every other group, so the group simply matches
+   * what it matches. The projection is the people search's
+   * NetworkUser, field for field — public profile fields only;
+   * the stored email, password hash and AniList token never
+   * leave the document. Natural order, like the other groups.
+   */
+  private async searchUserGroup(
+    cleanWords: string[],
+  ): Promise<NetworkUser[]> {
+    if (!this.userModel) return [];
+    const contains = (word: string) => new RegExp(escapeRegExp(word), 'i');
+    const conditions = cleanWords.map((word) => ({
+      $or: [{ username: contains(word) }, { displayName: contains(word) }],
+    }));
+    // The filter is assembled dynamically, exactly as on the web.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const filter: any = {
+      isPublic: true,
+      ...(conditions.length === 1
+        ? conditions[0]
+        : { $and: conditions }),
+    };
+    const docs = (await this.userModel
+      .find(filter)
+      .limit(SEARCH_GROUP_LIMIT)
+      .lean()
+      .exec()) as unknown as SearchUserDoc[];
+    return docs.map((d) => this.toSearchUser(d));
+  }
+
+  /** The people search's projection (SocialService.toNetworkUser). */
+  private toSearchUser(doc: SearchUserDoc): NetworkUser {
+    return {
+      id: String(doc._id),
+      username: doc.username,
+      displayName: doc.displayName,
+      avatarUrl: doc.avatarUrl ?? null,
+      bio: doc.bio ?? '',
+    };
   }
 
   /**

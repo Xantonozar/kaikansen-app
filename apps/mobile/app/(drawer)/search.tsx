@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react-native';
 import type {
+  NetworkUser,
   SearchAnimeResult,
   SearchArtistResult,
   SearchResponse,
@@ -32,6 +33,7 @@ import {
   usePlaybackSession,
 } from '../../src/playback-context';
 import { plainStorage } from '../../src/storage';
+import { PersonRow } from '../../src/components/PersonRow';
 import { ThemeRow } from '../../src/components/ThemeRow';
 import {
   fontFamilies,
@@ -45,6 +47,21 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
 
 const RECENTS_KEY = 'kaikansen.recentSearches.v1';
 const RECENTS_CAP = 8;
+
+/**
+ * The results filter (owner order 2026-11-10): 'all' shows every
+ * group GET /search serves; each other key narrows the results to
+ * that one group. The chip order is the owner's own — Artists ·
+ * Users · Anime · Themes after All.
+ */
+type SearchFilter = 'all' | 'artists' | 'users' | 'anime' | 'themes';
+const FILTERS: { key: SearchFilter; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'artists', label: 'Artists' },
+  { key: 'users', label: 'Users' },
+  { key: 'anime', label: 'Anime' },
+  { key: 'themes', label: 'Themes' },
+];
 
 /**
  * The artist row's avatar: the catalogue photo when it is usable
@@ -125,8 +142,16 @@ function ArtistRowAvatar({
  *   count, chevron → the anime page), Artists (catalogue photo,
  *   else the artist's default chibi, else the initial-letter disc
  *   — owner ruling 2026-11-10 — name, theme count, chevron → the
- *   artist page). Empty groups are
- *   omitted; fixture mode honestly serves empty anime/artist
+ *   artist page), Users (PersonRow — shared Avatar, display name +
+ *   @username, chevron → the user profile; the group and the whole
+ *   filter row are owner additions 2026-11-10, the mock predates
+ *   them). A filter chip row sits above the groups — All ·
+ *   Artists · Users · Anime · Themes in the Season chips' pill
+ *   language; a chip narrows the list to its group, and a filter
+ *   with no matches falls back to the plain no-results line, never
+ *   a blank page. The landing state carries no filter row: Recent,
+ *   Trending and Popular are not group results. Empty groups are
+ *   omitted; fixture mode honestly serves empty anime/artist/user
  *   groups, so it renders Themes alone. The anime subline omits
  *   the mock's "TV ·" format word: the catalogue stores no format
  *   and the owner declined the backfill (the Anime Detail slice's
@@ -149,6 +174,7 @@ export default function SearchScreen() {
   const { startQueue } = usePlaybackSession();
   const [query, setQuery] = useState('');
   const [response, setResponse] = useState<SearchResponse | null>(null);
+  const [filter, setFilter] = useState<SearchFilter>('all');
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recents, setRecents] = useState<string[]>([]);
@@ -240,6 +266,10 @@ export default function SearchScreen() {
 
   useEffect(() => {
     const q = query.trim();
+    // A fresh query starts unfiltered — otherwise a chip picked
+    // for the last search could hide this one's matches behind
+    // the no-results line.
+    setFilter('all');
     if (q.length === 0) {
       setResponse(null);
       setSearching(false);
@@ -280,11 +310,25 @@ export default function SearchScreen() {
   const results = response?.results ?? [];
   const anime = response?.anime ?? [];
   const artists = response?.artists ?? [];
-  const noResults =
+  const users = response?.users ?? [];
+  // The filter narrows which groups render; a group also needs
+  // rows to render at all. Spacing follows the VISIBLE groups, so
+  // a filtered list keeps the mock's first-group-flush rhythm.
+  const showThemes = filter === 'all' || filter === 'themes';
+  const showAnime = filter === 'all' || filter === 'anime';
+  const showArtists = filter === 'all' || filter === 'artists';
+  const showUsers = filter === 'all' || filter === 'users';
+  const animeSpaced = showThemes && results.length > 0;
+  const artistsSpaced =
+    animeSpaced || (showAnime && anime.length > 0);
+  const usersSpaced =
+    artistsSpaced || (showArtists && artists.length > 0);
+  const noVisibleResults =
     response !== null &&
-    results.length === 0 &&
-    anime.length === 0 &&
-    artists.length === 0;
+    (!showThemes || results.length === 0) &&
+    (!showAnime || anime.length === 0) &&
+    (!showArtists || artists.length === 0) &&
+    (!showUsers || users.length === 0);
 
   const animeRow = (a: SearchAnimeResult) => (
     <Pressable
@@ -342,6 +386,62 @@ export default function SearchScreen() {
       </View>
       <ChevronRight size={20} color={theme.secondary} strokeWidth={2} />
     </Pressable>
+  );
+
+  // People rows are the app's shared unit (PersonRow — the people
+  // search's row): shared Avatar, display name + @username.
+  const userRow = (u: NetworkUser) => (
+    <PersonRow
+      key={u.id}
+      displayName={u.displayName}
+      username={u.username}
+      avatarUrl={u.avatarUrl}
+      onPress={() => {
+        recordRecent(query);
+        router.push(`/user/${u.username}`);
+      }}
+    />
+  );
+
+  // The filter row: the Season chips' pattern (content-width
+  // pills, flexShrink 0, one-line labels, hidden-scrollbar
+  // horizontal scroller; selected = the mauve accent fill).
+  const filterChips = (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={styles.filterScroll}
+    >
+      <View style={styles.filterRow}>
+        {FILTERS.map((f) => {
+          const active = filter === f.key;
+          return (
+            <Pressable
+              key={f.key}
+              onPress={() => setFilter(f.key)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              accessibilityLabel={`Filter results: ${f.label}`}
+              style={({ pressed }) => [
+                styles.filterChip,
+                active && styles.filterChipActive,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.filterChipText,
+                  active && styles.filterChipTextActive,
+                ]}
+              >
+                {f.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </ScrollView>
   );
 
   // The drawer navigator shows no header, so the screen clears the
@@ -507,64 +607,69 @@ export default function SearchScreen() {
           <View style={styles.center}>
             <ActivityIndicator color={theme.accent} />
           </View>
-        ) : noResults ? (
-          <Text style={styles.hint}>No results for “{query.trim()}”.</Text>
         ) : response ? (
-          <ScrollView
-            style={styles.results}
-            contentContainerStyle={[
-              styles.resultsContent,
-              styles.resultsContentResults,
-            ]}
-            keyboardShouldPersistTaps="handled"
-          >
-            {favorites.lastError && (
-              <Pressable
-                onPress={favorites.clearError}
-                accessibilityRole="button"
-                accessibilityLabel="Dismiss"
+          <>
+            {filterChips}
+            {noVisibleResults ? (
+              <Text style={styles.hint}>
+                No results for “{query.trim()}”.
+              </Text>
+            ) : (
+              <ScrollView
+                style={styles.results}
+                contentContainerStyle={[
+                  styles.resultsContent,
+                  styles.resultsContentResults,
+                ]}
+                keyboardShouldPersistTaps="handled"
               >
-                <Text style={styles.saveError}>{favorites.lastError}</Text>
-              </Pressable>
+                {favorites.lastError && (
+                  <Pressable
+                    onPress={favorites.clearError}
+                    accessibilityRole="button"
+                    accessibilityLabel="Dismiss"
+                  >
+                    <Text style={styles.saveError}>{favorites.lastError}</Text>
+                  </Pressable>
+                )}
+                {showThemes && results.length > 0 && (
+                  <View>
+                    <Text style={styles.resultHeading}>Themes</Text>
+                    {results.map((item, index) => (
+                      <ThemeRow
+                        key={item.slug}
+                        item={item}
+                        search
+                        onPress={() => openTheme(item.slug)}
+                        onPlay={() => playFromList(results, index)}
+                        saved={favorites.isFavorite(item.slug)}
+                        savePending={favorites.isPending(item.slug)}
+                        onToggleSave={() => void favorites.toggle(item.slug)}
+                      />
+                    ))}
+                  </View>
+                )}
+                {showAnime && anime.length > 0 && (
+                  <View style={animeSpaced ? styles.groupSpaced : undefined}>
+                    <Text style={styles.resultHeading}>Anime</Text>
+                    {anime.map(animeRow)}
+                  </View>
+                )}
+                {showArtists && artists.length > 0 && (
+                  <View style={artistsSpaced ? styles.groupSpaced : undefined}>
+                    <Text style={styles.resultHeading}>Artists</Text>
+                    {artists.map(artistRow)}
+                  </View>
+                )}
+                {showUsers && users.length > 0 && (
+                  <View style={usersSpaced ? styles.groupSpaced : undefined}>
+                    <Text style={styles.resultHeading}>Users</Text>
+                    {users.map(userRow)}
+                  </View>
+                )}
+              </ScrollView>
             )}
-            {results.length > 0 && (
-              <View>
-                <Text style={styles.resultHeading}>Themes</Text>
-                {results.map((item, index) => (
-                  <ThemeRow
-                    key={item.slug}
-                    item={item}
-                    search
-                    onPress={() => openTheme(item.slug)}
-                    onPlay={() => playFromList(results, index)}
-                    saved={favorites.isFavorite(item.slug)}
-                    savePending={favorites.isPending(item.slug)}
-                    onToggleSave={() => void favorites.toggle(item.slug)}
-                  />
-                ))}
-              </View>
-            )}
-            {anime.length > 0 && (
-              <View
-                style={results.length > 0 ? styles.groupSpaced : undefined}
-              >
-                <Text style={styles.resultHeading}>Anime</Text>
-                {anime.map(animeRow)}
-              </View>
-            )}
-            {artists.length > 0 && (
-              <View
-                style={
-                  results.length > 0 || anime.length > 0
-                    ? styles.groupSpaced
-                    : undefined
-                }
-              >
-                <Text style={styles.resultHeading}>Artists</Text>
-                {artists.map(artistRow)}
-              </View>
-            )}
-          </ScrollView>
+          </>
         ) : null}
       </View>
     </SafeAreaView>
@@ -676,6 +781,47 @@ const createStyles = (theme: Theme) =>
     // search-results.html: sections after the first sit mt-3.5
     // (14) below the previous group.
     marginTop: 14,
+  },
+  filterScroll: {
+    // The results filter row (owner, 2026-11-10): the Season
+    // chips' scroller, set between the header bar and the groups.
+    // flexGrow 0 keeps it at its content height in the column.
+    flexGrow: 0,
+    marginBottom: spacing.xs,
+  },
+  filterRow: {
+    // The Season chips' row: gap-2 with a breath of vertical
+    // padding, inset to the screen edge like the results content.
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.screenEdge,
+    paddingVertical: 2,
+  },
+  filterChip: {
+    // The Season chips' pill: content-width (flexShrink 0 so the
+    // row scrolls instead of squeezing a label), py-1.5 px-3,
+    // idle fill = theme.raised.
+    flexShrink: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    borderRadius: radii.pill,
+    backgroundColor: theme.raised,
+  },
+  filterChipActive: {
+    // Selected = the mauve accent fill (Season chipActive).
+    backgroundColor: theme.accent,
+  },
+  filterChipText: {
+    // The Season chips' label: text-xs (12), medium idle.
+    fontFamily: fontFamilies.caption,
+    fontSize: 12,
+    color: theme.accent,
+  },
+  filterChipTextActive: {
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.onAccent,
   },
   sectionHeader: {
     flexDirection: 'row',

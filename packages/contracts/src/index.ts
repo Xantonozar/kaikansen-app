@@ -170,14 +170,22 @@ export interface SearchArtistResult {
 
 /**
  * Response body of GET /search — the web app's search envelope
- * (ZadidSalman/Kaisen `app/api/search/route.ts`) minus its users
- * group (people search lives at /social/users/search here): the
- * web returns grouped artists/anime alongside songs; `results`
- * carries the songs group with its SONGS-view pagination, `anime`
- * and `artists` carry the ALL-view groups (web cap: 5 each), and the
+ * (ZadidSalman/Kaisen `app/api/search/route.ts`): the web returns
+ * grouped artists/anime alongside songs; `results` carries the
+ * songs group with its SONGS-view pagination, `anime` and
+ * `artists` carry the ALL-view groups (web cap: 5 each), and the
  * remaining fields mirror the web's `meta` object. The groups are
  * served on page 1 only and stay empty when an OP/ED modifier was
  * parsed out of the query — the web skips them then too.
+ *
+ * The `users` group is the one deliberate addition over the port's
+ * first cut (which left people search at /social/users/search
+ * only): owner order 2026-11-10 — the app's search shows users as
+ * a result group, as the web's own search does. It follows the
+ * other groups' rules (page 1 only, cap 5, empty under an OP/ED
+ * modifier) and carries the people search's own projection
+ * (NetworkUser — public profile fields only, public accounts
+ * only); the dedicated endpoint stays for paginated people search.
  */
 export interface SearchResponse {
   query: string;
@@ -187,6 +195,13 @@ export interface SearchResponse {
   anime: SearchAnimeResult[];
   /** Artist group (page 1 only; empty when an OP/ED modifier is used). */
   artists: SearchArtistResult[];
+  /**
+   * User group (page 1 only; empty when an OP/ED modifier is used) —
+   * public accounts whose username or display name contains every
+   * query word (the /social/users/search matching), projected as
+   * NetworkUser. Cap 5, like the other groups.
+   */
+  users: NetworkUser[];
   /** The web search is regex-only end to end (AUDIT.md §6) — always 'regex'. */
   searchType: 'regex';
   /** 1-based page served. */
