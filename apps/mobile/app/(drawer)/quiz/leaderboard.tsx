@@ -38,9 +38,10 @@ const PLUM = '#3D2436';
 const PLUM_SUB = 'rgba(247, 242, 247, 0.75)';
 
 /**
- * Leaderboard — rebuilt to the owner-approved rank design
- * (2026-11-10): back header, the "All-time" mauve pill beside
- * the muted "Weekly · soon" pill, each ranked row as its OWN
+ * Leaderboard — the owner-approved rank design (2026-11-10),
+ * with the WEEKLY board made real by the fix batch
+ * (2026-11-11): back header, the "All-time" / "Weekly" mauve
+ * pills (BOTH live segments now), each ranked row as its OWN
  * white card (position, avatar LEFT, name + ladder-rank line,
  * rank icon chip RIGHT, RP figure — the owner-confirmed
  * anatomy), and the pinned DARK PLUM your-rank card at the
@@ -51,28 +52,18 @@ const PLUM_SUB = 'rgba(247, 242, 247, 0.75)';
  *
  * Data is GET /rank/leaderboard (the web's /api/leaderboard
  * port: top 100 by RP) plus GET /rank/me for the caller's
- * standing.
+ * standing. The Weekly segment fetches `?scope=weekly`: rows
+ * whose `rp` is the week's RP (RankHistory sums since Monday
+ * 00:00 Asia/Dhaka) while every row's ladder/tier still derives
+ * from LIFETIME RP — RankRow draws exactly that, unchanged.
+ * The pinned card always speaks lifetime: position and figure
+ * come from the ACTIVE board's rows when the caller is on it,
+ * but the rank line is the caller's lifetime standing either
+ * way; on Weekly a caller outside the week's top 100 gets the
+ * card without a position, the same honest posture as all-time.
  *
- * ⚠️ WEEKLY IS NOT REAL — flagged for the owner. The mock
- * selects "Weekly", but no weekly board exists anywhere in
- * this system: GET /rank/leaderboard takes no period
- * parameter; the shared snapshot schema's scope enum ALLOWS
- * 'weekly'/'monthly', yet the web's cron writer and
- * leaderboard route both hardcode scope 'global' / seasonId
- * 'all-time', so a weekly snapshot is never written; UserRank
- * carries no weekly RP field (its season block is the
- * all-time season); and `rankhistories` — the only rows a
- * weekly sum could come from — are read by nothing on the
- * web or here. The control therefore renders as drawn but
- * with "All time" as the active segment and "Weekly"
- * DISABLED: all-time data is never presented under a Weekly
- * label. Building a weekly board is a new API read + a
- * product decision, not a restyle.
- *
- * The pinned card needs the caller's position, which only
- * exists when they land inside the served top 100; a
- * signed-in caller outside it gets the card without a
- * position, and a signed-out caller gets no card at all.
+ * An empty week is an honest empty state ("No games finished
+ * this week yet") — the tab is enabled, never faked.
  */
 export default function LeaderboardScreen() {
   const theme = useTheme();
@@ -81,14 +72,16 @@ export default function LeaderboardScreen() {
   const { status } = useAuth();
   const signedIn = status === 'signedIn';
 
+  const [scope, setScope] = useState<'all-time' | 'weekly'>('all-time');
   const [entries, setEntries] = useState<RankLeaderboardEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [myRank, setMyRank] = useState<UserRankProfile | null>(null);
 
   const load = useCallback(async () => {
+    setEntries(null);
     setError(null);
     try {
-      const res = await fetchRankLeaderboard();
+      const res = await fetchRankLeaderboard(scope);
       setEntries(res.leaderboard);
     } catch (e) {
       setError(
@@ -104,7 +97,7 @@ export default function LeaderboardScreen() {
     } else {
       setMyRank(null);
     }
-  }, [signedIn]);
+  }, [signedIn, scope]);
 
   useFocusEffect(
     useCallback(() => {
@@ -140,6 +133,13 @@ export default function LeaderboardScreen() {
     return idx >= 0 ? idx + 1 : null;
   }, [entries, myRank]);
 
+  /** The caller's figure on the ACTIVE board (weekly: their
+   *  week's RP from their row; all-time: their lifetime RP). */
+  const myBoardEntry = useMemo(() => {
+    if (!entries || !myRank) return null;
+    return entries.find((e) => e.userId === myRank.userId) ?? null;
+  }, [entries, myRank]);
+
   const myStanding = myRank ? standingOf(myRank) : null;
 
   // The drawer navigator shows no header, so the screen clears the
@@ -169,30 +169,53 @@ export default function LeaderboardScreen() {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.column}>
-          {/* The approved design's pills — Weekly is disabled
-              because no weekly board exists (see the header
-              comment); All-time is the real, active pill. */}
+          {/* The timeframe segments — both live (fix batch
+              2026-11-11): the active board wears the mauve
+              filled pill, the idle one the pale surface pill. */}
           <View
             style={styles.pillRow}
-            accessibilityLabel="Timeframe: all time. Weekly rankings are not tracked yet."
+            accessibilityLabel={`Timeframe: ${scope === 'weekly' ? 'this week' : 'all time'}.`}
           >
-            <View
-              style={[styles.pill, styles.pillActive]}
-              accessibilityState={{ selected: true }}
+            <Pressable
+              onPress={() => setScope('all-time')}
+              accessibilityRole="button"
+              accessibilityState={{ selected: scope === 'all-time' }}
+              accessibilityLabel="All-time leaderboard"
+              style={[
+                styles.pill,
+                scope === 'all-time' ? styles.pillActive : styles.pillIdle,
+              ]}
             >
-              <Text style={[styles.pillText, styles.pillTextActive]}>
+              <Text
+                style={[
+                  styles.pillText,
+                  scope === 'all-time'
+                    ? styles.pillTextActive
+                    : styles.pillTextIdle,
+                ]}
+              >
                 All-time
               </Text>
-            </View>
+            </Pressable>
             <Pressable
-              disabled
+              onPress={() => setScope('weekly')}
               accessibilityRole="button"
-              accessibilityState={{ disabled: true, selected: false }}
-              accessibilityLabel="Weekly — not available yet"
-              style={[styles.pill, styles.pillIdle]}
+              accessibilityState={{ selected: scope === 'weekly' }}
+              accessibilityLabel="Weekly leaderboard"
+              style={[
+                styles.pill,
+                scope === 'weekly' ? styles.pillActive : styles.pillIdle,
+              ]}
             >
-              <Text style={[styles.pillText, styles.pillTextIdle]}>
-                Weekly · soon
+              <Text
+                style={[
+                  styles.pillText,
+                  scope === 'weekly'
+                    ? styles.pillTextActive
+                    : styles.pillTextIdle,
+                ]}
+              >
+                Weekly
               </Text>
             </Pressable>
           </View>
@@ -228,7 +251,9 @@ export default function LeaderboardScreen() {
             <Text style={styles.emptyText}>
               {fixtureMode
                 ? 'No rankings in demo mode.'
-                : 'No ranked players yet — play a quiz game to earn RP.'}
+                : scope === 'weekly'
+                  ? 'No games finished this week yet — be the first to earn RP this week.'
+                  : 'No ranked players yet — play a quiz game to earn RP.'}
             </Text>
           )}
         </View>
@@ -245,7 +270,9 @@ export default function LeaderboardScreen() {
                   : 'Your rank'}
               </Text>
               <Text style={styles.pinSub}>
-                {ladderLabel(myStanding.rank)} · {formatRp(myRank.rp)}
+                {scope === 'weekly' && myBoardEntry
+                  ? `${ladderLabel(myStanding.rank)} · ${formatRp(myBoardEntry.rp)} this week`
+                  : `${ladderLabel(myStanding.rank)} · ${formatRp(myRank.rp)}`}
               </Text>
             </View>
             <View style={styles.pinYouPill}>
@@ -320,7 +347,6 @@ const createStyles = (theme: Theme) =>
     },
     pillIdle: {
       backgroundColor: theme.surface,
-      opacity: 0.7,
     },
     pillText: {
       fontFamily: fontFamilies.bodyStrong,

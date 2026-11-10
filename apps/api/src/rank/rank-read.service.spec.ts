@@ -1,5 +1,6 @@
 import { ServiceUnavailableException } from '@nestjs/common';
 import { RankReadService } from './rank-read.service';
+import { weekStartDhaka } from '../quiz/ladder-standing';
 
 /**
  * RankReadService unit tests (Slice S6) — the web's rank reads:
@@ -120,6 +121,7 @@ function makeWorld() {
     { _id: '507f1f77bcf86cd7994390a4', username: 'carol', displayName: 'Carol C', avatarUrl: null },
   ];
   const snapshots: Record<string, unknown>[] = [];
+  const history: Record<string, unknown>[] = [];
   let createCalls = 0;
 
   const userRankModel = {
@@ -167,6 +169,53 @@ function makeWorld() {
     findOne: (filter: Record<string, unknown>) =>
       queryOf(snapshots.find((s) => matches(s, filter)) ?? null),
   };
+  /**
+   * RankHistory fake — supports exactly the weekly pipeline the
+   * service runs: $match on playedAt >= since, $group by userId
+   * summing rpChange, $sort (weeklyRp desc, _id asc), $limit.
+   */
+  const rankHistoryModel = {
+    docs: history,
+    aggregate: (pipeline: Record<string, unknown>[]) => ({
+      exec: async () => {
+        let rows: Record<string, unknown>[] = [...history];
+        for (const stage of pipeline) {
+          if ('$match' in stage) {
+            const since = (
+              stage.$match as { playedAt: { $gte: Date } }
+            ).playedAt.$gte;
+            rows = rows.filter(
+              (r) => (r.playedAt as Date).getTime() >= since.getTime(),
+            );
+          } else if ('$group' in stage) {
+            const byUser = new Map<string, number>();
+            for (const r of rows) {
+              const id = String(r.userId);
+              byUser.set(id, (byUser.get(id) ?? 0) + (r.rpChange as number));
+            }
+            rows = [...byUser.entries()].map(([id, weeklyRp]) => ({
+              _id: id,
+              weeklyRp,
+            }));
+          } else if ('$sort' in stage) {
+            const spec = stage.$sort as Record<string, number>;
+            rows.sort((a, b) => {
+              for (const [key, dir] of Object.entries(spec)) {
+                const av = a[key] as never;
+                const bv = b[key] as never;
+                if (av < bv) return -dir;
+                if (av > bv) return dir;
+              }
+              return 0;
+            });
+          } else if ('$limit' in stage) {
+            rows = rows.slice(0, stage.$limit as number);
+          }
+        }
+        return rows;
+      },
+    }),
+  };
   const userModel = {
     find: (filter: Record<string, unknown>) => {
       // Mongoose casts an _id $in against ObjectId: one malformed
@@ -192,9 +241,11 @@ function makeWorld() {
     ranks,
     users,
     snapshots,
+    history,
     userRankModel,
     snapshotModel,
     userModel,
+    rankHistoryModel,
     createCalls: () => createCalls,
   };
 }
@@ -204,6 +255,7 @@ function makeService(world: ReturnType<typeof makeWorld>) {
     world.userRankModel as never,
     world.snapshotModel as never,
     world.userModel as never,
+    world.rankHistoryModel as never,
   );
 }
 
@@ -608,6 +660,89 @@ describe('RankReadService.getLeaderboard', () => {
     expect(res.meta.source).toBe('snapshot');
     expect(res.leaderboard).toHaveLength(1);
     expect(res.leaderboard[0].userId).toBe('507f1f77bcf86cd7994390a1');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* getLeaderboard('weekly') — the weekly board (fix batch 2026-11-11)  */
+/* ------------------------------------------------------------------ */
+
+describe('RankReadService.getLeaderboard — weekly scope', () => {
+  const A1 = '507f1f77bcf86cd7994390a1';
+  const A2 = '507f1f77bcf86cd7994390a2';
+  const A3 = '507f1f77bcf86cd7994390a3'; // rank doc, NO user doc
+  const A4 = '507f1f77bcf86cd7994390a4';
+
+  function seedHistory(world: ReturnType<typeof makeWorld>) {
+    // "Now" for these fixtures is wherever the real clock sits;
+    // this-week rows are stamped relative to the live week start
+    // so the suite is clock-independent (weekStartDhaka is pinned
+    // separately against fixed instants in ladder-standing.spec).
+    const start = weekStartDhaka(new Date());
+    const inWeek = (h: number) => new Date(start.getTime() + h * 3_600_000);
+    const before = new Date(start.getTime() - 60_000);
+    world.history.push(
+      { userId: A1, rpChange: 30, playedAt: inWeek(1) },
+      { userId: A1, rpChange: 25, playedAt: inWeek(5) }, // A1: +55
+      { userId: A2, rpChange: -10, playedAt: inWeek(2) }, // A2: −10 (net-negative week)
+      { userId: A3, rpChange: 999, playedAt: inWeek(1) }, // gone user → dropped
+      { userId: A4, rpChange: 40, playedAt: before }, // last week — excluded
+      { userId: 'ghost-no-rank', rpChange: 70, playedAt: inWeek(3) }, // no user doc → dropped
+    );
+    return start;
+  }
+
+  it('sums this week’s rpChange per user, newest week only, negatives ranked below gainers', async () => {
+    const world = makeWorld();
+    seedHistory(world);
+    const service = makeService(world);
+    const res = await service.getLeaderboard('weekly');
+    expect(res.meta).toEqual({ source: 'live', computedAt: null });
+    expect(res.leaderboard.map((e) => [e.userId, e.rp])).toEqual([
+      [A1, 55],
+      [A2, -10],
+    ]);
+  });
+
+  it('dresses rows from the LIFETIME rank doc — the figure is the week, the ladder is lifetime', async () => {
+    const world = makeWorld();
+    seedHistory(world);
+    const service = makeService(world);
+    const res = await service.getLeaderboard('weekly');
+    // A1's lifetime is 900 RP (Chunin, LADDER_900) though the
+    // week's figure is only 55 — the ladder must NOT derive
+    // from 55 (that would read Scout).
+    expect(res.leaderboard[0]).toEqual({
+      userId: A1,
+      username: 'alice',
+      displayName: 'Alice A',
+      avatarUrl: 'https://example.com/alice.png',
+      rp: 55,
+      tier: 'genin',
+      division: 3,
+      ladder: LADDER_900,
+      wins: 6,
+      winRate: 0.6,
+    });
+  });
+
+  it('an unknown scope value is the all-time board (default preserved)', async () => {
+    const world = makeWorld();
+    seedHistory(world);
+    const service = makeService(world);
+    const weekly = await service.getLeaderboard('weekly');
+    const monthly = await service.getLeaderboard('monthly');
+    expect(monthly.leaderboard).not.toEqual(weekly.leaderboard);
+    expect(monthly.leaderboard.map((e) => e.rp)).toEqual([900, 500, 100]);
+  });
+
+  it('an empty week is an honest empty board', async () => {
+    const world = makeWorld();
+    const service = makeService(world);
+    await expect(service.getLeaderboard('weekly')).resolves.toEqual({
+      leaderboard: [],
+      meta: { source: 'live', computedAt: null },
+    });
   });
 });
 

@@ -19,10 +19,14 @@ describe('Health (e2e)', () => {
     await app.close();
   });
 
-  it('GET /health returns the ok payload', () => {
+  it('GET /health returns the ok payload (model-less boot: db not-configured)', () => {
     return request(app.getHttpServer())
       .get('/health')
       .expect(200)
-      .expect({ status: 'ok', service: 'kaikansen-api' });
+      .expect({
+        status: 'ok',
+        service: 'kaikansen-api',
+        db: 'not-configured',
+      });
   });
 });

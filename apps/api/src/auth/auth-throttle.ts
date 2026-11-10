@@ -35,6 +35,18 @@ import type { ThrottlerOptions } from '@nestjs/throttler';
  *   the outer backstop)
  * - refresh:          60/min per IP (rotation is chatty by design;
  *   the reuse detection in AuthService is the real defence there)
+ * - anilist callback: 20/min per IP (fix batch 2026-11-11 — these
+ *   routes previously rode the 300/min baseline while every call
+ *   spends the owner's AniList API quota on a token exchange).
+ *   The account leg does NOT apply: the guard runs BEFORE the
+ *   exchange, so the AniList identity does not exist yet at
+ *   guard time, and keying by the request body's opaque OAuth
+ *   code would be a meaningless per-code bucket. The login
+ *   route's account leg protects password guessing against a
+ *   known email; the callback has no equivalent pre-exchange
+ *   identity — IP only, by design, stated here rather than faked.
+ * - anilist link:     30/min per IP (already-authenticated
+ *   action; same pre-exchange reasoning for the account leg).
  */
 
 type TrackerRequest = {
@@ -91,6 +103,15 @@ export const AUTH_THROTTLE = {
   },
   refresh: {
     'auth-ip': { limit: 60, ttl: 60_000 },
+  },
+  /** Fix batch 2026-11-11: AniList login exchange — IP leg of
+   *  the login buckets (see the header for why no account leg). */
+  anilistCallback: {
+    'auth-ip': { limit: 20, ttl: 60_000 },
+  },
+  /** Fix batch 2026-11-11: AniList link (authenticated) — IP only. */
+  anilistLink: {
+    'auth-ip': { limit: 30, ttl: 60_000 },
   },
 } as const;
 

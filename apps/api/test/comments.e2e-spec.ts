@@ -194,6 +194,10 @@ function makeFakeModels() {
     docs: comments,
     find: (filter: Record<string, unknown>) =>
       chain(comments.filter((c) => c.themeSlug === filter.themeSlug)),
+    countDocuments: (filter: Record<string, unknown>) => ({
+      exec: async () =>
+        comments.filter((c) => c.themeSlug === filter.themeSlug).length,
+    }),
     create: async (data: Record<string, unknown>) => {
       const now = new Date((clock += 1000));
       const doc = {
@@ -305,7 +309,13 @@ describe('Comments flow with mocked models (e2e)', () => {
     const http = request(app.getHttpServer());
 
     const empty = await http.get('/themes/anime_a-op1-1/comments').expect(200);
-    expect(empty.body).toEqual({ comments: [] });
+    expect(empty.body).toEqual({
+      comments: [],
+      page: 1,
+      limit: 50,
+      total: 0,
+      hasMore: false,
+    });
 
     const list404 = await http.get('/themes/nope/comments').expect(404);
     expect(list404.body.message).toBe('Theme not found: nope');
@@ -361,6 +371,25 @@ describe('Comments flow with mocked models (e2e)', () => {
     );
     expect(list.body.comments[0].author.username).toBe('bob');
     expect(list.body.comments[1].author.username).toBe('alice');
+    expect(list.body).toMatchObject({
+      page: 1,
+      limit: 50,
+      total: 2,
+      hasMore: false,
+    });
+
+    // Paging over the wire (fix batch 2026-11-11): limit=1 walks
+    // the same order one at a time, hasMore honest.
+    const page1 = await http
+      .get('/themes/anime_a-op1-1/comments?limit=1')
+      .expect(200);
+    expect(page1.body.comments.map((c: { content: string }) => c.content)).toEqual(['Second']);
+    expect(page1.body).toMatchObject({ page: 1, limit: 1, total: 2, hasMore: true });
+    const page2 = await http
+      .get('/themes/anime_a-op1-1/comments?page=2&limit=1')
+      .expect(200);
+    expect(page2.body.comments.map((c: { content: string }) => c.content)).toEqual(['First!']);
+    expect(page2.body).toMatchObject({ page: 2, limit: 1, total: 2, hasMore: false });
   });
 
   it('rejects blank and over-long content with the web’s 400 messages', async () => {

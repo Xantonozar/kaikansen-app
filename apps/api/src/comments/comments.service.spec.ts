@@ -7,8 +7,8 @@ import { CommentsService } from './comments.service';
 
 /**
  * CommentsService unit tests. All three models are in-memory fakes
- * (no live DB); the fake Comment model applies sort/limit like
- * Mongoose, so list ordering and the 100-cap can be asserted for
+ * (no live DB); the fake Comment model applies sort/skip/limit
+ * like Mongoose, so list ordering and paging can be asserted for
  * real.
  */
 
@@ -94,6 +94,10 @@ function makeModels() {
     docs: comments,
     find: (filter: Record<string, unknown>) =>
       chain(comments.filter((c) => c.themeSlug === filter.themeSlug)),
+    countDocuments: (filter: Record<string, unknown>) => ({
+      exec: async () =>
+        comments.filter((c) => c.themeSlug === filter.themeSlug).length,
+    }),
     create: async (data: Record<string, unknown>) => {
       const now = new Date((clock += 1000));
       const doc = {
@@ -177,6 +181,10 @@ describe('CommentsService — listing', () => {
     const { service } = makeService();
     await expect(service.listComments('anime_a-op1-1')).resolves.toEqual({
       comments: [],
+      page: 1,
+      limit: 50,
+      total: 0,
+      hasMore: false,
     });
   });
 
@@ -242,7 +250,7 @@ describe('CommentsService — listing', () => {
     expect(res.comments[0].author).toBeNull();
   });
 
-  it('caps the list at the web’s 100 most recent', async () => {
+  it('pages the list — default 50, next slices with no dupes/gaps, honest meta (fix batch 2026-11-11)', async () => {
     const { models, service } = makeService();
     const base = Date.parse('2026-01-01T00:00:00.000Z');
     for (let i = 0; i < 105; i++) {
@@ -256,10 +264,92 @@ describe('CommentsService — listing', () => {
         updatedAt: at,
       });
     }
-    const res = await service.listComments('anime_a-op1-1');
+    // Default call: page 1 at the default size 50, meta honest.
+    const p1 = await service.listComments('anime_a-op1-1');
+    expect(p1).toMatchObject({ page: 1, limit: 50, total: 105, hasMore: true });
+    expect(p1.comments).toHaveLength(50);
+    expect(p1.comments[0].content).toBe('c104'); // newest first
+    expect(p1.comments[49].content).toBe('c55');
+
+    // Page 2 is the NEXT slice — no overlap, no gap.
+    const p2 = await service.listComments('anime_a-op1-1', { page: '2' });
+    expect(p2).toMatchObject({ page: 2, limit: 50, total: 105, hasMore: true });
+    expect(p2.comments[0].content).toBe('c54');
+    expect(p2.comments[49].content).toBe('c5');
+
+    // Page 3 is the tail; hasMore closes.
+    const p3 = await service.listComments('anime_a-op1-1', { page: '3' });
+    expect(p3).toMatchObject({ page: 3, total: 105, hasMore: false });
+    expect(p3.comments.map((c) => c.content)).toEqual([
+      'c4',
+      'c3',
+      'c2',
+      'c1',
+      'c0',
+    ]);
+
+    // The three pages partition the full set exactly once.
+    const all = [...p1.comments, ...p2.comments, ...p3.comments].map(
+      (c) => c.id,
+    );
+    expect(new Set(all).size).toBe(105);
+  });
+
+  it('a limit=100 call reproduces the web’s old single-shot cap exactly', async () => {
+    const { models, service } = makeService();
+    const base = Date.parse('2026-01-01T00:00:00.000Z');
+    for (let i = 0; i < 105; i++) {
+      const at = new Date(base + i * 1000);
+      models.commentModel.seed({
+        userId: USER_1,
+        themeId: THEME_A,
+        themeSlug: 'anime_a-op1-1',
+        content: `c${i}`,
+        createdAt: at,
+        updatedAt: at,
+      });
+    }
+    const res = await service.listComments('anime_a-op1-1', { limit: '100' });
     expect(res.comments).toHaveLength(100);
     expect(res.comments[0].content).toBe('c104'); // newest kept
     expect(res.comments[99].content).toBe('c5'); // c0–c4 fall off
+    // …but the meta now says there ARE more — the old silence is gone.
+    expect(res).toMatchObject({ total: 105, hasMore: true });
+  });
+
+  it('parses garbage paging params to the defaults', async () => {
+    const { service } = makeService();
+    const res = await service.listComments('anime_a-op1-1', {
+      page: 'banana',
+      limit: '-3',
+    });
+    expect(res).toMatchObject({ page: 1, limit: 50 });
+    const capped = await service.listComments('anime_a-op1-1', {
+      limit: '999',
+    });
+    expect(capped.limit).toBe(100);
+  });
+
+  it('orders stably across pages when createdAt ties (the _id tie-break)', async () => {
+    const { models, service } = makeService();
+    const same = new Date('2026-11-02T00:00:00.000Z');
+    for (let i = 0; i < 3; i++) {
+      models.commentModel.seed({
+        userId: USER_1,
+        themeId: THEME_A,
+        themeSlug: 'anime_a-op1-1',
+        content: `tied-${i}`,
+        createdAt: same,
+        updatedAt: same,
+      });
+    }
+    const p1 = await service.listComments('anime_a-op1-1', { limit: '2' });
+    const p2 = await service.listComments('anime_a-op1-1', {
+      page: '2',
+      limit: '2',
+    });
+    const ids = [...p1.comments, ...p2.comments].map((c) => c.id);
+    expect(new Set(ids).size).toBe(3); // every tied comment exactly once
   });
 });
 

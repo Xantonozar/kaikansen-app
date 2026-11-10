@@ -112,3 +112,50 @@ describe('Auth throttling — forgot-password issuance (e2e)', () => {
       .expect(503);
   });
 });
+
+describe('Auth throttling — AniList routes (fix batch 2026-11-11)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    app = await bootAuth();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('caps the AniList callback exchange at 20/min per IP, then 429', async () => {
+    const http = request(app.getHttpServer());
+    // Callback bodies carry an opaque OAuth code — no email, no
+    // account leg; the bucket is per-IP (the guard runs before
+    // the exchange yields any identity). Model-less handlers
+    // answer 503 until the bucket trips.
+    for (let i = 0; i < 20; i++) {
+      await http
+        .post('/auth/anilist/callback')
+        .send({ code: `probe-${i}` })
+        .expect(503);
+    }
+    await http
+      .post('/auth/anilist/callback')
+      .send({ code: 'probe-over' })
+      .expect(429);
+  });
+
+  it('caps the AniList link route at 30/min per IP — past the tokenless 401s the bucket still trips', async () => {
+    const http = request(app.getHttpServer());
+    // No Bearer token: the AccessTokenGuard 401s (the throttler
+    // counts first, per the controller's guard order) — 30
+    // counted calls, then the throttler's 429 takes over.
+    for (let i = 0; i < 30; i++) {
+      await http
+        .post('/auth/anilist/link')
+        .send({ code: `link-${i}` })
+        .expect(401);
+    }
+    await http
+      .post('/auth/anilist/link')
+      .send({ code: 'link-over' })
+      .expect(429);
+  });
+});

@@ -8,23 +8,117 @@ import {
 
 describe('connectivityFromSample', () => {
   it('null/undefined samples are never definitive — unknown stays unknown (no first-paint flash)', () => {
-    expect(connectivityFromSample('unknown', null)).toBe('unknown');
-    expect(connectivityFromSample('unknown', undefined)).toBe('unknown');
+    expect(connectivityFromSample('unknown', { isConnected: null })).toBe(
+      'unknown',
+    );
+    expect(connectivityFromSample('unknown', { isConnected: undefined })).toBe(
+      'unknown',
+    );
+    expect(
+      connectivityFromSample('unknown', {
+        isConnected: null,
+        isInternetReachable: null,
+      }),
+    ).toBe('unknown');
   });
 
-  it('isConnected === false is the only offline signal', () => {
-    expect(connectivityFromSample('unknown', false)).toBe('offline');
-    expect(connectivityFromSample('online', false)).toBe('offline');
+  it('isConnected === false is offline', () => {
+    expect(connectivityFromSample('unknown', { isConnected: false })).toBe(
+      'offline',
+    );
+    expect(connectivityFromSample('online', { isConnected: false })).toBe(
+      'offline',
+    );
   });
 
-  it('isConnected === true is online', () => {
-    expect(connectivityFromSample('unknown', true)).toBe('online');
-    expect(connectivityFromSample('offline', true)).toBe('online');
+  it('isConnected === true is online (reachability unknown or true)', () => {
+    expect(connectivityFromSample('unknown', { isConnected: true })).toBe(
+      'online',
+    );
+    expect(connectivityFromSample('offline', { isConnected: true })).toBe(
+      'online',
+    );
+    expect(
+      connectivityFromSample('offline', {
+        isConnected: true,
+        isInternetReachable: null,
+      }),
+    ).toBe('online');
+    expect(
+      connectivityFromSample('offline', {
+        isConnected: true,
+        isInternetReachable: true,
+      }),
+    ).toBe('online');
   });
 
   it('a null blip never erases a known state', () => {
-    expect(connectivityFromSample('offline', null)).toBe('offline');
-    expect(connectivityFromSample('online', null)).toBe('online');
+    expect(connectivityFromSample('offline', { isConnected: null })).toBe(
+      'offline',
+    );
+    expect(connectivityFromSample('online', { isConnected: null })).toBe(
+      'online',
+    );
+    expect(
+      connectivityFromSample('online', {
+        isConnected: null,
+        isInternetReachable: null,
+      }),
+    ).toBe('online');
+  });
+
+  /* Fix batch 2026-11-11 — the reachability leg. */
+  it('captive portal: connected but unreachable is offline', () => {
+    expect(
+      connectivityFromSample('online', {
+        isConnected: true,
+        isInternetReachable: false,
+      }),
+    ).toBe('offline');
+    expect(
+      connectivityFromSample('unknown', {
+        isConnected: true,
+        isInternetReachable: false,
+      }),
+    ).toBe('offline');
+  });
+
+  it('reachability false alone (connectivity unknown) never moves the unknown state', () => {
+    expect(
+      connectivityFromSample('unknown', {
+        isConnected: null,
+        isInternetReachable: false,
+      }),
+    ).toBe('unknown');
+  });
+
+  it('reachability recovering to true while connected restores online', () => {
+    let status: ConnectivityStatus = 'online';
+    status = connectivityFromSample(status, {
+      isConnected: true,
+      isInternetReachable: false,
+    });
+    expect(status).toBe('offline');
+    status = connectivityFromSample(status, {
+      isConnected: true,
+      isInternetReachable: true,
+    });
+    expect(status).toBe('online');
+  });
+
+  it('reachability null never moves a known state by itself', () => {
+    expect(
+      connectivityFromSample('offline', {
+        isConnected: null,
+        isInternetReachable: null,
+      }),
+    ).toBe('offline');
+    expect(
+      connectivityFromSample('online', {
+        isConnected: false,
+        isInternetReachable: null,
+      }),
+    ).toBe('offline');
   });
 });
 
@@ -48,11 +142,11 @@ describe('shouldShowOfflineScreen', () => {
     // offline → online transition flips the render off: dismissal
     // on reconnect is this same decision re-evaluated.
     let status: ConnectivityStatus = 'unknown';
-    status = connectivityFromSample(status, false);
+    status = connectivityFromSample(status, { isConnected: false });
     expect(
       shouldShowOfflineScreen({ connectivity: status, ...cold }),
     ).toBe(true);
-    status = connectivityFromSample(status, true);
+    status = connectivityFromSample(status, { isConnected: true });
     expect(
       shouldShowOfflineScreen({ connectivity: status, ...cold }),
     ).toBe(false);
@@ -70,6 +164,24 @@ describe('shouldShowOfflineScreen', () => {
       shouldShowOfflineScreen({
         connectivity: 'offline',
         pathname: '/theme/some-slug',
+        surfaceCanServe: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('captive portal takeover: offline via reachability blocks a cold surface but never a servable one', () => {
+    const status = connectivityFromSample('online', {
+      isConnected: true,
+      isInternetReachable: false,
+    });
+    expect(status).toBe('offline');
+    expect(
+      shouldShowOfflineScreen({ connectivity: status, ...cold }),
+    ).toBe(true);
+    expect(
+      shouldShowOfflineScreen({
+        connectivity: status,
+        pathname: '/',
         surfaceCanServe: true,
       }),
     ).toBe(false);

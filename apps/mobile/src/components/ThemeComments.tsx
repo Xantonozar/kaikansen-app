@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -28,9 +28,18 @@ const MAX_LENGTH = 1000;
 
 /**
  * Theme comments (Slice M5) — the detail screen's bottom section:
- * GET /themes/:slug/comments (newest first, the API caps at 100)
- * plus the composer. The web's surface is exactly list + post — no
- * replies, likes, edits or deletes exist, so none are drawn.
+ * GET /themes/:slug/comments (newest first) plus the composer.
+ * The web's surface is exactly list + post — no replies, likes,
+ * edits or deletes exist, so none are drawn.
+ *
+ * Load more (fix batch 2026-11-11): the API pages the list
+ * (page/limit + total/hasMore meta, replacing the old silent
+ * 100 cap) and the thread appends pages — the section is
+ * embedded in the detail screen's ScrollView, so the footer
+ * itself is the trigger surface: it fires the next page when
+ * it lays out at the section's tail (the onEndReached
+ * equivalent here) and stays tappable as a manual affordance,
+ * with a spinner while a page is in flight.
  *
  * A comment whose author account is gone renders with a muted
  * "Deleted user" name (the API serves author: null, like the web's
@@ -47,30 +56,55 @@ export function ThemeComments({ slug }: { slug: string }) {
   const signedIn = status === 'signedIn';
 
   const [comments, setComments] = useState<ThemeComment[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const pageRef = useRef(1);
+  const loadingMoreRef = useRef(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [posting, setPosting] = useState(false);
   const [postError, setPostError] = useState<string | null>(null);
 
   /* Silent swap (perf problem 5): a background revalidation of
-     the CATALOGUE-cached comments replaces the list in place. */
+     the CATALOGUE-cached comments replaces the list in place.
+     The cache entry is page 1 — the swap re-bases the paging
+     state to it (fix batch 2026-11-11): locally appended older
+     pages belong to the previous snapshot, so they are dropped
+     rather than spliced under a new page 1. */
   useEffect(() => {
     if (fixtureMode) return;
     return subscribeCache(
       cacheKeyFor(`/themes/${encodeURIComponent(slug)}/comments`),
-      (fresh: { comments: ThemeComment[] }) => setComments(fresh.comments),
+      (fresh: {
+        comments: ThemeComment[];
+        total?: number;
+        hasMore?: boolean;
+      }) => {
+        setComments(fresh.comments);
+        setTotal(fresh.total ?? fresh.comments.length);
+        setHasMore(fresh.hasMore ?? false);
+        pageRef.current = 1;
+      },
     );
   }, [slug]);
 
   useEffect(() => {
     let live = true;
     setComments(null);
+    setTotal(0);
+    setHasMore(false);
+    pageRef.current = 1;
     setLoadError(null);
     setDraft('');
     setPostError(null);
     fetchComments(slug)
       .then((res) => {
-        if (live) setComments(res.comments);
+        if (live) {
+          setComments(res.comments);
+          setTotal(res.total);
+          setHasMore(res.hasMore);
+        }
       })
       .catch((e: unknown) => {
         if (live) {
@@ -84,6 +118,36 @@ export function ThemeComments({ slug }: { slug: string }) {
     };
   }, [slug]);
 
+  /* Append the next page (fix batch 2026-11-11). Called by the
+     section's end-reached sentinel below. Deduped by id on
+     append: a comment posted while paging shifts the server's
+     pages by one, and the boundary row must not render twice. */
+  const loadMore = () => {
+    if (!hasMore || loadingMoreRef.current || comments === null) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    const next = pageRef.current + 1;
+    fetchComments(slug, next)
+      .then((res) => {
+        pageRef.current = res.page;
+        setHasMore(res.hasMore);
+        setTotal(res.total);
+        setComments((prev) => {
+          if (prev === null) return res.comments;
+          const seen = new Set(prev.map((c) => c.id));
+          return [...prev, ...res.comments.filter((c) => !seen.has(c.id))];
+        });
+      })
+      .catch(() => {
+        // A failed page leaves the list as-is; the sentinel can
+        // fire again on the next scroll pass and retry the page.
+      })
+      .finally(() => {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      });
+  };
+
   const trimmed = draft.trim();
   const canPost =
     signedIn && !posting && trimmed.length > 0 && draft.length <= MAX_LENGTH;
@@ -95,6 +159,7 @@ export function ThemeComments({ slug }: { slug: string }) {
     postComment(slug, draft)
       .then((created) => {
         setComments((prev) => [created, ...(prev ?? [])]);
+        setTotal((prev) => prev + 1);
         setDraft('');
       })
       .catch((e: unknown) =>
@@ -111,8 +176,8 @@ export function ThemeComments({ slug }: { slug: string }) {
         {/* The mock's heading is the bare word (design polish
             pass) — no leading icon. */}
         <Text style={styles.heading}>Comments</Text>
-        {comments !== null && comments.length > 0 && (
-          <Text style={styles.count}>{comments.length}</Text>
+        {comments !== null && total > 0 && (
+          <Text style={styles.count}>{total}</Text>
         )}
       </View>
 
@@ -251,6 +316,32 @@ export function ThemeComments({ slug }: { slug: string }) {
                 </View>
               );
             })
+          )}
+
+          {/* Load-more footer (fix batch 2026-11-11): while
+              more pages exist the footer is a spinner during an
+              in-flight page fetch, otherwise a "Load more"
+              affordance — the load itself is also triggered from
+              the sentinel Pressable's onLayout, which fires as
+              the parent ScrollView lays the section's tail into
+              the rendered window (the onEndReached equivalent
+              for a section embedded in a ScrollView). */}
+          {hasMore && (
+            <Pressable
+              onPress={loadMore}
+              onLayout={() => loadMore()}
+              disabled={loadingMore}
+              accessibilityRole="button"
+              accessibilityLabel="Load more comments"
+              accessibilityState={{ disabled: loadingMore, busy: loadingMore }}
+              style={styles.loadMoreFooter}
+            >
+              {loadingMore ? (
+                <ActivityIndicator size="small" color={theme.accent} />
+              ) : (
+                <Text style={styles.loadMoreText}>Load more comments</Text>
+              )}
+            </Pressable>
           )}
         </>
       )}
@@ -401,5 +492,16 @@ const createStyles = (theme: Theme) =>
     },
     pressed: {
       opacity: 0.85,
+    },
+    loadMoreFooter: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: spacing.md,
+      marginBottom: spacing.sm,
+    },
+    loadMoreText: {
+      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.accent,
     },
   });

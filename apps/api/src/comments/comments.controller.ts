@@ -5,6 +5,7 @@ import {
   HttpCode,
   Param,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -35,10 +36,14 @@ export class CommentsController {
   @Get('themes/:slug/comments')
   @ApiOkResponse({
     description:
-      'A theme’s comments, newest first, capped at the 100 most recent (public).',
+      'A theme’s comments, newest first (public). Paged (fix batch 2026-11-11): ?page (1-based) & ?limit — page size defaults to 50 and caps at 100; the body carries page/limit/total/hasMore meta. With no params it answers page 1 at 50.',
   })
-  list(@Param('slug') slug: string): Promise<ThemeCommentsResponse> {
-    return this.comments.listComments(slug);
+  list(
+    @Param('slug') slug: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ): Promise<ThemeCommentsResponse> {
+    return this.comments.listComments(slug, { page, limit });
   }
 
   @Post('themes/:slug/comments')

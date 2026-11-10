@@ -37,3 +37,23 @@ export function ladderStandingFor(rp: number) {
  * read paths use.
  */
 export { ladderForRp };
+
+/**
+ * The start of the current leaderboard week (fix batch
+ * 2026-11-11): **Monday 00:00:00.000 Asia/Dhaka** (UTC+06:00, no
+ * DST — a fixed offset, so plain arithmetic is exact). RankHistory
+ * rows with `playedAt` at or after this instant count toward the
+ * weekly board. Dhaka wall-clock arithmetic: shift into Dhaka
+ * time, walk back to that week's Monday at 00:00, shift back.
+ */
+export function weekStartDhaka(now: Date = new Date()): Date {
+  const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000;
+  const dhaka = new Date(now.getTime() + DHAKA_OFFSET_MS);
+  const daysSinceMonday = (dhaka.getUTCDay() + 6) % 7; // Mon=0 … Sun=6
+  const monday = Date.UTC(
+    dhaka.getUTCFullYear(),
+    dhaka.getUTCMonth(),
+    dhaka.getUTCDate() - daysSinceMonday,
+  );
+  return new Date(monday - DHAKA_OFFSET_MS);
+}

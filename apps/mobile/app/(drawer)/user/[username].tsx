@@ -773,6 +773,7 @@ export default function UserProfileScreen() {
                   <ThemeRow
                     key={entry.id}
                     item={entry.theme}
+                    typeChip={false}
                     detail={`${entry.mode === 'watch' ? 'Watched' : 'Listened'} · ${relativeTime(entry.viewedAt)}`}
                     onPress={() => openTheme(entry.themeSlug)}
                   />

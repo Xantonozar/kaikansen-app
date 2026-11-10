@@ -3,10 +3,19 @@
  * Slice 0 keeps this genuinely minimal — it grows as endpoints land.
  */
 
-/** Response body of GET /health on the API. */
+/**
+ * Response body of GET /health on the API. `db` is the Mongoose
+ * connection posture (fix batch 2026-11-11): 'ok' when the
+ * connection is up, 'down' when it is not — on 'down' the
+ * endpoint answers 503 so monitors and the keep-alive pinger see
+ * red instead of a constant green. 'not-configured' when the API
+ * booted without MONGODB_URI (health still answers 200 then, the
+ * long-standing behaviour).
+ */
 export interface HealthResponse {
   status: 'ok';
   service: string;
+  db: 'ok' | 'down' | 'not-configured';
 }
 
 /** NestJS-style error body shape returned by the API on failures. */
@@ -770,12 +779,24 @@ export interface ThemeComment {
 
 /**
  * Response body of GET /themes/:slug/comments — the web's order
- * (newest first) and the web's hard cap: the 100 most recent
- * comments. The web offers no pagination beyond that cap; mirrored
- * as-is.
+ * (newest first). The web itself hard-caps at the 100 most recent
+ * with no pagination; the app needs load-more, so the fix batch
+ * (2026-11-11) pages this list additively: `page`/`limit` query
+ * params (1-based page; limit defaults to 50, caps at 100 — a
+ * `limit=100` request with no page reproduces the web's old
+ * single-shot cap exactly) and the meta below rides along. The
+ * default call (no params) answers page 1 at 50.
  */
 export interface ThemeCommentsResponse {
   comments: ThemeComment[];
+  /** Echo of the served page (1-based). */
+  page: number;
+  /** The page size actually served. */
+  limit: number;
+  /** Total comments on the theme (all pages). */
+  total: number;
+  /** Another page exists after this one. */
+  hasMore: boolean;
 }
 
 /** Request body of POST /themes/:slug/comments. */
@@ -1838,6 +1859,16 @@ export interface RankLeaderboardEntry {
  * timestamp — and 'live' when the board was aggregated from
  * `userranks` on the spot (computedAt null, as the web's live meta
  * carries no timestamp).
+ *
+ * `?scope=weekly` (fix batch 2026-11-11, additive — the website
+ * never sends it and the default stays byte-identical) serves the
+ * WEEKLY board instead: each entry's `rp` is the sum of that
+ * user's RankHistory `rpChange` since Monday 00:00 Asia/Dhaka,
+ * while `tier`/`division`/`ladder`/`wins`/`winRate` still derive
+ * from the user's LIFETIME rank document (there is no weekly
+ * ladder). Weekly rows are always aggregated live
+ * (`meta.source: 'live'`, computedAt null) — no weekly snapshot
+ * is ever written.
  */
 export interface RankLeaderboardResponse {
   leaderboard: RankLeaderboardEntry[];

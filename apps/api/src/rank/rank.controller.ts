@@ -45,10 +45,12 @@ export class RankController {
   @Get('leaderboard')
   @ApiOkResponse({
     description:
-      'The RP top 100 — a fresh leaderboard snapshot when one exists, live aggregation otherwise.',
+      'The RP top 100 — a fresh leaderboard snapshot when one exists, live aggregation otherwise. ?scope=weekly serves the weekly board (fix batch 2026-11-11): the week’s RankHistory rpChange sums since Monday 00:00 Asia/Dhaka, aggregated live; any other scope value is the all-time board.',
   })
-  leaderboard(): Promise<RankLeaderboardResponse> {
-    return this.rank.getLeaderboard();
+  leaderboard(
+    @Query('scope') scope?: string,
+  ): Promise<RankLeaderboardResponse> {
+    return this.rank.getLeaderboard(scope);
   }
 
   @Get('players')

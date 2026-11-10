@@ -239,10 +239,18 @@ export async function fetchPlayerRanks(
  * Fixture mode answers the honest empty board, like the quiz board.
  */
 export async function fetchRankLeaderboard(
+  scope: 'all-time' | 'weekly' = 'all-time',
   opts?: CacheReadOptions,
 ): Promise<RankLeaderboardResponse> {
   if (fixtureMode)
     return { leaderboard: [], meta: { source: 'live', computedAt: null } };
+  // Weekly is NOT cached: the board moves with every finished
+  // match and a cache window would serve a stale week; the
+  // request also pins its own param so the all-time entry is
+  // never confused with it (fix batch 2026-11-11).
+  if (scope === 'weekly') {
+    return apiJson<RankLeaderboardResponse>('/rank/leaderboard?scope=weekly');
+  }
   return apiJson<RankLeaderboardResponse>('/rank/leaderboard', {
     cache: opts,
   });
@@ -282,9 +290,15 @@ export async function unfollowUser(username: string): Promise<FollowState> {
 
 export async function fetchComments(
   slug: string,
+  page = 1,
 ): Promise<ThemeCommentsResponse> {
-  if (fixtureMode) return { comments: [] };
-  return apiJson<ThemeCommentsResponse>(`/themes/${enc(slug)}/comments`);
+  if (fixtureMode)
+    return { comments: [], page: 1, limit: 50, total: 0, hasMore: false };
+  const path =
+    page > 1
+      ? `/themes/${enc(slug)}/comments?page=${page}`
+      : `/themes/${enc(slug)}/comments`;
+  return apiJson<ThemeCommentsResponse>(path);
 }
 
 export async function postComment(

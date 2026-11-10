@@ -35,7 +35,11 @@ describe('Auth without a database (e2e)', () => {
     return request(app.getHttpServer())
       .get('/health')
       .expect(200)
-      .expect({ status: 'ok', service: 'kaikansen-api' });
+      .expect({
+        status: 'ok',
+        service: 'kaikansen-api',
+        db: 'not-configured',
+      });
   });
 
   it('POST /auth/register returns 503', () => {

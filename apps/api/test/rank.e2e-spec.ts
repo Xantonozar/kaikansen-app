@@ -10,6 +10,8 @@ import { AnilistClient } from './../src/auth/anilist.client';
 import { AuthService } from './../src/auth/auth.service';
 import { User } from './../src/auth/user.schema';
 import { UserRank } from './../src/quiz/user-rank.schema';
+import { RankHistory } from './../src/quiz/rank-history.schema';
+import { weekStartDhaka } from './../src/quiz/ladder-standing';
 import { LeaderboardSnapshot } from './../src/rank/leaderboard-snapshot.schema';
 import { RankController } from './../src/rank/rank.controller';
 import { RankReadService } from './../src/rank/rank-read.service';
@@ -200,10 +202,12 @@ function makeFakeModels() {
     { _id: '507f1f77bcf86cd7994390a2', username: 'bob', displayName: 'Bob B', avatarUrl: null },
   ];
   const snapshots: Record<string, unknown>[] = [];
+  const history: Record<string, unknown>[] = [];
 
   return {
     ranks,
     snapshots,
+    history,
     userRankModel: {
       findOne: (filter: Record<string, unknown>) =>
         queryOf(ranks.find((r) => matches(r, filter)) ?? null),
@@ -246,6 +250,48 @@ function makeFakeModels() {
     snapshotModel: {
       findOne: (filter: Record<string, unknown>) =>
         queryOf(snapshots.find((s) => matches(s, filter)) ?? null),
+    },
+    rankHistoryModel: {
+      // The weekly pipeline only: $match/$group/$sort/$limit —
+      // same semantics as the unit fake (see rank-read.service.spec).
+      aggregate: (pipeline: Record<string, unknown>[]) => ({
+        exec: async () => {
+          let rows: Record<string, unknown>[] = [...history];
+          for (const stage of pipeline) {
+            if ('$match' in stage) {
+              const since = (stage.$match as { playedAt: { $gte: Date } })
+                .playedAt.$gte;
+              rows = rows.filter(
+                (r) => (r.playedAt as Date).getTime() >= since.getTime(),
+              );
+            } else if ('$group' in stage) {
+              const byUser = new Map<string, number>();
+              for (const r of rows) {
+                const id = String(r.userId);
+                byUser.set(id, (byUser.get(id) ?? 0) + (r.rpChange as number));
+              }
+              rows = [...byUser.entries()].map(([id, weeklyRp]) => ({
+                _id: id,
+                weeklyRp,
+              }));
+            } else if ('$sort' in stage) {
+              const spec = stage.$sort as Record<string, number>;
+              rows.sort((a, b) => {
+                for (const [key, dir] of Object.entries(spec)) {
+                  const av = a[key] as never;
+                  const bv = b[key] as never;
+                  if (av < bv) return -dir;
+                  if (av > bv) return dir;
+                }
+                return 0;
+              });
+            } else if ('$limit' in stage) {
+              rows = rows.slice(0, stage.$limit as number);
+            }
+          }
+          return rows;
+        },
+      }),
     },
     userModel: {
       find: (filter: Record<string, unknown>) =>
@@ -291,6 +337,10 @@ describe('Rank with mocked models (e2e)', () => {
           useValue: models.snapshotModel,
         },
         { provide: getModelToken(User.name), useValue: models.userModel },
+        {
+          provide: getModelToken(RankHistory.name),
+          useValue: models.rankHistoryModel,
+        },
       ],
     }).compile();
     app = moduleFixture.createNestApplication();
@@ -449,5 +499,38 @@ describe('Rank with mocked models (e2e)', () => {
         winRate: 0.7,
       },
     ]);
+  });
+
+  it('serves the WEEKLY board at ?scope=weekly (fix batch 2026-11-11)', async () => {
+    const http = request(app.getHttpServer());
+    const start = weekStartDhaka(new Date());
+    const inWeek = (h: number) => new Date(start.getTime() + h * 3_600_000);
+    models.history.push(
+      { userId: '507f1f77bcf86cd7994390a1', rpChange: 30, playedAt: inWeek(1) },
+      { userId: '507f1f77bcf86cd7994390a1', rpChange: 25, playedAt: inWeek(4) },
+      { userId: '507f1f77bcf86cd7994390a2', rpChange: -10, playedAt: inWeek(2) },
+      // Last week's row must not count.
+      {
+        userId: '507f1f77bcf86cd7994390a2',
+        rpChange: 500,
+        playedAt: new Date(start.getTime() - 60_000),
+      },
+    );
+    const res = await http.get('/rank/leaderboard?scope=weekly').expect(200);
+    expect(res.body.meta).toEqual({ source: 'live', computedAt: null });
+    expect(
+      res.body.leaderboard.map(
+        (e: { userId: string; rp: number }) => [e.userId, e.rp],
+      ),
+    ).toEqual([
+      ['507f1f77bcf86cd7994390a1', 55],
+      ['507f1f77bcf86cd7994390a2', -10],
+    ]);
+    // The ladder still derives from LIFETIME RP (900 → Chunin),
+    // not from the week's 55.
+    expect(res.body.leaderboard[0].ladder.rank).toBe('chunin');
+    // The all-time board is untouched by the weekly rows.
+    const allTime = await http.get('/rank/leaderboard').expect(200);
+    expect(allTime.body.leaderboard[0].rp).toBe(950); // snapshot row from the earlier test
   });
 });

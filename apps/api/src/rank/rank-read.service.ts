@@ -16,7 +16,11 @@ import type {
 } from '@kaikansen/contracts';
 import { User, type UserDocument } from '../auth/user.schema';
 import { ladderForRp } from '../quiz/quiz-game.utils';
-import { ladderStandingFor } from '../quiz/ladder-standing';
+import { ladderStandingFor, weekStartDhaka } from '../quiz/ladder-standing';
+import {
+  RankHistory,
+  type RankHistoryDocument,
+} from '../quiz/rank-history.schema';
 import { UserRank, type UserRankDocument } from '../quiz/user-rank.schema';
 import {
   LeaderboardSnapshot,
@@ -54,6 +58,7 @@ interface RankModels {
   userRanks: Model<UserRankDocument>;
   snapshots: Model<LeaderboardSnapshotDocument>;
   users: Model<UserDocument>;
+  rankHistory: Model<RankHistoryDocument>;
 }
 
 /**
@@ -90,9 +95,11 @@ interface RankModels {
  * The snapshot WRITER (the web's cron route) stays web-side, as
  * S4 already decided for the season-reset cron.
  *
- * There is NO rank-history read on the web — `rankhistories` rows
- * are written at game end and read by nothing — so none is
- * ported here.
+ * The rank-history read on the web is profile-only history —
+ * `rankhistories` rows are written at game end and the web's
+ * leaderboard reads none of them. The WEEKLY board (fix batch
+ * 2026-11-11, owner-ordered) is this API's one leaderboard use
+ * of them: see getWeeklyLeaderboard.
  *
  * Deliberate deviations (the established ones): the web serves
  * the raw rank document and its generic 500s; this API projects
@@ -117,10 +124,18 @@ export class RankReadService {
     @Optional()
     @InjectModel(User.name)
     private readonly userModel?: Model<UserDocument>,
+    @Optional()
+    @InjectModel(RankHistory.name)
+    private readonly rankHistoryModel?: Model<RankHistoryDocument>,
   ) {}
 
   private requireModels(): RankModels {
-    if (!this.userRankModel || !this.snapshotModel || !this.userModel) {
+    if (
+      !this.userRankModel ||
+      !this.snapshotModel ||
+      !this.userModel ||
+      !this.rankHistoryModel
+    ) {
       throw new ServiceUnavailableException(
         'Rank unavailable — API booted without MONGODB_URI',
       );
@@ -129,6 +144,7 @@ export class RankReadService {
       userRanks: this.userRankModel,
       snapshots: this.snapshotModel,
       users: this.userModel,
+      rankHistory: this.rankHistoryModel,
     };
   }
 
@@ -240,9 +256,19 @@ export class RankReadService {
   /**
    * GET /rank/leaderboard — the web's /api/leaderboard: fresh
    * snapshot when one exists, live top-100 otherwise (see the
-   * class comment). Public, like the web's.
+   * class comment). Public, like the web's. `scope=weekly` is
+   * the fix batch's additive branch (the website never sends
+   * it; any other value — including absent — is the all-time
+   * board above, byte-identical).
    */
-  async getLeaderboard(): Promise<RankLeaderboardResponse> {
+  async getLeaderboard(scope?: string): Promise<RankLeaderboardResponse> {
+    if (scope === 'weekly') {
+      return this.getWeeklyLeaderboard();
+    }
+    return this.getAllTimeLeaderboard();
+  }
+
+  private async getAllTimeLeaderboard(): Promise<RankLeaderboardResponse> {
     const models = this.requireModels();
 
     const snapshot = (await models.snapshots
@@ -338,6 +364,96 @@ export class RankReadService {
         avatarUrl: user.avatarUrl ?? null,
         wins: rank.stats?.wins ?? 0,
         winRate: rank.stats?.winRate ?? 0,
+      });
+    }
+
+    return { leaderboard, meta: { source: 'live', computedAt: null } };
+  }
+
+  /**
+   * GET /rank/leaderboard?scope=weekly — the WEEKLY board (fix
+   * batch 2026-11-11, owner-ordered; no web twin — the web has
+   * no weekly board). Following the all-time board's pattern, it
+   * is an on-read aggregation over this week's rows only — no
+   * new stored counters, no snapshot, no cron:
+   *
+   * - Sums: RankHistory grouped by userId over
+   *   `playedAt >= weekStartDhaka()` (Monday 00:00 Asia/Dhaka),
+   *   the figure being the sum of `rpChange` (the row's applied
+   *   delta, post-clamp — the RP the player actually moved).
+   *   EVERY user with a row this week appears, including
+   *   net-negative weeks: they rank below the zero-gainers
+   *   (plain descending order — the spec's ruling).
+   * - Row dressing mirrors the live all-time path: the user's
+   *   `tier`/`division`/`ladder`/`wins`/`winRate` come from
+   *   their LIFETIME UserRank document (the ladder is lifetime
+   *   everywhere; there is no weekly ladder), identity/avatar
+   *   from `users`, rows whose account is gone drop (the same
+   *   $unwind treatment, including the Bug 3 ObjectId guard).
+   *   A player with history but somehow no rank document reads
+   *   the same defaults getUserRank would materialise.
+   * - Order: weekly RP desc, ties by userId asc (deterministic);
+   *   capped at the board's 100.
+   */
+  private async getWeeklyLeaderboard(): Promise<RankLeaderboardResponse> {
+    const models = this.requireModels();
+    const since = weekStartDhaka();
+
+    const sums = (await models.rankHistory
+      .aggregate([
+        { $match: { playedAt: { $gte: since } } },
+        {
+          $group: {
+            _id: '$userId',
+            weeklyRp: { $sum: '$rpChange' },
+          },
+        },
+        { $sort: { weeklyRp: -1, _id: 1 } },
+        { $limit: LEADERBOARD_LIMIT },
+      ])
+      .exec()) as { _id: unknown; weeklyRp: number }[];
+
+    if (sums.length === 0) {
+      return { leaderboard: [], meta: { source: 'live', computedAt: null } };
+    }
+
+    const ids = sums.map((s) => String(s._id));
+    const joinableIds = ids.filter((id) => Types.ObjectId.isValid(id));
+    const [userDocs, rankDocs] = await Promise.all([
+      joinableIds.length === 0
+        ? Promise.resolve([] as UserDoc[])
+        : (models.users
+            .find({ _id: { $in: joinableIds } })
+            .lean()
+            .exec() as Promise<UserDoc[]>),
+      models.userRanks
+        .find({ userId: { $in: ids } })
+        .lean()
+        .exec() as Promise<UserRankDoc[]>,
+    ]);
+    const usersById = new Map(userDocs.map((u) => [String(u._id), u]));
+    const ranksById = new Map(rankDocs.map((r) => [String(r.userId), r]));
+
+    const leaderboard: RankLeaderboardEntry[] = [];
+    for (const sum of sums) {
+      const userId = String(sum._id);
+      const user = usersById.get(userId);
+      if (!user) continue; // gone account — the $unwind drop
+      const rank = ranksById.get(userId);
+      const lifetimeRp = rank?.rp ?? 0;
+      leaderboard.push({
+        userId,
+        // The board figure is the WEEK's RP; the standing fields
+        // below stay lifetime (see the method comment).
+        rp: sum.weeklyRp ?? 0,
+        tier: (rank?.tier ?? 'academy') as RankTier,
+        division: rank?.division ?? null,
+        ladder: ladderStandingFor(lifetimeRp),
+        username: user.username,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl ?? null,
+        wins: rank?.stats?.wins ?? 0,
+        winRate: rank?.stats?.winRate ?? 0,
       });
     }
 

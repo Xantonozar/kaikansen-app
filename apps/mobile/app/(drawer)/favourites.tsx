@@ -222,6 +222,7 @@ export default function FavouritesScreen() {
               <ThemeRow
                 key={item.slug}
                 item={item}
+                typeChip={false}
                 onPress={() => router.push(`/theme/${item.slug}`)}
                 onPlay={() => playAt(index, item.slug)}
                 saved

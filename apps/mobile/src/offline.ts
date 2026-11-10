@@ -10,9 +10,15 @@
  *   or every event so far carried `isConnected: null`). The
  *   takeover must NEVER show from `unknown` — no first-paint flash
  *   (spec §4).
- * - `online` / `offline` — definitive: NetInfo said
- *   `isConnected === true` / `=== false`. ONLY `false` is offline
- *   (spec §4 — `null` is not).
+ * - `online` / `offline` — definitive. Offline ⟺ the sample's
+ *   `isConnected === false` OR its `isInternetReachable === false`
+ *   (fix batch 2026-11-11: reachability closes the captive-portal
+ *   blind spot — connected to Wi-Fi whose internet is dead or
+ *   gated is offline). A sample signals online when its
+ *   `isConnected === true` and its reachability is not `false`.
+ *   `null` (unknown) on either leg NEVER moves state by itself —
+ *   the same conservatism as before: no first-paint flash, no
+ *   false takeovers, no erased states.
  *
  * "Can serve" — whether the current surface can honestly serve the
  * user with no network. Surfaces say so out loud through
@@ -38,17 +44,50 @@
 export type ConnectivityStatus = 'unknown' | 'online' | 'offline';
 
 /**
- * Fold one NetInfo `isConnected` sample into the status. `null`
- * (and `undefined`) samples are NOT definitive: the previous
- * status stands — an unknown first paint stays unknown, and a
- * known state is never erased by a null blip.
+ * One NetInfo sample's two signals (fix batch 2026-11-11):
+ * `isConnected` (a network interface is up) and
+ * `isInternetReachable` (the internet actually answers through
+ * it). Either may be `null` = unknown.
+ */
+export interface ConnectivitySample {
+  isConnected: boolean | null | undefined;
+  isInternetReachable?: boolean | null | undefined;
+}
+
+/**
+ * Fold one NetInfo sample into the status. Definitive readings:
+ * - OFFLINE when `isConnected === false` (no interface) OR
+ *   `isInternetReachable === false` (interface up, internet
+ *   dead/gated — the captive-portal case).
+ * - ONLINE when `isConnected === true` and reachability is not
+ *   `false` (true, or null — a connected interface with unknown
+ *   reachability is the long-standing online reading; a later
+ *   `false` reachability still moves it offline).
+ * Anything else (both legs null/unknown, or a bare `false`
+ * reachability riding on an unknown connection that is already
+ * offline) keeps the previous status — a null blip never erases
+ * a known state, and `unknown` never moves on guesses.
  */
 export function connectivityFromSample(
   previous: ConnectivityStatus,
-  isConnected: boolean | null | undefined,
+  sample: ConnectivitySample,
 ): ConnectivityStatus {
+  const { isConnected, isInternetReachable } = sample;
+  if (isConnected === false || isInternetReachable === false) {
+    // A bare reachability `false` with connectivity unknown and
+    // no prior state is not definitive on its own — NetInfo can
+    // report it transiently before the interface settles. Only
+    // fold it once connectivity is known or a state exists.
+    if (
+      isConnected == null &&
+      isInternetReachable === false &&
+      previous === 'unknown'
+    ) {
+      return previous;
+    }
+    return 'offline';
+  }
   if (isConnected === true) return 'online';
-  if (isConnected === false) return 'offline';
   return previous;
 }
 

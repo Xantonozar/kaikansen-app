@@ -160,6 +160,7 @@ export class AuthController {
 
   @Post('anilist/callback')
   @HttpCode(200)
+  @Throttle(AUTH_THROTTLE.anilistCallback)
   @SkipThrottle(SKIP_ACCOUNT_THROTTLE)
   @ApiOkResponse({
     description:
@@ -172,6 +173,7 @@ export class AuthController {
   }
 
   @Get('anilist/callback')
+  @Throttle(AUTH_THROTTLE.anilistCallback)
   @SkipThrottle(SKIP_ACCOUNT_THROTTLE)
   @ApiOkResponse({
     description:
@@ -190,6 +192,7 @@ export class AuthController {
   @HttpCode(200)
   @ApiBearerAuth()
   @UseGuards(AccessTokenGuard)
+  @Throttle(AUTH_THROTTLE.anilistLink)
   @SkipThrottle(SKIP_ACCOUNT_THROTTLE)
   @ApiOkResponse({
     description:

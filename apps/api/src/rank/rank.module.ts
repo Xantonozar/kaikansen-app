@@ -6,6 +6,10 @@ import { AuthService } from '../auth/auth.service';
 import { User, UserSchema } from '../auth/user.schema';
 import { UserRank, UserRankSchema } from '../quiz/user-rank.schema';
 import {
+  RankHistory,
+  RankHistorySchema,
+} from '../quiz/rank-history.schema';
+import {
   LeaderboardSnapshot,
   LeaderboardSnapshotSchema,
 } from './leaderboard-snapshot.schema';
@@ -38,6 +42,7 @@ export class RankModule {
         ? [
             MongooseModule.forFeature([
               { name: UserRank.name, schema: UserRankSchema },
+              { name: RankHistory.name, schema: RankHistorySchema },
               {
                 name: LeaderboardSnapshot.name,
                 schema: LeaderboardSnapshotSchema,

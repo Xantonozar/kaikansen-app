@@ -24,8 +24,27 @@ import { Comment, type CommentDocument } from './comment.schema';
 /** The web schema's cap (lib/models/index.ts Comment). */
 const CONTENT_MAX_LENGTH = 1000;
 
-/** The web's list cap: GET returns at most the 100 newest comments. */
-const LIST_LIMIT = 100;
+/**
+ * Comments paging (fix batch 2026-11-11 — owner-ordered load
+ * more, replacing the web's silent 100 cap): default page size
+ * 50, hard cap 100 (a `limit=100` no-page call reproduces the
+ * web's exact old single-shot answer).
+ */
+const COMMENTS_DEFAULT_LIMIT = 50;
+const COMMENTS_MAX_LIMIT = 100;
+
+/** 1-based page parsing in the codebase idiom: garbage → 1. */
+function parseCommentsPage(raw: string | undefined): number {
+  const parsed = Number.parseInt(raw ?? '', 10);
+  return Number.isNaN(parsed) || parsed < 1 ? 1 : parsed;
+}
+
+/** Page-size parsing: garbage → the default, capped at the max. */
+function parseCommentsLimit(raw: string | undefined): number {
+  const parsed = Number.parseInt(raw ?? '', 10);
+  if (Number.isNaN(parsed) || parsed < 1) return COMMENTS_DEFAULT_LIMIT;
+  return Math.min(parsed, COMMENTS_MAX_LIMIT);
+}
 
 /** Lean shapes of the documents as they come back from Mongoose. */
 type CommentDoc = Comment & {
@@ -72,6 +91,11 @@ function iso(value: Date | string | null | undefined): string {
  *   Each comment's author is the web populate's projection
  *   (username, displayName, avatarUrl); a comment whose author
  *   account is gone serves author null, like the web's populate.
+ *   FIX BATCH 2026-11-11 (owner order): the silent cap becomes
+ *   honest paging on THIS API — page/limit + total/hasMore meta
+ *   (see listComments). The website is untouched (its own route
+ *   keeps the cap); on this API a limit=100 call still answers
+ *   exactly the web's old 100.
  * - Post: authenticated; the web's validation verbatim — content
  *   must be a non-blank string ('Comment content is required') and
  *   at most 1000 characters ('Comment is too long (max 1000
@@ -222,26 +246,49 @@ export class CommentsService {
   /* ---------------------------------------------------------------- */
 
   /**
-   * GET /themes/:slug/comments — the web's GET: the theme's
-   * comments, newest first, capped at the 100 most recent. Public.
+   * GET /themes/:slug/comments — the web's GET (newest first),
+   * paged (fix batch 2026-11-11): `page`/`limit` query params in
+   * the Network-pagination idiom, page size defaulting to 50 and
+   * capping at 100, with `total`/`hasMore` meta. The sort gains
+   * an `_id` tie-break so the order is TOTAL and stable across
+   * pages (no dupes/gaps when two comments share a createdAt
+   * millisecond); distinct timestamps order exactly as before.
+   * Public.
    */
-  async listComments(slug: string): Promise<ThemeCommentsResponse> {
+  async listComments(
+    slug: string,
+    paging: { page?: string; limit?: string } = {},
+  ): Promise<ThemeCommentsResponse> {
     const models = this.requireModels();
     await this.findThemeOr404(models, slug);
 
-    const docs = (await models.comments
-      .find({ themeSlug: slug })
-      .sort({ createdAt: -1 })
-      .limit(LIST_LIMIT)
-      .lean()
-      .exec()) as CommentDoc[];
+    const page = parseCommentsPage(paging.page);
+    const limit = parseCommentsLimit(paging.limit);
+    const filter = { themeSlug: slug };
+
+    const [total, docs] = await Promise.all([
+      models.comments.countDocuments(filter).exec(),
+      models.comments
+        .find(filter)
+        .sort({ createdAt: -1, _id: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean()
+        .exec(),
+    ]);
 
     const authorsById = await this.resolveAuthors(
       models,
-      docs.map((d) => d.userId),
+      (docs as CommentDoc[]).map((d) => d.userId),
     );
     return {
-      comments: docs.map((d) => this.toComment(d, authorsById)),
+      comments: (docs as CommentDoc[]).map((d) =>
+        this.toComment(d, authorsById),
+      ),
+      page,
+      limit,
+      total,
+      hasMore: page * limit < total,
     };
   }
 

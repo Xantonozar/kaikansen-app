@@ -21,10 +21,11 @@ import { connectivityFromSample, type ConnectivityStatus } from './offline';
  * every surface — including the signed-in cold start, where the
  * auth restore itself is stuck behind a dead network — is covered
  * by one subscription. Detection is NetInfo's event stream folded
- * through the pure `connectivityFromSample` (offline.ts): only
- * `isConnected === false` is offline; `null` samples never move
- * the state, so the first paint (status `unknown`) can never flash
- * the takeover.
+ * through the pure `connectivityFromSample` (offline.ts): offline
+ * is `isConnected === false` OR `isInternetReachable === false`
+ * (the captive-portal case — fix batch 2026-11-11); `null` on
+ * either leg never moves the state, so the first paint (status
+ * `unknown`) can never flash the takeover.
  *
  * "CAN SERVE": surfaces declare servability through
  * `useServableSurface(servable)` — a screen whose problem-5 cache
@@ -92,7 +93,12 @@ export function ConnectivityProvider({ children }: { children: ReactNode }) {
   useEffect(
     () =>
       NetInfo.addEventListener((state) => {
-        setStatus((prev) => connectivityFromSample(prev, state.isConnected));
+        setStatus((prev) =>
+          connectivityFromSample(prev, {
+            isConnected: state.isConnected,
+            isInternetReachable: state.isInternetReachable,
+          }),
+        );
       }),
     [],
   );
@@ -100,7 +106,12 @@ export function ConnectivityProvider({ children }: { children: ReactNode }) {
   const retry = useCallback(async () => {
     try {
       const state = await NetInfo.fetch();
-      setStatus((prev) => connectivityFromSample(prev, state.isConnected));
+      setStatus((prev) =>
+        connectivityFromSample(prev, {
+          isConnected: state.isConnected,
+          isInternetReachable: state.isInternetReachable,
+        }),
+      );
     } catch {
       // A failed re-check settles nothing — the posture stands
       // (still offline stays offline; no error surfaces anywhere).
