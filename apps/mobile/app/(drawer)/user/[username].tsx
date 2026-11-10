@@ -17,11 +17,11 @@ import {
   Check,
   ChevronRight,
   ListMusic,
-  Medal,
   MoreVertical,
   Pencil,
   Share2,
   Star,
+  Trophy,
   UserPlus,
   X,
 } from 'lucide-react-native';
@@ -48,6 +48,12 @@ import {
   unfollowUser,
 } from '../../../src/socialApi';
 import { formatRp, tierLabel } from '../../../src/rankUtil';
+import {
+  formatCount,
+  formatHoursListened,
+  formatMeanRating,
+  formatThemesListened,
+} from '../../../src/profileStats';
 import { relativeTime } from '../../../src/time';
 import {
   fontFamilies,
@@ -70,35 +76,47 @@ const TOP_COUNT = 3;
  * independently: a failed satellite hides or notes itself instead
  * of taking the whole screen down.
  *
- * Rebuilt against the User Profile design (owner-ordered design
- * pass, 2026-11-10): mock kaikansen-userprofile-realimg.png +
- * its Stitch HTML (html/userprofile.html) as dual ground truth.
- * A bare back arrow and a ⋮ at the top; the identity block is ONE
- * centred white card (avatar 80, name, @handle, rank chip, bio,
- * the follow pill); the stats are their OWN card under it in the
- * design's order — Ratings · Followers · Following — split by
- * vertical hairlines (the follower/following blocks still open the
- * standalone Network screen, §6.17); "Top ratings" previews the
- * THREE highest-scored of the user's ratings (the endpoint serves
- * the 50 most recent, newest first, so the top cut is sorted
- * client-side by score, newest first on ties) as cover rows with a
- * star-score pill; and the design's "See all ratings and history"
- * link expands the full ratings list + the history list in place
- * (there is no separate all-ratings route in the app or the web;
- * the history read is public on the web and mirrored as-is).
+ * Rebuilt against the owner-approved User Profile candidate
+ * (2026-11-10): kaikansen-user-profile-v2-candidate.png (Stitch
+ * screen faff6db7897a4305bfb504d2f0e762b3) — the SAME final
+ * stats treatment the owner locked for the own Profile, applied
+ * to another user's screen. A bare back arrow and a ⋮ at the
+ * top; the identity block is ONE centred white card (avatar 80,
+ * name, @handle, the rank chip, bio, the INLINE "N Followers ·
+ * N Following" line, then the follow pill); under it the
+ * divided listening-stats card — Mean Rating · Themes Listened
+ * · Hours Listened — fed by the profile payload's ProfileStats
+ * aggregates and formatted by the shared src/profileStats
+ * helpers, exactly as the own Profile formats them (mean one
+ * decimal or "—", hours one decimal under 100). The social
+ * line's counts open the standalone Network screen for THIS
+ * user (§6.17), followers/following tabs, as the own Profile's
+ * line does; the followers number is the live follow-state
+ * count, so an optimistic follow/unfollow moves it in step with
+ * the pill. "Top ratings" previews the THREE highest-scored of
+ * the user's ratings (the endpoint serves the 50 most recent,
+ * newest first, so the top cut is sorted client-side by score,
+ * newest first on ties) as cover rows with an outline-star
+ * score pill; and the design's "See all ratings and history"
+ * link expands the full ratings list + the history list in
+ * place (there is no separate all-ratings route in the app or
+ * the web; the history read is public on the web and mirrored
+ * as-is).
  *
- * Playlists (owner-ordered addition, 2026-11-10): under the stats
- * card, a "Playlists" section lists the user's PUBLIC playlists
- * (GET /users/:username/playlists — the API filters private ones
- * out in the query, so nothing private can render here). The
- * cards are the Library Playlists cards minus the owner's chrome:
- * the same 2×2 cover mosaic, name and "N themes · M min" line,
- * but no ⋮ menu and no visibility pill (every listed row is
- * public, and none of them is the viewer's to edit). A tap opens
- * the playlist detail, which already gates its owner controls to
- * the owner, so a visitor gets playback only. The section renders
- * only when at least one public playlist exists, and the read is
- * a satellite like the others — a failure hides the section.
+ * Playlists (owner-ordered addition, 2026-11-10): under the
+ * stats card, a "Playlists" section lists the user's PUBLIC
+ * playlists (GET /users/:username/playlists — the API filters
+ * private ones out in the query, so nothing private can render
+ * here). The cards are the Library Playlists cards minus the
+ * owner's chrome: the same 2×2 cover mosaic, name and "N themes
+ * · M min" line, plus the candidate's right chevron, but no ⋮
+ * menu and no visibility pill (every listed row is public, and
+ * none of them is the viewer's to edit). A tap opens the
+ * playlist detail, which already gates its owner controls to
+ * the owner, so a visitor gets playback only. The section
+ * renders only when at least one public playlist exists, and
+ * the read is a satellite like the others — a failure hides the
+ * section.
  *
  * Design notes / honest gaps:
  * - The rank chip draws "Tier · N RP" exactly as the mock phrases
@@ -271,26 +289,16 @@ export default function UserProfileScreen() {
 
   const openTheme = (slug: string) => router.push(`/theme/${slug}`);
 
-  const statBlock = (
-    label: string,
-    value: number,
-    tab: 'followers' | 'following' | null,
-    divider: boolean,
-  ) => (
-    <Pressable
-      onPress={() =>
-        tab &&
-        profile &&
-        router.push(`/network/${profile.username}?tab=${tab}`)
-      }
-      disabled={!tab}
-      accessibilityRole="button"
-      accessibilityLabel={`${label}: ${value}`}
-      style={[styles.statBlock, divider && styles.statBlockDivider]}
-    >
+  /**
+   * One block of the divided listening-stats card — the own
+   * Profile's stat anatomy (value over label, hairline on the
+   * divided blocks), values pre-formatted by src/profileStats.
+   */
+  const stat = (label: string, value: string, divided = false) => (
+    <View style={[styles.statBlock, divided && styles.statBlockDivided]}>
       <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
-    </Pressable>
+    </View>
   );
 
   /**
@@ -330,12 +338,7 @@ export default function UserProfileScreen() {
           ) : null}
         </View>
         <View style={styles.scorePill}>
-          <Star
-            size={13}
-            color={theme.accent}
-            fill={theme.accent}
-            strokeWidth={2}
-          />
+          <Star size={14} color={theme.accent} strokeWidth={2} />
           <Text style={styles.scoreText}>{entry.score}</Text>
         </View>
       </Pressable>
@@ -407,6 +410,7 @@ export default function UserProfileScreen() {
             {runtimeMin !== null ? ` · ${runtimeMin} min` : ''}
           </Text>
         </View>
+        <ChevronRight size={20} color={theme.muted} strokeWidth={2} />
       </Pressable>
     );
   };
@@ -452,7 +456,8 @@ export default function UserProfileScreen() {
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
           {/* Identity card: centred avatar, name, @handle, the rank
-              chip, the bio and the follow pill — one white card. */}
+              chip, the bio, the inline followers/following line
+              and the follow pill — one white card. */}
           <View style={styles.identityCard}>
             <View style={styles.avatarWrap}>
               <Avatar
@@ -468,7 +473,7 @@ export default function UserProfileScreen() {
             <Text style={styles.handle}>@{profile.username}</Text>
             {rank && (
               <View style={styles.rankChip}>
-                <Medal size={15} color={theme.accent} strokeWidth={2} />
+                <Trophy size={15} color={theme.accent} strokeWidth={2} />
                 <Text style={styles.rankChipText}>
                   {tierLabel(rank.tier)} · {formatRp(rank.rp)}
                 </Text>
@@ -478,6 +483,45 @@ export default function UserProfileScreen() {
             {profile.bio.length > 0 && (
               <Text style={styles.bio}>{profile.bio}</Text>
             )}
+
+            {/* The candidate's inline social line — bold counts,
+                muted labels — ABOVE the follow pill. Both counts
+                open the Network screen for THIS user; the
+                followers number is the live follow-state count,
+                so it moves with the pill below. */}
+            <View style={styles.socialRow}>
+              <Pressable
+                onPress={() =>
+                  router.push(`/network/${profile.username}?tab=followers`)
+                }
+                accessibilityRole="button"
+                accessibilityLabel={`${followersCount} followers`}
+                style={({ pressed }) => pressed && styles.pressed}
+              >
+                <Text style={styles.socialText}>
+                  <Text style={styles.socialNumber}>
+                    {formatCount(followersCount)}
+                  </Text>{' '}
+                  Followers
+                </Text>
+              </Pressable>
+              <Text style={styles.socialDot}>·</Text>
+              <Pressable
+                onPress={() =>
+                  router.push(`/network/${profile.username}?tab=following`)
+                }
+                accessibilityRole="button"
+                accessibilityLabel={`${profile.stats.followingCount} following`}
+                style={({ pressed }) => pressed && styles.pressed}
+              >
+                <Text style={styles.socialText}>
+                  <Text style={styles.socialNumber}>
+                    {formatCount(profile.stats.followingCount)}
+                  </Text>{' '}
+                  Following
+                </Text>
+              </Pressable>
+            </View>
 
             {isOwn ? (
               <Pressable
@@ -546,11 +590,21 @@ export default function UserProfileScreen() {
             {followError && <Text style={styles.errorText}>{followError}</Text>}
           </View>
 
-          {/* Stats card — the design's own card, hairline-divided. */}
+          {/* Listening-stats card — the candidate's divided card
+              (Mean Rating · Themes Listened · Hours Listened)
+              over the profile's ProfileStats aggregates. */}
           <View style={styles.statsCard}>
-            {statBlock('Ratings', profile.totalRatings, null, true)}
-            {statBlock('Followers', followersCount, 'followers', true)}
-            {statBlock('Following', profile.totalFollowing, 'following', false)}
+            {stat('Mean Rating', formatMeanRating(profile.stats))}
+            {stat(
+              'Themes Listened',
+              formatThemesListened(profile.stats),
+              true,
+            )}
+            {stat(
+              'Hours Listened',
+              formatHoursListened(profile.stats),
+              true,
+            )}
           </View>
 
           {/* Playlists — the user's PUBLIC playlists only (the
@@ -750,8 +804,8 @@ const createStyles = (theme: Theme) =>
     },
     displayName: {
       fontFamily: fontFamilies.display,
-      fontSize: 20,
-      lineHeight: 24,
+      fontSize: 22,
+      lineHeight: 26,
       color: theme.text,
       textAlign: 'center',
       marginBottom: 2,
@@ -775,20 +829,42 @@ const createStyles = (theme: Theme) =>
     },
     rankChipText: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 12,
+      fontSize: 13.5,
       color: theme.accent,
     },
     bio: {
-      // The HTML's 13.5pt relaxed line in its soft plum (#5C4554,
-      // a Stitch approximation) — the token system's nearest
+      // The HTML's relaxed line in its soft plum (#5C4554, a
+      // Stitch approximation) — the token system's nearest
       // honest step is the ink at reduced opacity over the card.
       fontFamily: fontFamilies.body,
-      fontSize: 13.5,
-      lineHeight: 22,
+      fontSize: 14,
+      lineHeight: 21,
       color: withOpacity(theme.text, 0.82),
       textAlign: 'center',
       maxWidth: 320,
+      marginBottom: spacing.md,
+    },
+    socialRow: {
+      // The candidate's inline social line — the own Profile's
+      // socialRow, verbatim (bold ink counts, muted labels).
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
       marginBottom: spacing.lg,
+    },
+    socialText: {
+      ...typeStyles.body,
+      fontSize: 15,
+      color: theme.muted,
+    },
+    socialNumber: {
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
+    },
+    socialDot: {
+      ...typeStyles.body,
+      fontSize: 15,
+      color: theme.muted,
     },
     actionPill: {
       flexDirection: 'row',
@@ -809,17 +885,17 @@ const createStyles = (theme: Theme) =>
     },
     actionPillPaleText: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 14,
+      fontSize: 15,
       color: theme.accent,
     },
     actionPillAccentText: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 14,
+      fontSize: 15,
       color: theme.onAccent,
     },
     actionPillEditText: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 14,
+      fontSize: 15,
       color: theme.text,
     },
     actionBusy: {
@@ -833,41 +909,41 @@ const createStyles = (theme: Theme) =>
       textAlign: 'center',
     },
     statsCard: {
-      // The HTML's rounded-[22px] stats card, py-4, hairline-split
-      // columns in the design's order.
+      // The candidate's divided listening-stats card — the own
+      // Profile's stats anatomy (18 vertical padding, hairline-
+      // split columns), keeping this screen's card chrome.
       flexDirection: 'row',
       backgroundColor: theme.surface,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.border,
-      borderRadius: 22,
-      paddingVertical: spacing.lg,
-      paddingHorizontal: spacing.md,
+      borderRadius: radii.card,
+      paddingVertical: 18,
+      paddingHorizontal: spacing.sm,
       marginBottom: spacing.xl,
     },
     statBlock: {
       flex: 1,
       alignItems: 'center',
-      justifyContent: 'center',
+      gap: 2,
     },
-    statBlockDivider: {
-      borderRightWidth: StyleSheet.hairlineWidth,
-      borderRightColor: theme.border,
+    statBlockDivided: {
+      // The candidate's vertical hairlines between stat columns.
+      borderLeftWidth: StyleSheet.hairlineWidth,
+      borderLeftColor: theme.border,
     },
     statValue: {
-      fontFamily: fontFamilies.wordmark,
-      fontSize: 18,
-      lineHeight: 18,
+      ...typeStyles.display,
+      fontSize: 24,
       color: theme.text,
-      marginBottom: spacing.xs,
     },
     statLabel: {
-      fontFamily: fontFamilies.caption,
-      fontSize: 12,
-      color: theme.secondary,
+      ...typeStyles.bodySmall,
+      fontSize: 13,
+      color: theme.muted,
     },
     sectionHeading: {
       fontFamily: fontFamilies.display,
-      fontSize: 16,
+      fontSize: 18,
       color: theme.text,
       paddingHorizontal: spacing.xs,
       marginBottom: 10,
@@ -902,12 +978,12 @@ const createStyles = (theme: Theme) =>
     },
     ratingTitle: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 14,
+      fontSize: 15,
       color: theme.text,
     },
     ratingArtist: {
       fontFamily: fontFamilies.caption,
-      fontSize: 12,
+      fontSize: 13,
       color: theme.secondary,
     },
     scorePill: {
@@ -922,7 +998,7 @@ const createStyles = (theme: Theme) =>
     },
     scoreText: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 12,
+      fontSize: 13,
       color: theme.accent,
     },
     /* Playlist cards — the Library Playlists card's geometry,

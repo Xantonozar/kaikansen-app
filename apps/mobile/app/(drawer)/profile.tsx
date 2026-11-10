@@ -33,6 +33,12 @@ import {
 import { getAccessToken } from '../../src/session';
 import { fetchMyRank } from '../../src/socialApi';
 import {
+  formatCount,
+  formatHoursListened,
+  formatMeanRating,
+  formatThemesListened,
+} from '../../src/profileStats';
+import {
   fontFamilies,
   radii,
   spacing,
@@ -148,7 +154,6 @@ export default function OwnProfileScreen() {
   const stats = user?.stats;
   const followers = stats?.followersCount ?? user?.totalFollowers ?? 0;
   const following = stats?.followingCount ?? user?.totalFollowing ?? 0;
-  const hours = stats ? stats.totalListenedSeconds / 3600 : null;
 
   const progress = rank ? tierProgress(rank.rp, rank.tier) : null;
   const chip = rank ? divisionChip(rank.division) : null;
@@ -221,7 +226,7 @@ export default function OwnProfileScreen() {
                 >
                   <Text style={styles.socialText}>
                     <Text style={styles.socialNumber}>
-                      {followers.toLocaleString('en-US')}
+                      {formatCount(followers)}
                     </Text>{' '}
                     Followers
                   </Text>
@@ -237,7 +242,7 @@ export default function OwnProfileScreen() {
                 >
                   <Text style={styles.socialText}>
                     <Text style={styles.socialNumber}>
-                      {following.toLocaleString('en-US')}
+                      {formatCount(following)}
                     </Text>{' '}
                     Following
                   </Text>
@@ -317,24 +322,16 @@ export default function OwnProfileScreen() {
             <View style={styles.statsCard}>
               {stat(
                 'Mean Rating',
-                stats
-                  ? stats.meanRating !== null
-                    ? stats.meanRating.toFixed(1)
-                    : '—'
-                  : '—',
+                stats ? formatMeanRating(stats) : '—',
               )}
               {stat(
                 'Themes Listened',
-                stats ? stats.themesListened.toLocaleString('en-US') : '—',
+                stats ? formatThemesListened(stats) : '—',
                 true,
               )}
               {stat(
                 'Hours Listened',
-                hours !== null
-                  ? hours >= 100
-                    ? Math.round(hours).toLocaleString('en-US')
-                    : String(Math.round(hours * 10) / 10)
-                  : '—',
+                stats ? formatHoursListened(stats) : '—',
                 true,
               )}
             </View>
