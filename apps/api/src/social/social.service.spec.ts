@@ -437,6 +437,15 @@ describe('SocialService — profiles', () => {
       totalFollowers: 0,
       totalFollowing: 0,
       createdAt: at(0).toISOString(),
+      // The listening aggregates ride along (empty fixtures →
+      // the zero state: null mean, no themes, no seconds).
+      stats: {
+        meanRating: null,
+        themesListened: 0,
+        totalListenedSeconds: 0,
+        followersCount: 0,
+        followingCount: 0,
+      },
     });
     const raw = JSON.stringify(profile);
     expect(raw).not.toContain('alice@example.com');

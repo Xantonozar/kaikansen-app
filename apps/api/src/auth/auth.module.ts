@@ -6,6 +6,15 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { MailerService } from './mailer.service';
 import { User, UserSchema } from './user.schema';
+import { Rating, RatingSchema } from '../library/rating.schema';
+import {
+  WatchHistory,
+  WatchHistorySchema,
+} from '../library/watch-history.schema';
+import {
+  ThemeCache,
+  ThemeCacheSchema,
+} from '../themes/theme-cache.schema';
 
 /**
  * Same conditional-registration pattern as ThemesModule: the Mongoose
@@ -19,7 +28,18 @@ export class AuthModule {
     return {
       module: AuthModule,
       imports: withDatabase
-        ? [MongooseModule.forFeature([{ name: User.name, schema: UserSchema }])]
+        ? [
+            MongooseModule.forFeature([
+              { name: User.name, schema: UserSchema },
+              // Read-only here: GET /auth/me's listening stats
+              // (AuthService.withStats). Registered in the other
+              // modules too — @nestjs/mongoose reuses the compiled
+              // model per name on the same connection.
+              { name: Rating.name, schema: RatingSchema },
+              { name: WatchHistory.name, schema: WatchHistorySchema },
+              { name: ThemeCache.name, schema: ThemeCacheSchema },
+            ]),
+          ]
         : [],
       controllers: [AuthController],
       // AnilistClient is registered unconditionally (it holds no config);

@@ -38,6 +38,16 @@ import {
 } from './anilist.client';
 import { MailerService } from './mailer.service';
 import { User, type UserDocument } from './user.schema';
+import { Rating, type RatingDocument } from '../library/rating.schema';
+import {
+  WatchHistory,
+  type WatchHistoryDocument,
+} from '../library/watch-history.schema';
+import {
+  ThemeCache,
+  type ThemeCacheDocument,
+} from '../themes/theme-cache.schema';
+import { computeProfileStats } from '../users/profile-stats';
 
 /**
  * Password-login is impossible for AniList-created accounts: the web
@@ -135,6 +145,22 @@ export class AuthService {
     private readonly anilist?: AnilistClient,
     @Optional()
     private readonly mailer?: MailerService,
+    /**
+     * Read-only models for the profile listening stats
+     * (GET /auth/me's `stats` — see withStats). Optional like the
+     * user model: AuthModule registers them with a database;
+     * the AuthService instances other modules provide for token
+     * verification don't, and simply never serve /auth/me.
+     */
+    @Optional()
+    @InjectModel(Rating.name)
+    private readonly ratingModel?: Model<RatingDocument>,
+    @Optional()
+    @InjectModel(WatchHistory.name)
+    private readonly historyModel?: Model<WatchHistoryDocument>,
+    @Optional()
+    @InjectModel(ThemeCache.name)
+    private readonly themeModel?: Model<ThemeCacheDocument>,
   ) {}
 
   private requireModel(): Model<UserDocument> {
@@ -513,6 +539,35 @@ export class AuthService {
     return { reset: true };
   }
 
+  /**
+   * The profile WITH its listening stats attached (GET /auth/me
+   * and PATCH /auth/me — the reads the own-Profile screen
+   * consumes). The aggregates come from the shared routine
+   * (computeProfileStats — the same one GET /users/:username
+   * uses, so both surfaces agree). When this instance was built
+   * without the stats models the profile answers without `stats`
+   * rather than failing — the field is optional in the contract
+   * for exactly that case (and for the register/login payloads,
+   * which never attach it).
+   */
+  private async withStats(user: UserDocument): Promise<UserProfile> {
+    const profile = this.toProfile(user);
+    if (!this.ratingModel || !this.historyModel || !this.themeModel) {
+      return profile;
+    }
+    return {
+      ...profile,
+      stats: await computeProfileStats(
+        {
+          ratings: this.ratingModel,
+          history: this.historyModel,
+          themes: this.themeModel,
+        },
+        user,
+      ),
+    };
+  }
+
   /** GET /auth/me — profile for the bearer token's user. */
   async me(userId: string): Promise<UserProfile> {
     const model = this.requireModel();
@@ -520,7 +575,7 @@ export class AuthService {
     if (!user) {
       throw new UnauthorizedException('Account no longer exists');
     }
-    return this.toProfile(user);
+    return this.withStats(user);
   }
 
   /**
@@ -553,7 +608,7 @@ export class AuthService {
     if (!user) {
       throw new UnauthorizedException('Account no longer exists');
     }
-    return this.toProfile(user);
+    return this.withStats(user);
   }
 
   /* ---------------------------------------------------------------- */

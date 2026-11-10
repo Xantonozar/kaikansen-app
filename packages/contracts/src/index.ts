@@ -249,6 +249,14 @@ export interface UserProfile {
    * across restarts (it previously had to re-derive it per session).
    */
   anilist: { userId: number; username: string } | null;
+  /**
+   * Listening aggregates (see ProfileStats) — attached by
+   * GET /auth/me and PATCH /auth/me, the reads the own-Profile
+   * screen consumes. The register/login responses omit it (their
+   * payload is minted before any aggregate read; the app refetches
+   * /auth/me for the Profile screen).
+   */
+  stats?: ProfileStats;
 }
 
 /** A fresh access + refresh token pair (JSON Web Tokens). */
@@ -1138,9 +1146,42 @@ export interface NetworkUser {
 }
 
 /**
+ * Per-user listening stats (owner-ordered for the Profile design):
+ * aggregates computed from the user's own rows — never the rows
+ * themselves. Carried by GET /auth/me (as UserProfile.stats) and by
+ * GET /users/:username (as UserPublicProfile.stats), computed by the
+ * one shared routine so both surfaces always agree.
+ */
+export interface ProfileStats {
+  /**
+   * Mean of the scores in the ratings THAT USER GAVE, rounded to
+   * 1 decimal. `null` when the user has given no ratings (clients
+   * render "—").
+   */
+  meanRating: number | null;
+  /** Distinct themes appearing in the user's watch/listen history. */
+  themesListened: number;
+  /**
+   * Sum over history plays of the played entry's catalogue
+   * duration, in seconds (the same entry resolution the history
+   * write path uses for the user's stored totalTime: the entry
+   * matching the row's atEntryId, else the theme's first entry,
+   * else 90). Plays whose theme no longer exists contribute 0.
+   * Clients format hours from this (seconds / 3600, 1 decimal).
+   */
+  totalListenedSeconds: number;
+  /** The user document's stored follower counter (as served by the profile/stats projections). */
+  followersCount: number;
+  /** The user document's stored following counter (as served by the profile/stats projections). */
+  followingCount: number;
+}
+
+/**
  * Response body of GET /users/:username — the web's profile
  * projection, field for field. (The web looks the username up
- * lower-cased and 404s unknown names.)
+ * lower-cased and 404s unknown names.) `stats` is an app-side
+ * addition (the Profile design's listening-stats card): aggregates
+ * only — no history or rating rows ever ride along.
  */
 export interface UserPublicProfile {
   id: string;
@@ -1153,6 +1194,8 @@ export interface UserPublicProfile {
   totalFollowing: number;
   /** ISO timestamp of account creation. */
   createdAt: string;
+  /** Listening aggregates (see ProfileStats). */
+  stats: ProfileStats;
 }
 
 /** Response body of GET /users/:username/stats — the web's stats projection. */

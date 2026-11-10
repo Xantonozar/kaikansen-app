@@ -63,7 +63,7 @@ export class SocialController {
   @Get('users/:username')
   @ApiOkResponse({
     description:
-      'Public profile by username (the web’s 9-field projection; 404 for unknown usernames).',
+      'Public profile by username (the web’s 9-field projection plus the listening-stats aggregates; 404 for unknown usernames).',
   })
   profile(@Param('username') username: string): Promise<UserPublicProfile> {
     return this.social.getProfile(username);

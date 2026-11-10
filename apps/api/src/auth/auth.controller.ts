@@ -94,7 +94,10 @@ export class AuthController {
   @Get('me')
   @ApiBearerAuth()
   @UseGuards(AccessTokenGuard)
-  @ApiOkResponse({ description: 'The caller’s own profile.' })
+  @ApiOkResponse({
+    description:
+      'The caller’s own profile, with the listening-stats aggregates attached (stats).',
+  })
   me(@Req() req: { user: TokenPayload }): Promise<UserProfile> {
     return this.auth.me(req.user.userId);
   }

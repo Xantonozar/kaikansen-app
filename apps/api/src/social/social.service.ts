@@ -50,6 +50,7 @@ import {
   PlaylistActivity,
   type PlaylistActivityDocument,
 } from '../playlists/playlist-activity.schema';
+import { computeProfileStats } from '../users/profile-stats';
 
 /** The web's notification list cap (GET /api/notifications). */
 const NOTIFICATION_LIST_LIMIT = 50;
@@ -165,7 +166,9 @@ interface SocialModels {
  *   totalFollowing, createdAt). No rank, no AniList linkage, no
  *   email — the web exposes none of them here. There is NO
  *   isPublic gate on the profile or the network lists (isPublic
- *   only filters user SEARCH).
+ *   only filters user SEARCH). (App addition: the projection now
+ *   also carries the `stats` listening aggregates — see
+ *   getProfile.)
  * - The web's /network and /friends routes are byte-identical
  *   duplicates; the network page uses /network. One endpoint here.
  * - Follows: stored counters on the user docs, maintained by the
@@ -371,6 +374,12 @@ export class SocialService {
    * id, username, displayName, avatarUrl, bio, totalRatings,
    * totalFollowers, totalFollowing, createdAt. Public; unknown
    * usernames 404 (the web's own message).
+   *
+   * App addition (owner-ordered for the Profile design): `stats`
+   * carries the listening aggregates (computeProfileStats — the
+   * same routine GET /auth/me uses, so both surfaces agree).
+   * Aggregates only: no history or rating rows, and none of the
+   * private fields the projection above already withholds.
    */
   async getProfile(username: string): Promise<UserPublicProfile> {
     const models = this.requireModels();
@@ -385,6 +394,7 @@ export class SocialService {
       totalFollowers: user.totalFollowers ?? 0,
       totalFollowing: user.totalFollowing ?? 0,
       createdAt: iso(user.createdAt),
+      stats: await computeProfileStats(models, user),
     };
   }
 

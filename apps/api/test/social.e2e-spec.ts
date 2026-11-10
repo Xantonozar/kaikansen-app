@@ -554,6 +554,13 @@ describe('Social flow with mocked models (e2e)', () => {
       totalFollowers: 0,
       totalFollowing: 0,
       createdAt: at(0).toISOString(),
+      stats: {
+        meanRating: null,
+        themesListened: 0,
+        totalListenedSeconds: 0,
+        followersCount: 0,
+        followingCount: 0,
+      },
     });
     const raw = JSON.stringify(res.body);
     expect(raw).not.toContain('alice@example.com');

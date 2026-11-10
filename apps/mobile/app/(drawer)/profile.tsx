@@ -13,18 +13,24 @@ import {
   ChevronRight,
   Download,
   History,
+  Medal,
+  Pencil,
   RefreshCw,
   Settings as SettingsIcon,
   Star,
 } from 'lucide-react-native';
 import type { UserRankProfile } from '@kaikansen/contracts';
+import { fixtureMode } from '../../src/api';
 import { useAuth } from '../../src/auth';
+import { fetchMe } from '../../src/authApi';
 import { Avatar } from '../../src/components/Avatar';
 import {
-  RankCardSkeleton,
-  RankProfileCard,
-} from '../../src/components/RankCard';
-import { fetchPlaylists } from '../../src/libraryApi';
+  divisionChip,
+  formatRp,
+  tierLabel,
+  tierProgress,
+} from '../../src/rankUtil';
+import { getAccessToken } from '../../src/session';
 import { fetchMyRank } from '../../src/socialApi';
 import {
   fontFamilies,
@@ -37,39 +43,43 @@ import { useTheme } from '../../src/theme-context';
 import { CONTENT_MAX_WIDTH } from '../../src/layout';
 
 /**
- * Own Profile (the §6.15 design, layout-fidelity Slice 4) — the
- * signed-in user's hub, distinct from the public /user/:username
- * screen: identity card (avatar, name, handle, the sage "AniList
- * connected" pill — or its muted not-connected variant, which
- * routes to Settings where linking lives — Edit → the Edit
- * Profile screen), the profile-measured RankProfileCard
- * (GET /rank/me), the stats card (Ratings from the session
- * profile, Playlists counted from GET /playlists, Quizzes = the
- * rank document's lifetime games), the menu card, and Log Out.
- * The gear opens Settings. Card measurements follow the Profile
- * mock's HTML (rounded-2xl cards, 14px section rhythm).
+ * Own Profile — the owner's FINAL design (approved 2026-11-10,
+ * kaikansen-profile-v2-candidate): ONE hero card holding the
+ * centered identity (avatar with a pencil badge, name, @handle),
+ * the inline "N Followers · N Following" line ABOVE a full-width
+ * Edit Profile pill, a divider, and the rank row (medal disc,
+ * tier + division chip, RP, "N RP to next", progress bar) — then
+ * the divided listening-stats card (Mean Rating · Themes
+ * Listened · Hours Listened), the five-row menu card, and Log
+ * Out. No banner, no AniList-connected pill.
  *
- * Data comes from the same paths the public profile uses —
- * session profile + /rank/me + the library reads — so the numbers
- * agree across surfaces. A failed satellite degrades to a dash or
- * a hidden card, never a fabricated number. Entered from the
- * drawer identity row and the header avatar.
+ * Data: identity + stats ride GET /auth/me (the session profile,
+ * refreshed on mount so the aggregates are current — register /
+ * login payloads carry no stats); the rank row rides
+ * GET /rank/me. The stats are the API's ProfileStats aggregates:
+ * meanRating is the mean of the scores the user GAVE (null →
+ * "—"), themesListened counts distinct history themes, hours are
+ * totalListenedSeconds / 3600. Followers/Following tap through
+ * to the Network screen for the user's own account. The avatar
+ * (and its pencil badge) and the Edit Profile pill all open the
+ * Edit Profile screen, where the avatar picker lives.
  *
- * Menu targets: Listening History opens the Library on its Recent
- * segment (the library honours a `segment` param), My Ratings the
- * public own-profile screen (where the ratings list lives),
- * AniList Sync the Settings AniList rows (link state + action).
+ * Menu targets (unchanged): Listening History opens the Library
+ * on its Recent segment, My Ratings the public own-profile
+ * screen (where the ratings list lives), AniList Sync the
+ * Settings AniList rows (link state + action). A failed
+ * satellite read degrades to a dash or a hidden rank row, never
+ * a fabricated number.
  */
 export default function OwnProfileScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
-  const { status, user, anilistUsername, logout } = useAuth();
+  const { status, user, logout, updateUser } = useAuth();
   const signedIn = status === 'signedIn' && user !== null;
 
   const [rank, setRank] = useState<UserRankProfile | null>(null);
   const [rankLoading, setRankLoading] = useState(false);
-  const [playlistCount, setPlaylistCount] = useState<number | null>(null);
 
   const userId = user?.id;
   useEffect(() => {
@@ -80,9 +90,18 @@ export default function OwnProfileScreen() {
       .then((r) => live && setRank(r))
       .catch(() => live && setRank(null))
       .finally(() => live && setRankLoading(false));
-    fetchPlaylists()
-      .then((res) => live && setPlaylistCount(res.playlists.length))
-      .catch(() => live && setPlaylistCount(null));
+    // Refresh the session profile so the hero counts and the
+    // listening stats are current (the login payload predates
+    // them). A failure keeps the session copy — the stats just
+    // render their dash state.
+    const token = fixtureMode ? null : getAccessToken();
+    if (token) {
+      fetchMe(token)
+        .then((profile) => {
+          if (live && profile.id === userId) updateUser(profile);
+        })
+        .catch(() => {});
+    }
     return () => {
       live = false;
     };
@@ -94,8 +113,6 @@ export default function OwnProfileScreen() {
     await logout();
     router.replace('/(tabs)');
   };
-
-  const linkedName = user?.anilist?.username ?? anilistUsername;
 
   const menuRow = (
     Icon: typeof Bell,
@@ -128,6 +145,14 @@ export default function OwnProfileScreen() {
     </View>
   );
 
+  const stats = user?.stats;
+  const followers = stats?.followersCount ?? user?.totalFollowers ?? 0;
+  const following = stats?.followingCount ?? user?.totalFollowing ?? 0;
+  const hours = stats ? stats.totalListenedSeconds / 3600 : null;
+
+  const progress = rank ? tierProgress(rank.rp, rank.tier) : null;
+  const chip = rank ? divisionChip(rank.division) : null;
+
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.topBar}>
@@ -146,7 +171,7 @@ export default function OwnProfileScreen() {
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
-        {!signedIn ? (
+        {!signedIn || !user ? (
           <>
             <Text style={styles.note}>You’re not signed in.</Text>
             <Pressable
@@ -159,90 +184,157 @@ export default function OwnProfileScreen() {
           </>
         ) : (
           <>
-            <View style={styles.identityCard}>
-              <Avatar
-                url={user.avatarUrl}
-                name={user.displayName || user.username}
-                seed={user.id}
-                size={56}
-              />
-              <View style={styles.identityTexts}>
-                <Text style={styles.displayName} numberOfLines={1}>
-                  {user.displayName || user.username}
-                </Text>
-                <Text style={styles.handle}>@{user.username}</Text>
-                {linkedName ? (
-                  <View style={styles.anilistPill}>
-                    <View style={styles.anilistDot} />
-                    <Text style={styles.anilistPillText}>
-                      AniList connected
-                    </Text>
-                  </View>
-                ) : (
-                  /* Honest unlinked variant (Profile fidelity
-                     pass): the mock draws the pill slot in both
-                     states, so an unlinked account gets a muted
-                     "AniList not connected" pill instead of a
-                     false claim or a hole — it routes to the
-                     Settings AniList rows, where linking lives. */
-                  <Pressable
-                    onPress={() => router.push('/settings')}
-                    accessibilityRole="button"
-                    accessibilityLabel="AniList not connected — open settings to link"
-                    style={({ pressed }) => [
-                      styles.anilistPill,
-                      styles.anilistPillMuted,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <View
-                      style={[styles.anilistDot, styles.anilistDotMuted]}
-                    />
-                    <Text
-                      style={[
-                        styles.anilistPillText,
-                        styles.anilistPillTextMuted,
-                      ]}
-                    >
-                      AniList not connected
-                    </Text>
-                  </Pressable>
-                )}
+            <View style={styles.heroCard}>
+              <Pressable
+                onPress={() => router.push('/edit-profile')}
+                accessibilityRole="button"
+                accessibilityLabel="Edit profile picture"
+                style={({ pressed }) => [
+                  styles.avatarWrap,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Avatar
+                  url={user.avatarUrl}
+                  name={user.displayName || user.username}
+                  seed={user.id}
+                  size={84}
+                />
+                <View style={styles.pencilBadge}>
+                  <Pencil size={13} color={theme.onAccent} strokeWidth={2.25} />
+                </View>
+              </Pressable>
+
+              <Text style={styles.displayName} numberOfLines={1}>
+                {user.displayName || user.username}
+              </Text>
+              <Text style={styles.handle}>@{user.username}</Text>
+
+              <View style={styles.socialRow}>
+                <Pressable
+                  onPress={() =>
+                    router.push(`/network/${user.username}?tab=followers`)
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel={`${followers} followers`}
+                  style={({ pressed }) => pressed && styles.pressed}
+                >
+                  <Text style={styles.socialText}>
+                    <Text style={styles.socialNumber}>
+                      {followers.toLocaleString('en-US')}
+                    </Text>{' '}
+                    Followers
+                  </Text>
+                </Pressable>
+                <Text style={styles.socialDot}>·</Text>
+                <Pressable
+                  onPress={() =>
+                    router.push(`/network/${user.username}?tab=following`)
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel={`${following} following`}
+                  style={({ pressed }) => pressed && styles.pressed}
+                >
+                  <Text style={styles.socialText}>
+                    <Text style={styles.socialNumber}>
+                      {following.toLocaleString('en-US')}
+                    </Text>{' '}
+                    Following
+                  </Text>
+                </Pressable>
               </View>
+
               <Pressable
                 onPress={() => router.push('/edit-profile')}
                 accessibilityRole="button"
                 accessibilityLabel="Edit profile"
                 style={({ pressed }) => [
-                  styles.editButton,
+                  styles.editPill,
                   pressed && styles.pressed,
                 ]}
               >
-                <Text style={styles.editButtonText}>Edit</Text>
+                <Pencil
+                  size={15}
+                  color={theme.onAccentContainer}
+                  strokeWidth={2}
+                />
+                <Text style={styles.editPillText}>Edit Profile</Text>
               </Pressable>
+
+              {rank && progress ? (
+                <>
+                  <View style={styles.heroDivider} />
+                  <View style={styles.rankHeadRow}>
+                    <View style={styles.rankDisc}>
+                      <Medal size={20} color={theme.accent} strokeWidth={2} />
+                    </View>
+                    <View style={styles.rankNameBlock}>
+                      <View style={styles.rankTierRow}>
+                        <Text style={styles.rankTierName}>
+                          {tierLabel(rank.tier)}
+                        </Text>
+                        {chip && (
+                          <View style={styles.rankChip}>
+                            <Text style={styles.rankChipText}>{chip}</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={styles.rankRp}>{formatRp(rank.rp)}</Text>
+                    </View>
+                    {progress.nextTier && (
+                      <Text style={styles.rankToNext}>
+                        {progress.toNext.toLocaleString('en-US')} RP to{' '}
+                        {tierLabel(progress.nextTier)}
+                      </Text>
+                    )}
+                  </View>
+                  <View style={styles.rankBarTrack}>
+                    <View
+                      style={[
+                        styles.rankBarFill,
+                        {
+                          width: `${Math.round(progress.fraction * 100)}%`,
+                        },
+                      ]}
+                    />
+                  </View>
+                </>
+              ) : rankLoading ? (
+                <>
+                  <View style={styles.heroDivider} />
+                  <View
+                    style={styles.rankSkeleton}
+                    accessibilityLabel="Loading your rank"
+                  >
+                    <View style={styles.rankDisc} />
+                    <View style={styles.rankSkeletonBar} />
+                  </View>
+                  <View style={styles.rankBarTrack} />
+                </>
+              ) : null}
             </View>
 
-            {/* Loading state (design polish pass): the rank
-                card renders its skeleton while /rank/me is in
-                flight instead of vanishing — same treatment as
-                the Quiz hub. A failed fetch still degrades to
-                no card, never a fabricated rank. */}
-            {rank ? (
-              <RankProfileCard profile={rank} />
-            ) : rankLoading ? (
-              <RankCardSkeleton />
-            ) : null}
-
             <View style={styles.statsCard}>
-              {stat('Ratings', String(user.totalRatings))}
               {stat(
-                'Playlists',
-                playlistCount !== null ? String(playlistCount) : '–',
+                'Mean Rating',
+                stats
+                  ? stats.meanRating !== null
+                    ? stats.meanRating.toFixed(1)
+                    : '—'
+                  : '—',
+              )}
+              {stat(
+                'Themes Listened',
+                stats ? stats.themesListened.toLocaleString('en-US') : '—',
                 true,
               )}
               {stat(
-                'Quizzes',
-                rank ? String(rank.stats.totalGames) : '–',
+                'Hours Listened',
+                hours !== null
+                  ? hours >= 100
+                    ? Math.round(hours).toLocaleString('en-US')
+                    : String(Math.round(hours * 10) / 10)
+                  : '—',
                 true,
               )}
             </View>
@@ -309,9 +401,8 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
     },
     gearCircle: {
-      // The mock's gear sits in a plain WHITE circle (design
-      // polish pass) — surface fill, fully round, hairline edge.
-      // 40px disc per the Profile mock's HTML (w-10 h-10).
+      // The mock's gear sits in a plain WHITE circle — surface
+      // fill, fully round, hairline edge. 40px disc (w-10 h-10).
       width: 40,
       height: 40,
       borderRadius: radii.pill,
@@ -337,92 +428,170 @@ const createStyles = (theme: Theme) =>
       paddingHorizontal: spacing.screenEdge,
       paddingBottom: spacing.xxxl,
     },
-    identityCard: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      // The mock's card rhythm: gap-3.5 (14) between avatar and
-      // texts, p-4 (16) padding, rounded-2xl (16) corners, and a
-      // 14px section gap below (the column's uniform rhythm).
-      gap: 14,
+    heroCard: {
       backgroundColor: theme.surface,
-      borderRadius: radii.md,
-      padding: spacing.lg,
+      borderRadius: radii.card,
+      padding: spacing.xl,
       marginTop: spacing.sm,
-      marginBottom: 14,
+      alignItems: 'center',
     },
-    identityTexts: {
-      flex: 1,
-      gap: 2,
-      alignItems: 'flex-start',
+    avatarWrap: {
+      // Hosts the pencil badge at the avatar's bottom-right.
+      position: 'relative',
+    },
+    pencilBadge: {
+      position: 'absolute',
+      right: 0,
+      bottom: 2,
+      width: 26,
+      height: 26,
+      borderRadius: radii.pill,
+      backgroundColor: theme.accent,
+      borderWidth: 2,
+      borderColor: theme.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     displayName: {
       ...typeStyles.display,
-      // text-lg (18) bold in the mock.
-      fontSize: 18,
+      fontSize: 22,
       color: theme.text,
+      marginTop: spacing.md,
+      textAlign: 'center',
     },
     handle: {
-      ...typeStyles.bodySmall,
-      // text-xs (12) at medium weight in the mock.
-      fontFamily: fontFamilies.caption,
+      ...typeStyles.body,
+      fontSize: 14,
+      color: theme.muted,
+      marginTop: 2,
+      textAlign: 'center',
+    },
+    socialRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      marginTop: spacing.sm,
+    },
+    socialText: {
+      ...typeStyles.body,
+      fontSize: 15,
       color: theme.muted,
     },
-    anilistPill: {
+    socialNumber: {
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
+    },
+    socialDot: {
+      ...typeStyles.body,
+      fontSize: 15,
+      color: theme.muted,
+    },
+    editPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: spacing.sm,
+      alignSelf: 'stretch',
+      backgroundColor: theme.accentContainer,
+      borderRadius: radii.pill,
+      minHeight: 44,
+      marginTop: spacing.lg,
+    },
+    editPillText: {
+      ...typeStyles.body,
+      fontSize: 15,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.onAccentContainer,
+    },
+    heroDivider: {
+      alignSelf: 'stretch',
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: theme.border,
+      marginTop: spacing.xl,
+      marginBottom: spacing.lg,
+    },
+    rankHeadRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      alignSelf: 'stretch',
+    },
+    rankDisc: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: theme.accentContainer,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    rankNameBlock: {
+      flex: 1,
+      gap: 2,
+    },
+    rankTierRow: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 6,
-      backgroundColor: theme.successContainer,
-      borderRadius: radii.pill,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 2,
-      marginTop: spacing.xs,
     },
-    anilistPillMuted: {
+    rankTierName: {
+      ...typeStyles.display,
+      fontSize: 16,
+      color: theme.text,
+    },
+    rankChip: {
       backgroundColor: theme.accentContainer,
+      borderRadius: 4,
+      paddingHorizontal: 6,
+      paddingVertical: 2,
     },
-    anilistDot: {
-      width: 6,
-      height: 6,
-      borderRadius: radii.pill,
-      backgroundColor: theme.success,
-    },
-    anilistDotMuted: {
-      backgroundColor: theme.muted,
-    },
-    anilistPillText: {
-      ...typeStyles.caption,
+    rankChipText: {
       fontFamily: fontFamilies.bodyStrong,
-      color: theme.success,
+      fontSize: 10,
+      color: theme.onAccentContainer,
     },
-    anilistPillTextMuted: {
+    rankRp: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 12,
       color: theme.muted,
     },
-    editButton: {
-      backgroundColor: theme.accentContainer,
-      borderRadius: radii.pill,
-      paddingHorizontal: spacing.md + 2,
-      // The mock's Edit pill is px-3.5 py-1.5 (14/6) around
-      // 12px text — no fixed height.
-      paddingVertical: 6,
-      alignItems: 'center',
-      justifyContent: 'center',
-      flexShrink: 0,
-    },
-    editButtonText: {
-      ...typeStyles.bodySmall,
+    rankToNext: {
       fontFamily: fontFamilies.bodyStrong,
-      color: theme.onAccentContainer,
+      fontSize: 12,
+      color: theme.muted,
+      textAlign: 'right',
+    },
+    rankBarTrack: {
+      height: 8,
+      borderRadius: 4,
+      backgroundColor: theme.accentContainer,
+      overflow: 'hidden',
+      alignSelf: 'stretch',
+      marginTop: 10,
+    },
+    rankBarFill: {
+      height: '100%',
+      borderRadius: 4,
+      backgroundColor: theme.accent,
+    },
+    rankSkeleton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      alignSelf: 'stretch',
+    },
+    rankSkeletonBar: {
+      flex: 1,
+      height: 12,
+      borderRadius: 6,
+      backgroundColor: theme.raised,
     },
     statsCard: {
       flexDirection: 'row',
       backgroundColor: theme.surface,
-      // rounded-2xl (16), py-3 px-2 (12/8) in the mock; the
-      // section rhythm around it is the column's uniform 14.
-      borderRadius: radii.md,
-      paddingVertical: spacing.md,
+      borderRadius: radii.card,
+      paddingVertical: 18,
       paddingHorizontal: spacing.sm,
       marginTop: 14,
-      marginBottom: 14,
     },
     statBlock: {
       flex: 1,
@@ -430,28 +599,27 @@ const createStyles = (theme: Theme) =>
       gap: 2,
     },
     statBlockDivided: {
-      // The mock's vertical hairlines between stat columns
-      // (divide-x) — absent before this pass.
+      // The mock's vertical hairlines between stat columns.
       borderLeftWidth: StyleSheet.hairlineWidth,
       borderLeftColor: theme.border,
     },
     statValue: {
-      // text-xl (20) bold in the mock — the display face.
       ...typeStyles.display,
-      fontSize: 20,
+      fontSize: 24,
       color: theme.text,
     },
     statLabel: {
-      ...typeStyles.caption,
+      ...typeStyles.bodySmall,
+      fontSize: 13,
       color: theme.muted,
     },
     menuCard: {
       backgroundColor: theme.surface,
-      borderRadius: radii.md,
-      // No horizontal padding on the card: the mock's rows
-      // carry p-3.5 (14) themselves and its hairlines run
-      // full-bleed (divide-y).
+      borderRadius: radii.card,
+      // No horizontal padding on the card: the mock's rows carry
+      // their own padding and its hairlines run full-bleed.
       overflow: 'hidden',
+      marginTop: 14,
     },
     menuRow: {
       flexDirection: 'row',
@@ -474,8 +642,8 @@ const createStyles = (theme: Theme) =>
       flexShrink: 0,
     },
     menuLabel: {
-      // text-sm (14) semibold in the mock.
       ...typeStyles.body,
+      fontSize: 15,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.text,
       flex: 1,
@@ -487,13 +655,9 @@ const createStyles = (theme: Theme) =>
       marginTop: 14,
     },
     logoutLabel: {
-      // Muted mauve in the mock (design polish pass) — the
-      // strong danger red was the audit's delta here. (The
-      // Settings screen's Log Out row keeps its dusty-red card
-      // treatment, as its own mock draws.) text-xs (12)
-      // semibold per the mock's HTML.
+      // Muted mauve in the mock, centered under the menu card.
       ...typeStyles.body,
-      fontSize: 12,
+      fontSize: 15,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.secondary,
     },

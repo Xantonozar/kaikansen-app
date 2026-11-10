@@ -380,6 +380,11 @@ function makeFakeModels() {
     docs: ratings,
     findOne: (filter: Record<string, unknown>) =>
       queryOf(byUserAndTheme(ratings)(filter)),
+    // The profile-stats read (GET /auth/me's aggregates) lists a
+    // user's ratings — the same userId filter the history fake
+    // below applies.
+    find: (filter: Record<string, unknown>) =>
+      chain(ratings.filter((r) => String(r.userId) === String(filter.userId))),
     create: async (data: Record<string, unknown>) => {
       const doc = { _id: `rating-${++seq}`, ...data };
       ratings.push(doc);
