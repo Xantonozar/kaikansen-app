@@ -10,7 +10,7 @@ import {
 import { useRouter } from 'expo-router';
 import { Send } from 'lucide-react-native';
 import type { ThemeComment } from '@kaikansen/contracts';
-import { fixtureMode } from '../api';
+import { cacheKeyFor, fixtureMode, subscribeCache } from '../api';
 import { useAuth } from '../auth';
 import { fetchComments, postComment } from '../socialApi';
 import { relativeTime } from '../time';
@@ -51,6 +51,16 @@ export function ThemeComments({ slug }: { slug: string }) {
   const [draft, setDraft] = useState('');
   const [posting, setPosting] = useState(false);
   const [postError, setPostError] = useState<string | null>(null);
+
+  /* Silent swap (perf problem 5): a background revalidation of
+     the CATALOGUE-cached comments replaces the list in place. */
+  useEffect(() => {
+    if (fixtureMode) return;
+    return subscribeCache(
+      cacheKeyFor(`/themes/${encodeURIComponent(slug)}/comments`),
+      (fresh: { comments: ThemeComment[] }) => setComments(fresh.comments),
+    );
+  }, [slug]);
 
   useEffect(() => {
     let live = true;

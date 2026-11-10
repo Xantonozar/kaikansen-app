@@ -11,7 +11,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { ArrowLeft, Search } from 'lucide-react-native';
 import type { Season, SeasonResponse, ThemeSummary } from '@kaikansen/contracts';
-import { fetchHome, fetchSeason } from '../../src/api';
+import {
+  cacheKeyFor,
+  fetchHome,
+  fetchSeason,
+  fixtureMode,
+  subscribeCache,
+} from '../../src/api';
 import { ThemeRow } from '../../src/components/ThemeRow';
 import {
   queueItemsFromSummaries,
@@ -95,6 +101,19 @@ export default function SeasonScreen() {
       live = false;
     };
   }, []);
+
+  // Silent swap (perf problem 5): a background revalidation of
+  // the CATALOGUE-cached page 1 replaces the list in place — but
+  // only while the screen still shows page 1 alone.
+  useEffect(() => {
+    if (fixtureMode || !served || !selected) return;
+    return subscribeCache<SeasonResponse>(
+      cacheKeyFor(`/season?season=${selected}&year=${served.year}&page=1`),
+      (fresh) => {
+        setData((prev) => (prev && prev.page > 1 ? prev : fresh));
+      },
+    );
+  }, [served, selected]);
 
   // Load page 1 whenever the selected season changes.
   useEffect(() => {

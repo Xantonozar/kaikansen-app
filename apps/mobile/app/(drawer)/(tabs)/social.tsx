@@ -15,7 +15,7 @@ import type {
   FriendsActivityItem,
   NetworkUser,
 } from '@kaikansen/contracts';
-import { fixtureMode } from '../../../src/api';
+import { cacheKeyFor, fixtureMode, subscribeCache } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
 import { PersonRow } from '../../../src/components/PersonRow';
@@ -118,8 +118,28 @@ export default function SocialScreen() {
           ),
         ),
       )
-      .catch(() => setFriends(null));
+      .catch(() => {
+        // Keep whatever is painted (perf problem 5): a failure
+        // behind a cache paint must not blank a loaded rail.
+        setFriends((prev) => prev ?? null);
+      });
   }, [signedIn, myUsername]);
+
+  /* Silent swap (perf problem 5): a background revalidation of
+     the friends rail lands here and replaces the painted copy. */
+  useEffect(() => {
+    if (fixtureMode || !myUsername) return;
+    return subscribeCache(
+      cacheKeyFor(`/users/${encodeURIComponent(myUsername)}/network`),
+      (fresh: { following: (NetworkUser | null)[] }) => {
+        setFriends(
+          fresh.following.filter(
+            (p): p is NetworkUser => p !== null,
+          ),
+        );
+      },
+    );
+  }, [myUsername]);
 
   useFocusEffect(
     useCallback(() => {

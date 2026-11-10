@@ -11,6 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft } from 'lucide-react-native';
 import type { NetworkResponse, NetworkUser } from '@kaikansen/contracts';
+import { cacheKeyFor, fixtureMode, subscribeCache } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
 import { SkeletonPersonRow } from '../../../src/components/Skeleton';
@@ -141,6 +142,29 @@ export default function NetworkScreen() {
       following: response.followingHasMore,
     });
   };
+
+  /* Silent swap (perf problem 5): a background revalidation of
+     page 1 replaces it in place — only while page 1 alone shows
+     (a deeper scroll position keeps its appended pages). The
+     pages mirror ref tracks the loaded page span for the guard. */
+  const pagesRef = useRef(pages);
+  pagesRef.current = pages;
+  useEffect(() => {
+    if (fixtureMode) return;
+    const path =
+      `/users/${encodeURIComponent(username)}/network` +
+      `?followersPage=1&followingPage=1&limit=${PAGE_SIZE}`;
+    return subscribeCache<NetworkResponse>(cacheKeyFor(path), (fresh) => {
+      if (pagesRef.current.followers > 1 || pagesRef.current.following > 1) {
+        return;
+      }
+      applyPage(fresh);
+      setLoaded(true);
+    });
+    // applyPage is a stable setState composer declared below; the
+    // subscription re-registers per username, which is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username]);
 
   useEffect(() => {
     let live = true;

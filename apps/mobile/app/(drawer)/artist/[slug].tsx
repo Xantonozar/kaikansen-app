@@ -12,7 +12,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft } from 'lucide-react-native';
 import type { ArtistDetailResponse } from '@kaikansen/contracts';
-import { fetchArtistDetail } from '../../../src/api';
+import {
+  cacheKeyFor,
+  fetchArtistDetail,
+  fixtureMode,
+  subscribeCache,
+} from '../../../src/api';
 import { useFavorites } from '../../../src/favoritesStore';
 import { pickDefaultArtist } from '../../../src/defaultArtists';
 import { ThemeRow } from '../../../src/components/ThemeRow';
@@ -58,6 +63,16 @@ export default function ArtistDetailScreen() {
   );
   const [error, setError] = useState<string | null>(null);
   const [imageError, setImageError] = useState(false);
+
+  /* Silent swap (perf problem 5): a background revalidation of
+     the CATALOGUE-cached detail replaces it in place. */
+  useEffect(() => {
+    if (fixtureMode || !slug) return;
+    return subscribeCache<ArtistDetailResponse | null>(
+      cacheKeyFor(`/artists/${encodeURIComponent(slug)}`),
+      (fresh) => setData(fresh),
+    );
+  }, [slug]);
 
   useEffect(() => {
     let live = true;

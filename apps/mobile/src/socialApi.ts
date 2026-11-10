@@ -19,7 +19,7 @@ import type {
   UserSearchResponse,
   UserStats,
 } from '@kaikansen/contracts';
-import { apiJson, fixtureMode } from './api';
+import { apiJson, fixtureMode, type CacheReadOptions } from './api';
 import { demoUpdateProfile } from './demoAuth';
 import { getAccessToken } from './session';
 
@@ -59,10 +59,16 @@ const enc = encodeURIComponent;
 
 export async function fetchFriendsActivity(
   limit = 30,
+  opts?: CacheReadOptions,
 ): Promise<FriendsActivityResponse> {
   if (fixtureMode) return { activities: [], isGlobal: false };
+  // SOCIAL EXEMPTION (owner amendment, perf problem 5): NO
+  // freshness window — this refetches on focus as always. It still
+  // rides apiJson's in-flight dedupe, so Home and Social mounting
+  // together share one call; `force` is accepted for symmetry.
   return apiJson<FriendsActivityResponse>(
     `/social/friends-activity?limit=${limit}`,
+    { cache: opts },
   );
 }
 
@@ -84,14 +90,22 @@ export async function searchUsers(
 /** Public profile — rejects (404 demo message / API error) when unknown. */
 export async function fetchUserProfile(
   username: string,
+  opts?: CacheReadOptions,
 ): Promise<UserPublicProfile> {
   if (fixtureMode) throw new Error(DEMO_READ_MESSAGE);
-  return apiJson<UserPublicProfile>(`/users/${enc(username)}`);
+  return apiJson<UserPublicProfile>(`/users/${enc(username)}`, {
+    cache: opts,
+  });
 }
 
-export async function fetchUserStats(username: string): Promise<UserStats> {
+export async function fetchUserStats(
+  username: string,
+  opts?: CacheReadOptions,
+): Promise<UserStats> {
   if (fixtureMode) throw new Error(DEMO_READ_MESSAGE);
-  return apiJson<UserStats>(`/users/${enc(username)}/stats`);
+  return apiJson<UserStats>(`/users/${enc(username)}/stats`, {
+    cache: opts,
+  });
 }
 
 /**
@@ -110,6 +124,7 @@ export async function fetchUserNetwork(
     followingPage?: number;
     limit?: number;
   },
+  opts?: CacheReadOptions,
 ): Promise<NetworkResponse> {
   if (fixtureMode) throw new Error(DEMO_READ_MESSAGE);
   const params = new URLSearchParams();
@@ -125,6 +140,7 @@ export async function fetchUserNetwork(
   const query = params.toString();
   return apiJson<NetworkResponse>(
     `/users/${enc(username)}/network${query ? `?${query}` : ''}`,
+    { cache: opts },
   );
 }
 
@@ -136,24 +152,33 @@ export async function fetchUserNetwork(
  */
 export async function fetchUserActivity(
   username: string,
+  opts?: CacheReadOptions,
 ): Promise<UserActivityResponse> {
   if (fixtureMode) return { activity: [] };
-  return apiJson<UserActivityResponse>(`/users/${enc(username)}/activity`);
+  return apiJson<UserActivityResponse>(`/users/${enc(username)}/activity`, {
+    cache: opts,
+  });
 }
 
 export async function fetchUserRatings(
   username: string,
+  opts?: CacheReadOptions,
 ): Promise<UserRatingsResponse> {
   if (fixtureMode) return { ratings: [] };
-  return apiJson<UserRatingsResponse>(`/users/${enc(username)}/ratings`);
+  return apiJson<UserRatingsResponse>(`/users/${enc(username)}/ratings`, {
+    cache: opts,
+  });
 }
 
 export async function fetchUserHistory(
   username: string,
+  opts?: CacheReadOptions,
 ): Promise<UserHistoryResponse> {
   if (fixtureMode)
     return { entries: [], meta: { total: 0, localCount: 0, remoteCount: 0, merged: false } };
-  return apiJson<UserHistoryResponse>(`/users/${enc(username)}/history`);
+  return apiJson<UserHistoryResponse>(`/users/${enc(username)}/history`, {
+    cache: opts,
+  });
 }
 
 /**
@@ -164,21 +189,29 @@ export async function fetchUserHistory(
  */
 export async function fetchUserPlaylists(
   username: string,
+  opts?: CacheReadOptions,
 ): Promise<PlaylistsResponse> {
   if (fixtureMode) return { playlists: [] };
-  return apiJson<PlaylistsResponse>(`/users/${enc(username)}/playlists`);
+  return apiJson<PlaylistsResponse>(`/users/${enc(username)}/playlists`, {
+    cache: opts,
+  });
 }
 
 /** A user's rank document (public read) — used for the profile chip. */
-export async function fetchUserRank(userId: string): Promise<UserRankProfile> {
+export async function fetchUserRank(
+  userId: string,
+  opts?: CacheReadOptions,
+): Promise<UserRankProfile> {
   if (fixtureMode) throw new Error(DEMO_READ_MESSAGE);
-  return apiJson<UserRankProfile>(`/rank/${enc(userId)}`);
+  return apiJson<UserRankProfile>(`/rank/${enc(userId)}`, { cache: opts });
 }
 
 /** The signed-in caller's own rank document (GET /rank/me). */
-export async function fetchMyRank(): Promise<UserRankProfile> {
+export async function fetchMyRank(
+  opts?: CacheReadOptions,
+): Promise<UserRankProfile> {
   if (fixtureMode) throw new Error(DEMO_READ_MESSAGE);
-  return apiJson<UserRankProfile>('/rank/me');
+  return apiJson<UserRankProfile>('/rank/me', { cache: opts });
 }
 
 /**
@@ -190,10 +223,12 @@ export async function fetchMyRank(): Promise<UserRankProfile> {
  */
 export async function fetchPlayerRanks(
   userIds: string[],
+  opts?: CacheReadOptions,
 ): Promise<Map<string, PlayerRankSummary>> {
   if (fixtureMode || userIds.length === 0) return new Map();
   const res = await apiJson<{ players: PlayerRankSummary[] }>(
     `/rank/players?ids=${userIds.map((id) => encodeURIComponent(id)).join(',')}`,
+    { cache: opts },
   );
   return new Map(res.players.map((p) => [p.userId, p]));
 }
@@ -203,10 +238,14 @@ export async function fetchPlayerRanks(
  * RP, all-time (the API has no period parameter; see rankUtil).
  * Fixture mode answers the honest empty board, like the quiz board.
  */
-export async function fetchRankLeaderboard(): Promise<RankLeaderboardResponse> {
+export async function fetchRankLeaderboard(
+  opts?: CacheReadOptions,
+): Promise<RankLeaderboardResponse> {
   if (fixtureMode)
     return { leaderboard: [], meta: { source: 'live', computedAt: null } };
-  return apiJson<RankLeaderboardResponse>('/rank/leaderboard');
+  return apiJson<RankLeaderboardResponse>('/rank/leaderboard', {
+    cache: opts,
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -215,9 +254,12 @@ export async function fetchRankLeaderboard(): Promise<RankLeaderboardResponse> {
 
 export async function fetchFollowState(
   username: string,
+  opts?: CacheReadOptions,
 ): Promise<FollowState> {
   if (fixtureMode) return { username, isFollowing: false };
-  return apiJson<FollowState>(`/users/${enc(username)}/follow`);
+  return apiJson<FollowState>(`/users/${enc(username)}/follow`, {
+    cache: opts,
+  });
 }
 
 export async function followUser(username: string): Promise<FollowState> {
@@ -260,9 +302,11 @@ export async function postComment(
 /* Notifications                                                       */
 /* ------------------------------------------------------------------ */
 
-export async function fetchNotifications(): Promise<NotificationsResponse> {
+export async function fetchNotifications(
+  opts?: CacheReadOptions,
+): Promise<NotificationsResponse> {
   if (fixtureMode) return { notifications: [] };
-  return apiJson<NotificationsResponse>('/notifications');
+  return apiJson<NotificationsResponse>('/notifications', { cache: opts });
 }
 
 /**

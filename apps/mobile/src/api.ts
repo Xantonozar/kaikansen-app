@@ -3,6 +3,7 @@ import type {
   ArtistDetailResponse,
   HomeResponse,
   RecordWatchRequest,
+  SearchGroup,
   SearchResponse,
   Season,
   SeasonResponse,
@@ -14,9 +15,18 @@ import type {
 import { popularThemesFixture } from './fixtures/popularThemes';
 import {
   getAccessToken,
+  getSessionScope,
   notifySessionExpired,
   refreshAccessToken,
 } from './session';
+import {
+  appCache,
+  cacheKey,
+  type CacheReadOptions,
+} from './apiCache';
+
+export { wasCacheServed, subscribeCache } from './apiCache';
+export type { CacheReadOptions } from './apiCache';
 
 /**
  * Read-path client for the new NestJS API (Slice 1).
@@ -84,6 +94,107 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+/* ------------------------------------------------------------------ */
+/* Response cache wiring (perf problem 5)                              */
+/*                                                                     */
+/* Reads through apiJson/getJson route through src/apiCache.ts by      */
+/* the path table below; mutations invalidate centrally, here, the     */
+/* moment they SUCCEED — a failed mutation changed nothing, so it      */
+/* invalidates nothing. Paths not in the table (auth is a separate      */
+/* client; quiz room/game state; search-as-you-type) never touch       */
+/* the cache. Playback candidate resolution stays uncached too:        */
+/* fetchThemeBySlug keeps its own direct path (see below).             */
+/* ------------------------------------------------------------------ */
+
+/** The cache key for a GET of `path` under the live session scope. */
+export function cacheKeyFor(path: string): string {
+  return cacheKey('GET', path, getSessionScope());
+}
+
+/** Freshness class per cached read path — the spec's classes. */
+function readCacheClass(path: string): 'FEED' | 'USER' | 'CATALOGUE' | null {
+  const clean = path.split('?')[0];
+  if (clean === '/home') return 'FEED';
+  if (
+    clean === '/library/favorites' ||
+    clean === '/library/history' ||
+    clean === '/library/themes' ||
+    clean === '/playlists' ||
+    clean.startsWith('/playlists/') ||
+    clean.startsWith('/users/') ||
+    clean === '/notifications' ||
+    clean === '/rank/me' ||
+    clean.startsWith('/rank/')
+  ) {
+    return 'USER';
+  }
+  if (
+    clean.startsWith('/themes/') ||
+    clean === '/season' ||
+    clean.startsWith('/anime/') ||
+    clean.startsWith('/artists/')
+  ) {
+    return 'CATALOGUE';
+  }
+  return null;
+}
+
+/**
+ * Invalidation table: for a SUCCESSFUL mutation, the cache path
+ * fragments to drop (matched against full keys, so every scope's
+ * copy goes). Returns null for mutations with no cached dependents.
+ * Search, quiz and auth mutations are absent by design — nothing
+ * cached depends on them in a way this table must chase (quiz
+ * rank-adjacent reads ride their USER window).
+ */
+function invalidationFragments(method: string, path: string): string[] | null {
+  const clean = path.split('?')[0];
+  if (method === 'POST' && clean === '/library/history') {
+    // A listen: history + continue-listening (Home) + profile reads.
+    return ['/library/history', '/home', '/users/'];
+  }
+  if (clean === '/library/favorites' || clean.startsWith('/library/favorites/')) {
+    return ['/library/favorites'];
+  }
+  if (/^\/themes\/[^/]+\/rating$/.test(clean)) {
+    // A rating moves the profile stats + the user's ratings list.
+    return ['/users/'];
+  }
+  if (/^\/users\/[^/]+\/follow$/.test(clean)) {
+    return [
+      '/social/friends-activity',
+      '/users/',
+      '/rank/leaderboard',
+      '/rank/players',
+    ];
+  }
+  if (clean === '/playlists' || clean.startsWith('/playlists/')) {
+    return ['/playlists', '/users/'];
+  }
+  if (/^\/themes\/[^/]+\/comments$/.test(clean)) {
+    return [clean];
+  }
+  if (clean === '/notifications/mark-read') {
+    return ['/notifications'];
+  }
+  if (method === 'PATCH' && clean === '/auth/me') {
+    return ['/users/', '/rank/'];
+  }
+  return null;
+}
+
+/** Drop a mutation's dependents (apiJson calls this on success only). */
+export function invalidateAfterMutation(method: string, path: string): void {
+  const fragments = invalidationFragments(method, path);
+  if (!fragments) return;
+  for (const fragment of fragments) appCache.invalidateMatching(fragment);
+}
+
+/** Empty the whole response cache (logout / account change). */
+export function clearResponseCache(): void {
+  appCache.clear();
+}
+
 /** Error thrown by apiJson — carries the HTTP status alongside the message. */
 export class ApiRequestError extends Error {
   readonly status: number;
@@ -105,6 +216,36 @@ export class ApiRequestError extends Error {
  * one relies on.
  */
 export async function apiJson<T>(
+  path: string,
+  init?: ApiFetchInit & { cache?: CacheReadOptions },
+): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (method === 'GET') {
+    // Fixture mode never reaches here (every caller resolves its
+    // fixture shape first), so the cache only ever holds live data.
+    const ttlClass = readCacheClass(path);
+    if (ttlClass) {
+      return appCache.read<T>(cacheKeyFor(path), ttlClass, () =>
+        apiJsonNetwork<T>(path, init),
+        { force: init?.cache?.force },
+      );
+    }
+    // Uncached GET: still deduped in flight (concurrent identical
+    // reads share one call — e.g. the friends-activity exemption,
+    // whose screens refetch on focus by design).
+    return appCache.dedupe(cacheKeyFor(path), () =>
+      apiJsonNetwork<T>(path, init),
+    );
+  }
+  const result = await apiJsonNetwork<T>(path, init);
+  // Success only: a rejection above skips this, so a failed
+  // mutation invalidates nothing (perf problem 5 contract).
+  invalidateAfterMutation(method, path);
+  return result;
+}
+
+/** The raw apiJson request (no cache) — apiJson's network leg. */
+async function apiJsonNetwork<T>(
   path: string,
   init?: ApiFetchInit,
 ): Promise<T> {
@@ -211,8 +352,14 @@ function fixtureHome(): HomeResponse {
   return { season, seasonRail, popular };
 }
 
-function fixtureSearch(query: string): SearchResponse {
+function fixtureSearch(
+  query: string,
+  group: SearchGroup = 'all',
+  page = 1,
+  limit?: number,
+): SearchResponse {
   const trimmed = query.trim();
+  const emptyMeta = { total: 0, hasMore: false };
   const base: SearchResponse = {
     query: trimmed,
     results: [],
@@ -224,13 +371,25 @@ function fixtureSearch(query: string): SearchResponse {
     artists: [],
     users: [],
     searchType: 'regex',
-    page: 1,
+    group,
+    groups: {
+      themes: { ...emptyMeta },
+      anime: { ...emptyMeta },
+      artists: { ...emptyMeta },
+      users: { ...emptyMeta },
+    },
+    page,
     total: 0,
     hasMore: false,
     themeTypeFilter: null,
     themeSeqFilter: null,
   };
   if (trimmed.length === 0) return base;
+  // The snapshot cannot answer the catalogue-group views either:
+  // they stay honestly empty, like the groups above.
+  if (group === 'anime' || group === 'artists' || group === 'users') {
+    return base;
+  }
 
   // Local mirror of the API's two-stage regex search (web semantics):
   // "op"/"ed12"/"op 9" tokens become type/sequence filters; stage 1
@@ -286,13 +445,27 @@ function fixtureSearch(query: string): SearchResponse {
     .sort(
       (a, b) => b.totalWatches - a.totalWatches || b.avgRating - a.avgRating,
     );
-  const limit = themeTypeFilter !== null ? 50 : 20;
-  const results = matched.slice(0, limit).map(toSummary);
+  // The preview caps themes at the groups' 5; the themes full
+  // view pages at the requested limit (legacy SONGS sizes when
+  // none was sent: 20, or 50 under an OP/ED modifier).
+  const pageSize =
+    group === 'all'
+      ? themeTypeFilter !== null
+        ? 50
+        : 5
+      : (limit ?? (themeTypeFilter !== null ? 50 : 20));
+  const skip = (page - 1) * pageSize;
+  const results = matched.slice(skip, skip + pageSize).map(toSummary);
+  const themesMeta = {
+    total: matched.length,
+    hasMore: skip + results.length < matched.length,
+  };
   return {
     ...base,
     results,
+    groups: { ...base.groups, themes: themesMeta },
     total: matched.length,
-    hasMore: results.length < matched.length,
+    hasMore: themesMeta.hasMore,
     themeTypeFilter,
     themeSeqFilter,
   };
@@ -302,9 +475,12 @@ function fixtureSearch(query: string): SearchResponse {
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 
-export async function fetchHome(): Promise<HomeResponse> {
+export async function fetchHome(
+  opts?: CacheReadOptions,
+): Promise<HomeResponse> {
   if (fixtureMode) return fixtureHome();
-  return getJson<HomeResponse>('/home');
+  // FEED class (2 min) via the apiJson cache wiring on '/home'.
+  return apiJson<HomeResponse>('/home', { cache: opts });
 }
 
 /**
@@ -320,6 +496,7 @@ export async function fetchSeason(
   season: Season,
   year: number,
   page = 1,
+  opts?: CacheReadOptions,
 ): Promise<SeasonResponse> {
   if (fixtureMode) {
     const themes = popularThemesFixture
@@ -328,8 +505,10 @@ export async function fetchSeason(
       .map(toSummary);
     return { season, year, themes, page: 1, hasMore: false, total: themes.length };
   }
-  return getJson<SeasonResponse>(
+  // CATALOGUE class (15 min) via the apiJson cache wiring on '/season'.
+  return apiJson<SeasonResponse>(
     `/season?season=${season}&year=${year}&page=${page}`,
+    { cache: opts },
   );
 }
 
@@ -346,11 +525,24 @@ export async function fetchThemeBySlug(
   return (await res.json()) as ThemeDetail;
 }
 
-export async function searchThemes(query: string): Promise<SearchResponse> {
-  if (fixtureMode) return fixtureSearch(query);
-  return getJson<SearchResponse>(
-    `/search?q=${encodeURIComponent(query.trim())}`,
-  );
+/**
+ * GET /search — with no options, the 'all' preview (top 5 per
+ * group + per-group totals). A group's full view passes
+ * { group, page, limit } — the search screen lazy-loads it at
+ * limit 15 with infinite scroll (Option B spec, 2026-11-10).
+ */
+export async function searchThemes(
+  query: string,
+  opts?: { page?: number; group?: SearchGroup; limit?: number },
+): Promise<SearchResponse> {
+  if (fixtureMode) {
+    return fixtureSearch(query, opts?.group, opts?.page, opts?.limit);
+  }
+  const params = new URLSearchParams({ q: query.trim() });
+  if (opts?.group) params.set('group', opts.group);
+  if (opts?.page) params.set('page', String(opts.page));
+  if (opts?.limit) params.set('limit', String(opts.limit));
+  return getJson<SearchResponse>(`/search?${params.toString()}`);
 }
 
 /**
@@ -366,7 +558,8 @@ export async function fetchSimilarThemes(
   slug: string,
 ): Promise<ThemeSummary[]> {
   if (fixtureMode) return [];
-  const res = await getJson<SimilarThemesResponse>(
+  // CATALOGUE class via the apiJson cache wiring on '/themes/…'.
+  const res = await apiJson<SimilarThemesResponse>(
     `/themes/${encodeURIComponent(slug)}/similar`,
   );
   return res.themes;
@@ -382,10 +575,13 @@ export async function fetchAnimeDetail(
   id: number,
 ): Promise<AnimeDetailResponse | null> {
   if (fixtureMode) return null;
-  const res = await apiFetch(`/anime/${id}`);
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`API /anime/${id} answered ${res.status}`);
-  return (await res.json()) as AnimeDetailResponse;
+  try {
+    // CATALOGUE class via the apiJson cache wiring on '/anime/…'.
+    return await apiJson<AnimeDetailResponse>(`/anime/${id}`);
+  } catch (e) {
+    if (e instanceof ApiRequestError && e.status === 404) return null;
+    throw e;
+  }
 }
 
 /** Artist detail (GET /artists/:slug). Null on 404 / fixture mode. */
@@ -393,10 +589,14 @@ export async function fetchArtistDetail(
   slug: string,
 ): Promise<ArtistDetailResponse | null> {
   if (fixtureMode) return null;
-  const res = await apiFetch(`/artists/${encodeURIComponent(slug)}`);
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`API /artists/${slug} answered ${res.status}`);
-  return (await res.json()) as ArtistDetailResponse;
+  try {
+    return await apiJson<ArtistDetailResponse>(
+      `/artists/${encodeURIComponent(slug)}`,
+    );
+  } catch (e) {
+    if (e instanceof ApiRequestError && e.status === 404) return null;
+    throw e;
+  }
 }
 
 /**
@@ -417,4 +617,8 @@ export async function recordWatch(body: RecordWatchRequest): Promise<void> {
   if (!res.ok) {
     throw new Error(`API /library/history answered ${res.status}`);
   }
+  // Perf problem 5: a recorded listen invalidates its dependents
+  // (history, Home's continue-listening, profile reads) — on
+  // success only; the throw above skips this on failure.
+  invalidateAfterMutation('POST', '/library/history');
 }

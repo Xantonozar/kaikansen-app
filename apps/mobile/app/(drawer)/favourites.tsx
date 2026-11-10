@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -11,7 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { ChevronLeft, Heart } from 'lucide-react-native';
 import type { FavoritesResponse } from '@kaikansen/contracts';
-import { fixtureMode } from '../../src/api';
+import { cacheKeyFor, fixtureMode, subscribeCache } from '../../src/api';
 import { useAuth } from '../../src/auth';
 import { ThemeRow } from '../../src/components/ThemeRow';
 import { syncFavoriteSlugs, useFavorites } from '../../src/favoritesStore';
@@ -68,6 +68,24 @@ export default function FavouritesScreen() {
       .catch((e: unknown) =>
         setFavError(e instanceof Error ? e.message : 'Could not load saves.'),
       );
+  }, [signedIn]);
+
+  /* Silent swap (perf problem 5): a background revalidation of
+     page 1 replaces it in place — only while page 1 alone shows. */
+  useEffect(() => {
+    if (!signedIn || fixtureMode) return;
+    return subscribeCache<FavoritesResponse>(
+      cacheKeyFor('/library/favorites?page=1&limit=50'),
+      (fresh) => {
+        setFav((prev) => (prev && favPage > 1 ? prev : fresh));
+        if (favPage <= 1) {
+          setFavError(null);
+          syncFavoriteSlugs(fresh.themes);
+        }
+      },
+    );
+    // favPage is read live at notify time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signedIn]);
 
   /* The screen is pushed, not a tab — freshness is focus-driven,

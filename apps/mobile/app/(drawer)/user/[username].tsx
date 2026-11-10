@@ -33,7 +33,7 @@ import type {
   UserRatingEntry,
   UserRatingsResponse,
 } from '@kaikansen/contracts';
-import { fixtureMode } from '../../../src/api';
+import { cacheKeyFor, fixtureMode, subscribeCache } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
 import { ThemeRow } from '../../../src/components/ThemeRow';
@@ -190,6 +190,34 @@ export default function UserProfileScreen() {
     signedIn &&
     profile !== null &&
     user.username.toLowerCase() === profile.username.toLowerCase();
+
+  /* Silent swaps (perf problem 5): background revalidations of
+     this profile's USER-cached satellite reads replace them in
+     place. The profile head itself swaps through the main effect
+     below on its next read; the stats keep painting from the
+     problem-4 store — untouched here. */
+  useEffect(() => {
+    if (fixtureMode) return;
+    const base = `/users/${encodeURIComponent(username)}`;
+    const offPlaylists = subscribeCache(
+      cacheKeyFor(`${base}/playlists`),
+      (fresh: { playlists: PlaylistSummary[] }) =>
+        setProfilePlaylists(fresh.playlists),
+    );
+    const offRatings = subscribeCache<UserRatingsResponse>(
+      cacheKeyFor(`${base}/ratings`),
+      (fresh) => setRatings(fresh),
+    );
+    const offHistory = subscribeCache<UserHistoryResponse>(
+      cacheKeyFor(`${base}/history`),
+      (fresh) => setHistory(fresh),
+    );
+    return () => {
+      offPlaylists();
+      offRatings();
+      offHistory();
+    };
+  }, [username]);
 
   useEffect(() => {
     let live = true;

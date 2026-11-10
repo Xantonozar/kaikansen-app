@@ -33,7 +33,12 @@ import {
   X,
 } from 'lucide-react-native';
 import type { PlaylistDetail } from '@kaikansen/contracts';
-import { fetchThemeBySlug, fixtureMode } from '../../../src/api';
+import {
+  cacheKeyFor,
+  fetchThemeBySlug,
+  fixtureMode,
+  subscribeCache,
+} from '../../../src/api';
 import { downloadsSupported, useDownloads } from '../../../src/downloads';
 import { useAuth } from '../../../src/auth';
 import { useFavorites } from '../../../src/favoritesStore';
@@ -146,6 +151,24 @@ export default function PlaylistDetailScreen() {
     },
     [id],
   );
+
+  /* Silent swap (perf problem 5): a background revalidation of
+     the USER-cached playlist read replaces it in place — skipped
+     while a rename draft is open so the draft survives (the
+     editing ref lives with the focus handler below; the closure
+     reads it live at notify time). */
+  useEffect(() => {
+    if (fixtureMode) return;
+    return subscribeCache<PlaylistDetail>(
+      cacheKeyFor(`/playlists/${encodeURIComponent(id)}`),
+      (fresh) => {
+        if (editingRef.current) return;
+        setPlaylist(fresh);
+        setLoadState('ready');
+      },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   useEffect(() => {
     let live = true;

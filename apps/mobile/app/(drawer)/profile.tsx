@@ -19,7 +19,7 @@ import {
   Star,
 } from 'lucide-react-native';
 import type { ProfileStats, UserRankProfile } from '@kaikansen/contracts';
-import { fixtureMode } from '../../src/api';
+import { cacheKeyFor, fixtureMode, subscribeCache } from '../../src/api';
 import { useAuth } from '../../src/auth';
 import { fetchMe } from '../../src/authApi';
 import { Avatar } from '../../src/components/Avatar';
@@ -106,6 +106,18 @@ export default function OwnProfileScreen() {
 
   const userId = user?.id;
   const username = user?.username;
+
+  /* Silent swap (perf problem 5): a background revalidation of
+     the USER-cached /rank/me replaces the rank card in place.
+     The stats themselves keep painting from the problem-4 store
+     (profileStatsCache) — untouched by this job. */
+  useEffect(() => {
+    if (!signedIn || fixtureMode) return;
+    return subscribeCache<UserRankProfile>(cacheKeyFor('/rank/me'), (fresh) =>
+      setRank(fresh),
+    );
+  }, [signedIn]);
+
   useEffect(() => {
     if (!signedIn) return;
     let live = true;

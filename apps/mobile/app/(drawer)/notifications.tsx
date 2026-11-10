@@ -14,7 +14,7 @@ import type {
   NotificationItem,
   NotificationType,
 } from '@kaikansen/contracts';
-import { fixtureMode } from '../../src/api';
+import { cacheKeyFor, fixtureMode, subscribeCache } from '../../src/api';
 import { useAuth } from '../../src/auth';
 import { Avatar } from '../../src/components/Avatar';
 import {
@@ -143,6 +143,18 @@ export default function NotificationsScreen() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [markingAll, setMarkingAll] = useState(false);
+
+  /* Silent swap (perf problem 5): a background revalidation of
+     the USER-cached notifications read replaces the list. */
+  useEffect(() => {
+    if (!signedIn || fixtureMode) return;
+    return subscribeCache(cacheKeyFor('/notifications'), (fresh: {
+      notifications: NotificationItem[];
+    }) => {
+      setItems(fresh.notifications);
+      setUnreadCount(fresh.notifications.filter((n) => !n.read).length);
+    });
+  }, [signedIn]);
 
   useEffect(() => {
     if (!signedIn || fixtureMode) return;

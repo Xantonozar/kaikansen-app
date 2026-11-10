@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -14,7 +14,7 @@ import type {
   RankLeaderboardEntry,
   UserRankProfile,
 } from '@kaikansen/contracts';
-import { fixtureMode } from '../../../src/api';
+import { cacheKeyFor, fixtureMode, subscribeCache } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import {
   fetchMyRank,
@@ -111,6 +111,28 @@ export default function LeaderboardScreen() {
       void load();
     }, [load]),
   );
+
+  /* Silent swaps (perf problem 5): background revalidations of
+     the USER-cached rank reads replace the painted copies. */
+  useEffect(() => {
+    if (fixtureMode) return;
+    const offBoard = subscribeCache(
+      cacheKeyFor('/rank/leaderboard'),
+      (fresh: { leaderboard: RankLeaderboardEntry[] }) => {
+        setEntries(fresh.leaderboard);
+      },
+    );
+    const offMine = signedIn
+      ? subscribeCache(
+          cacheKeyFor('/rank/me'),
+          (fresh: UserRankProfile) => setMyRank(fresh),
+        )
+      : () => {};
+    return () => {
+      offBoard();
+      offMine();
+    };
+  }, [signedIn]);
 
   const myPosition = useMemo(() => {
     if (!entries || !myRank) return null;

@@ -10,7 +10,7 @@ import type {
   ThemeDetail,
   ThemeEntry,
 } from '@kaikansen/contracts';
-import { fixtureMode } from './api';
+import { fixtureMode, invalidateAfterMutation } from './api';
 import { progressValueChanged } from './mediaEngine';
 import { isPlausibleUrl, resolvePlaybackUrl } from './playback';
 import { plainStorage } from './storage';
@@ -481,6 +481,10 @@ export async function startDownload(
     clearPending(id);
     emit({ records });
     await persist(records);
+    // Perf problem 5: a completed download is an own action —
+    // History/Continue-Listening reads refresh on next access.
+    // (Downloads themselves are device-local and never cached.)
+    invalidateAfterMutation('POST', '/library/history');
     return null;
   } catch (e) {
     // Failed downloads clean up after themselves: no partial file is
@@ -541,6 +545,9 @@ export async function removeDownload(id: string): Promise<void> {
   errors.delete(id);
   emit({ records, errors });
   await persist(records);
+  // Perf problem 5: a removed download is an own action — same
+  // refresh trigger as a completed one (see startDownload).
+  invalidateAfterMutation('POST', '/library/history');
 }
 
 /* ------------------------------------------------------------------ */

@@ -50,9 +50,11 @@ import type {
   ThemeSummary,
 } from '@kaikansen/contracts';
 import {
+  cacheKeyFor,
   fetchSimilarThemes,
   fetchThemeBySlug,
   fixtureMode,
+  subscribeCache,
 } from '../../../src/api';
 import { ThemeComments } from '../../../src/components/ThemeComments';
 import { ThemeRow } from '../../../src/components/ThemeRow';
@@ -297,6 +299,20 @@ export default function ThemeDetailScreen() {
     return () => {
       live = false;
     };
+  }, [slug]);
+
+  /* Silent swap for the similar rail (perf problem 5): a
+     background revalidation of the CATALOGUE-cached read replaces
+     the rail in place. */
+  useEffect(() => {
+    if (fixtureMode) return;
+    return subscribeCache<ThemeSummary[]>(
+      cacheKeyFor(`/themes/${encodeURIComponent(slug)}/similar`),
+      (fresh) => {
+        setSimilar(fresh);
+        setSimilarState('done');
+      },
+    );
   }, [slug]);
 
   /* Similar themes — fired in parallel with the detail read (it

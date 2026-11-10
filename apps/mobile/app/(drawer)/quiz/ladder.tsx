@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -11,7 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { Check, ChevronLeft, Lock } from 'lucide-react-native';
 import type { UserRankProfile } from '@kaikansen/contracts';
-import { fixtureMode } from '../../../src/api';
+import { cacheKeyFor, fixtureMode, subscribeCache } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { fetchMyRank } from '../../../src/socialApi';
 import { RankIcon } from '../../../src/components/RankIcon';
@@ -93,6 +93,15 @@ export default function LadderScreen() {
       void load();
     }, [load]),
   );
+
+  /* Silent swap (perf problem 5): a background revalidation of
+     the USER-cached /rank/me replaces the standing in place. */
+  useEffect(() => {
+    if (fixtureMode || !signedIn) return;
+    return subscribeCache<UserRankProfile>(cacheKeyFor('/rank/me'), (fresh) =>
+      setMyRank(fresh),
+    );
+  }, [signedIn]);
 
   const standing = myRank ? standingOf(myRank) : null;
 

@@ -39,12 +39,15 @@ import {
 } from 'lucide-react-native';
 import type {
   FavoritesResponse,
+  LibraryThemesResponse,
   PlaylistDetail,
   PlaylistSummary,
+  PlaylistsResponse,
   ThemeSummary,
   WatchHistoryEntry,
+  WatchHistoryResponse,
 } from '@kaikansen/contracts';
-import { fixtureMode } from '../../../src/api';
+import { cacheKeyFor, fixtureMode, subscribeCache } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import {
   syncFavoriteSlugs,
@@ -369,39 +372,109 @@ export default function LibraryScreen() {
     null;
 
   /* Load all account sections; each lands (or fails) independently. */
-  const loadAll = useCallback(() => {
+  const loadAll = useCallback(
+    (opts?: { force?: boolean }) => {
+      if (!signedIn || fixtureMode) return;
+      const cacheOpts = opts?.force ? { force: true } : undefined;
+      fetchFavorites(1, 50, cacheOpts)
+        .then((res) => {
+          setFav(res);
+          setFavPage(1);
+          setFavError(null);
+          syncFavoriteSlugs(res.themes);
+        })
+        .catch((e: unknown) =>
+          setFavError(e instanceof Error ? e.message : 'Could not load saves.'),
+        );
+      fetchHistory(cacheOpts)
+        .then((res) => {
+          setHistory(res.entries);
+          setHistoryError(null);
+        })
+        .catch((e: unknown) =>
+          setHistoryError(
+            e instanceof Error ? e.message : 'Could not load history.',
+          ),
+        );
+      fetchPlaylists(cacheOpts)
+        .then((res) => {
+          setPlaylists(res.playlists);
+          setPlaylistsError(null);
+        })
+        .catch((e: unknown) =>
+          setPlaylistsError(
+            e instanceof Error ? e.message : 'Could not load playlists.',
+          ),
+        );
+    },
+    [signedIn],
+  );
+
+  /* Silent swaps (perf problem 5): background revalidations of
+     the section reads land here and replace the painted copies —
+     the focus handler above now just re-reads through the cache,
+     so inside the 5-minute USER window it costs no network. */
+  useEffect(() => {
     if (!signedIn || fixtureMode) return;
-    fetchFavorites(1)
-      .then((res) => {
-        setFav(res);
+    const offFav = subscribeCache<FavoritesResponse>(
+      cacheKeyFor('/library/favorites?page=1&limit=50'),
+      (fresh) => {
+        setFav(fresh);
         setFavPage(1);
         setFavError(null);
-        syncFavoriteSlugs(res.themes);
-      })
-      .catch((e: unknown) =>
-        setFavError(e instanceof Error ? e.message : 'Could not load saves.'),
-      );
-    fetchHistory()
-      .then((res) => {
-        setHistory(res.entries);
+        syncFavoriteSlugs(fresh.themes);
+      },
+    );
+    const offHistory = subscribeCache<WatchHistoryResponse>(
+      cacheKeyFor('/library/history'),
+      (fresh) => {
+        setHistory(fresh.entries);
         setHistoryError(null);
-      })
-      .catch((e: unknown) =>
-        setHistoryError(
-          e instanceof Error ? e.message : 'Could not load history.',
-        ),
-      );
-    fetchPlaylists()
-      .then((res) => {
-        setPlaylists(res.playlists);
+      },
+    );
+    const offPlaylists = subscribeCache<PlaylistsResponse>(
+      cacheKeyFor('/playlists'),
+      (fresh) => {
+        setPlaylists(fresh.playlists);
         setPlaylistsError(null);
-      })
-      .catch((e: unknown) =>
-        setPlaylistsError(
-          e instanceof Error ? e.message : 'Could not load playlists.',
-        ),
-      );
+      },
+    );
+    return () => {
+      offFav();
+      offHistory();
+      offPlaylists();
+    };
   }, [signedIn]);
+
+  /* Silent swap for the AniList first page (perf problem 5): a
+     background revalidation lands here and replaces page 1 in
+     place — but only while the screen still shows page 1 alone
+     (a deeper scroll position keeps its appended pages). */
+  const anilistFirstPageKey = cacheKeyFor(
+    `/library/themes?source=anilist&page=1&limit=${ANILIST_GROUP_PAGE_SIZE}${
+      typeFilter === 'ALL' ? '' : `&type=${typeFilter}`
+    }`,
+  );
+  useEffect(() => {
+    if (!signedIn || fixtureMode || !anilistLinked) return;
+    return subscribeCache<LibraryThemesResponse>(
+      anilistFirstPageKey,
+      (fresh) => {
+        if (anilistPageRef.current !== 1) return;
+        anilistGenRef.current += 1;
+        setAnilistThemes(fresh.themes);
+        setAnilistMeta({
+          totalThemes: fresh.totalThemes ?? fresh.total,
+          totalGroups: fresh.totalGroups ?? 0,
+          hasMore: fresh.hasMore ?? false,
+          anilistUser: fresh.anilistUser ?? null,
+        });
+        setLibError(null);
+        setAnilistPageError(null);
+        syncFavoriteSlugs(fresh.themes);
+      },
+    );
+  }, [signedIn, anilistLinked, anilistFirstPageKey]);
 
   /* The AniList segment's first page (Option B read, group-paged):
      only fetched when a link is known to exist — unlinked, the
@@ -426,6 +499,7 @@ export default function LibraryScreen() {
         1,
         ANILIST_GROUP_PAGE_SIZE,
         filter === 'ALL' ? undefined : filter,
+        opts?.refresh ? { force: true } : undefined,
       )
         .then((res) => {
           if (gen !== anilistGenRef.current) return;

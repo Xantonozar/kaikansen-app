@@ -18,7 +18,13 @@ import type {
   ThemeType,
   WatchHistoryEntry,
 } from '@kaikansen/contracts';
-import { fetchHome, fixtureMode } from '../../../src/api';
+import {
+  cacheKeyFor,
+  fetchHome,
+  fixtureMode,
+  subscribeCache,
+  wasCacheServed,
+} from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { useFavorites } from '../../../src/favoritesStore';
 import { fetchHistory } from '../../../src/libraryApi';
@@ -119,6 +125,12 @@ export default function HomeScreen() {
   const [home, setHome] = useState<HomeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  /* Perf problem 5: true once /home has been served — from the
+     network OR from a fresh-enough cache entry. The cache layer
+     marks cache-served payloads; the loading gate below keys on
+     this (not on home==null) so a cache paint never shows the
+     full-screen gate, while a NETWORK first load still does. */
+  const [homeServed, setHomeServed] = useState(false);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('ALL');
   const [feed, setFeed] = useState<FriendsActivityItem[] | null>(null);
   const [feedFailed, setFeedFailed] = useState(false);
@@ -145,11 +157,32 @@ export default function HomeScreen() {
 
   useEffect(() => {
     let live = true;
-    setHome(null);
     setError(null);
+    // Stale-while-revalidate (perf problem 5): a stale /home entry
+    // paints instantly through the promise below, and its
+    // background refetch lands on this subscription — swap
+    // silently when it does.
+    const unsubscribe = fixtureMode
+      ? () => {}
+      : subscribeCache<HomeResponse>(cacheKeyFor('/home'), (fresh) => {
+          if (live) {
+            setHome(fresh);
+            setHomeServed(true);
+          }
+        });
+    // A cache paint keeps the previous sections on screen (no
+    // gate, no blank); only a network answer counts as a fresh
+    // load and restarts the sections from null.
     fetchHome()
       .then((data) => {
-        if (live) setHome(data);
+        if (!live) return;
+        if (wasCacheServed(data)) {
+          setHome((prev) => prev ?? data);
+        } else {
+          setHome(data);
+        }
+        setHomeServed(true);
+        setError(null);
       })
       .catch((e: unknown) => {
         if (live) {
@@ -158,6 +191,7 @@ export default function HomeScreen() {
       });
     return () => {
       live = false;
+      unsubscribe();
     };
   }, [reloadKey]);
 
@@ -189,8 +223,39 @@ export default function HomeScreen() {
           ),
         ),
       )
-      .catch(() => setFriends(null));
+      .catch(() => {
+        // Keep whatever is painted: a failure behind a cache paint
+        // must not blank a rail that already has data.
+        setFriends((prev) => prev ?? null);
+      });
   }, [signedIn, myUsername]);
+
+  /* Silent swaps (perf problem 5): when a background revalidation
+     of the friends rail or the history lands, replace the painted
+     copy without a flicker. */
+  useEffect(() => {
+    if (fixtureMode || !myUsername) return;
+    const offNetwork = subscribeCache(
+      cacheKeyFor(`/users/${encodeURIComponent(myUsername)}/network`),
+      (fresh: { following: (NetworkUser | null)[] }) => {
+        setFriends(
+          fresh.following.filter(
+            (p): p is NetworkUser => p !== null,
+          ),
+        );
+      },
+    );
+    const offHistory = subscribeCache(
+      cacheKeyFor('/library/history'),
+      (fresh: { entries: WatchHistoryEntry[] }) => {
+        setHistory(fresh.entries.filter((e) => e.theme !== null).slice(0, 10));
+      },
+    );
+    return () => {
+      offNetwork();
+      offHistory();
+    };
+  }, [myUsername]);
 
   /* Continue Listening (the mock's rail between Surprise and Friends
      Activity): the caller's recent history, signed-in only. Failures
@@ -346,7 +411,10 @@ export default function HomeScreen() {
     return map;
   }, [home, history]);
 
-  if (error) {
+  // The error state is for a genuinely failed FIRST load only:
+  // once /home has been served (network or cache, perf problem 5)
+  // a later failure never replaces painted sections with it.
+  if (error && !homeServed) {
     return (
       <View style={styles.center}>
         <Text style={styles.errorText}>Couldn’t load Home.</Text>

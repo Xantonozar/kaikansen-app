@@ -13,7 +13,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft, ExternalLink } from 'lucide-react-native';
 import type { AnimeDetailResponse, ThemeSummary } from '@kaikansen/contracts';
-import { fetchAnimeDetail } from '../../../src/api';
+import {
+  cacheKeyFor,
+  fetchAnimeDetail,
+  fixtureMode,
+  subscribeCache,
+} from '../../../src/api';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import {
   queueItemsFromSummaries,
@@ -64,6 +69,16 @@ export default function AnimeDetailScreen() {
     undefined,
   );
   const [error, setError] = useState<string | null>(null);
+
+  /* Silent swap (perf problem 5): a background revalidation of
+     the CATALOGUE-cached detail replaces it in place. */
+  useEffect(() => {
+    if (fixtureMode || Number.isNaN(animeId)) return;
+    return subscribeCache<AnimeDetailResponse | null>(
+      cacheKeyFor(`/anime/${animeId}`),
+      (fresh) => setData(fresh),
+    );
+  }, [animeId]);
 
   useEffect(() => {
     let live = true;

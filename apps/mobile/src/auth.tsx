@@ -50,8 +50,11 @@ import {
   getAccessToken,
   registerRefreshHandler,
   registerSessionExpiredHandler,
+  registerUserScopeListener,
   setAccessToken,
+  setSessionUserId,
 } from './session';
+import { clearResponseCache } from './api';
 import { secureGet, secureRemove, secureSet } from './storage';
 import { setSessionUsername } from './profileStatsCache';
 
@@ -150,6 +153,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const applySession = useCallback(async (res: AuthResponse) => {
     refreshTokenRef.current = res.refreshToken;
     setAccessToken(res.accessToken);
+    // Perf problem 5: the response cache scopes to this account
+    // (a different account than the last session clears it via
+    // the scope listener registered below).
+    setSessionUserId(res.user.id);
     await secureSet(REFRESH_KEY, res.refreshToken);
     // Perf problem 4: remember whose stats cache the app's own
     // listen/rate actions must dirty (profileStatsCache).
@@ -161,6 +168,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const clearSession = useCallback(async () => {
     refreshTokenRef.current = null;
     setAccessToken(null);
+    // Perf problem 5: logout clears the whole response cache —
+    // the scope listener (below) already does this when the user
+    // id drops; the explicit clear covers every path uniformly.
+    setSessionUserId(null);
+    clearResponseCache();
     await secureRemove(REFRESH_KEY);
     await setSessionUsername(null);
     setUser(null);
@@ -196,9 +208,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     registerSessionExpiredHandler(() => {
       void clearSession();
     });
+    // Perf problem 5: any session-scope change (login as another
+    // account, sign-out) empties the response cache — a previous
+    // account's data must never be served to the next one.
+    registerUserScopeListener(() => clearResponseCache());
     return () => {
       registerRefreshHandler(null);
       registerSessionExpiredHandler(null);
+      registerUserScopeListener(null);
     };
   }, [doRefresh, clearSession]);
 
@@ -219,6 +236,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         if (profile) {
           setAccessToken(DEMO_ACCESS_TOKEN);
+          setSessionUserId(profile.id);
           await setSessionUsername(profile.username);
           setUser(profile);
           setStatus('signedIn');
@@ -234,6 +252,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           const profile = await fetchMe(fresh);
           if (cancelled) return;
+          setSessionUserId(profile.id);
           await setSessionUsername(profile.username);
           setUser(profile);
           setStatus('signedIn');
@@ -291,6 +310,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await secureSet(REFRESH_KEY, result.tokens.refreshToken);
     try {
       const profile = await fetchMe(result.tokens.accessToken);
+      setSessionUserId(profile.id);
+      await setSessionUsername(profile.username);
       setUser(profile);
       setStatus('signedIn');
     } catch {

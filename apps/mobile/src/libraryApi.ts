@@ -10,7 +10,12 @@ import type {
   UpdatePlaylistRequest,
   WatchHistoryResponse,
 } from '@kaikansen/contracts';
-import { ApiRequestError, apiJson, fixtureMode } from './api';
+import {
+  ApiRequestError,
+  apiJson,
+  fixtureMode,
+  type CacheReadOptions,
+} from './api';
 import { getAccessToken } from './session';
 import { markOwnProfileStatsDirty } from './profileStatsCache';
 
@@ -47,10 +52,12 @@ const enc = encodeURIComponent;
 export async function fetchFavorites(
   page = 1,
   limit = 50,
+  opts?: CacheReadOptions,
 ): Promise<FavoritesResponse> {
   if (fixtureMode) return { themes: [], total: 0, page, limit, hasMore: false };
   return apiJson<FavoritesResponse>(
     `/library/favorites?page=${page}&limit=${limit}`,
+    { cache: opts },
   );
 }
 
@@ -81,9 +88,11 @@ export async function fetchFavoriteState(
 /* Watch history                                                       */
 /* ------------------------------------------------------------------ */
 
-export async function fetchHistory(): Promise<WatchHistoryResponse> {
+export async function fetchHistory(
+  opts?: CacheReadOptions,
+): Promise<WatchHistoryResponse> {
   if (fixtureMode) return { entries: [] };
-  return apiJson<WatchHistoryResponse>('/library/history');
+  return apiJson<WatchHistoryResponse>('/library/history', { cache: opts });
 }
 
 /* ------------------------------------------------------------------ */
@@ -104,12 +113,15 @@ export async function fetchHistory(): Promise<WatchHistoryResponse> {
  * `anilistUser` is the linked AniList username (absent entirely when
  * both sides of the union are empty — the web's early return).
  */
-export async function fetchLibraryThemes(): Promise<LibraryThemesResponse> {
+export async function fetchLibraryThemes(
+  opts?: CacheReadOptions,
+): Promise<LibraryThemesResponse> {
   if (fixtureMode) return { themes: [], total: 0, page: 1, limit: 100 };
   const PAGE_LIMIT = 100;
   const MAX_PAGES = 25;
   const first = await apiJson<LibraryThemesResponse>(
     `/library/themes?page=1&limit=${PAGE_LIMIT}`,
+    { cache: opts },
   );
   const themes = [...first.themes];
   let page = 1;
@@ -117,6 +129,7 @@ export async function fetchLibraryThemes(): Promise<LibraryThemesResponse> {
     page += 1;
     const res = await apiJson<LibraryThemesResponse>(
       `/library/themes?page=${page}&limit=${PAGE_LIMIT}`,
+      { cache: opts },
     );
     if (res.themes.length === 0) break;
     themes.push(...res.themes);
@@ -143,6 +156,7 @@ export async function fetchAnilistThemesPage(
   page: number,
   limit: number = ANILIST_GROUP_PAGE_SIZE,
   type?: 'OP' | 'ED',
+  opts?: CacheReadOptions,
 ): Promise<LibraryThemesResponse> {
   if (fixtureMode) {
     return {
@@ -158,6 +172,7 @@ export async function fetchAnilistThemesPage(
   const typeParam = type ? `&type=${type}` : '';
   return apiJson<LibraryThemesResponse>(
     `/library/themes?source=anilist&page=${page}&limit=${limit}${typeParam}`,
+    { cache: opts },
   );
 }
 
@@ -208,18 +223,23 @@ export async function clearRating(
 /* Playlists                                                           */
 /* ------------------------------------------------------------------ */
 
-export async function fetchPlaylists(): Promise<PlaylistsResponse> {
+export async function fetchPlaylists(
+  opts?: CacheReadOptions,
+): Promise<PlaylistsResponse> {
   if (fixtureMode) return { playlists: [] };
-  return apiJson<PlaylistsResponse>('/playlists');
+  return apiJson<PlaylistsResponse>('/playlists', { cache: opts });
 }
 
 /** Public read — resolves null when the playlist does not exist. */
 export async function fetchPlaylist(
   id: string,
+  opts?: CacheReadOptions,
 ): Promise<PlaylistDetail | null> {
   if (fixtureMode) return null;
   try {
-    return await apiJson<PlaylistDetail>(`/playlists/${enc(id)}`);
+    return await apiJson<PlaylistDetail>(`/playlists/${enc(id)}`, {
+      cache: opts,
+    });
   } catch (e) {
     if (e instanceof ApiRequestError && e.status === 404) return null;
     throw e;
