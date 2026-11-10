@@ -1391,7 +1391,7 @@ describe('LibraryService.listLibraryThemes', () => {
     );
   });
 
-  it('does the awaited first sync when there is no stored cache, and persists it', async () => {
+  it('defers the first sync when there is no stored cache: serves what exists, the refresh lands the ids for the next read (B7)', async () => {
     const fetchIds = jest.fn(async () => [42]);
     const { models, service } = makeServiceWithClient({
       fetchLibraryMediaIds: fetchIds,
@@ -1409,16 +1409,68 @@ describe('LibraryService.listLibraryThemes', () => {
       },
     });
 
+    // First open: NO awaited fetch — with nothing stored and no
+    // history, the answer is the honest empty early return (no
+    // AniList meta, no fabricated rows), even though AniList has
+    // ids for this user.
     const res = await service.listLibraryThemes('user-3');
+    expect(res).toEqual({ themes: [], total: 0, page: 1, limit: 50 });
     expect(fetchIds).toHaveBeenCalledWith('token-3', 42);
-    expect(res.themes.map((t) => t.slug)).toEqual(['test_anime-op1-1']);
-    expect(res.anilistSyncDeferred).toBe(false);
-    // No syncedAt was stored, so the pre-fetch state read as stale.
-    expect(res.anilistDataStale).toBe(true);
+
+    // The deferred refresh persists the fetched ids behind the
+    // response.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
     expect(models.userModel.findByIdAndUpdate).toHaveBeenCalledWith(
       'user-3',
       expect.objectContaining({ 'anilist.completedMediaIds': [42] }),
     );
+
+    // The next read serves the synced set fresh, with no further
+    // fetch. (The fake model's applyUpdate cannot resolve the
+    // dotted 'anilist.*' paths, so apply the persisted state the
+    // assertion above verified, as Mongoose would.)
+    const user3 = models.userModel.docs.find((u) => u._id === 'user-3') as {
+      anilist: { completedMediaIds: number[]; syncedAt: Date };
+    };
+    user3.anilist.completedMediaIds = [42];
+    user3.anilist.syncedAt = new Date();
+    const res2 = await service.listLibraryThemes('user-3');
+    expect(res2.themes.map((t) => t.slug)).toEqual(['test_anime-op1-1']);
+    expect(res2.anilistSyncDeferred).toBe(false);
+    expect(res2.anilistDataStale).toBe(false);
+    expect(fetchIds).toHaveBeenCalledTimes(1);
+  });
+
+  it('first sync WITH a watched history serves the history at once, flagged deferred+stale (B7)', async () => {
+    const fetchIds = jest.fn(async () => [42]);
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryMediaIds: fetchIds,
+    });
+    models.userModel.docs.push({
+      _id: 'user-3',
+      username: 'three',
+      totalRatings: 0,
+      totalTime: 0,
+      anilist: {
+        accessToken: 'token-3',
+        userId: 42,
+        username: 'AniThree',
+        completedMediaIds: [],
+      },
+    });
+    models.historyModel.docs.push(
+      { userId: 'user-3', themeId: 'theme-1', themeSlug: 'test_anime-op1-1' },
+    );
+
+    const res = await service.listLibraryThemes('user-3');
+    // The history side answers immediately; the AniList side is
+    // still empty (its ids land with the background refresh).
+    expect(res.themes.map((t) => t.slug)).toEqual(['test_anime-op1-1']);
+    expect(res.anilistSyncDeferred).toBe(true);
+    // No syncedAt was stored, so the AniList state reads as stale.
+    expect(res.anilistDataStale).toBe(true);
+    expect(fetchIds).toHaveBeenCalledWith('token-3', 42);
   });
 
   it('unions in a CURRENT (watching) id from the widened fetch — and /library/count agrees on the same stored set', async () => {
@@ -1451,14 +1503,14 @@ describe('LibraryService.listLibraryThemes', () => {
       }),
     );
 
-    const res = await service.listLibraryThemes('user-3');
-    // Both the completed theme (42) and the watching theme (44)
-    // join the union; 2027 sorts before 2026.
-    expect(res.total).toBe(2);
-    expect(res.themes.map((t) => t.slug)).toEqual([
-      'watching_anime-op1-9',
-      'test_anime-op1-1',
-    ]);
+    // First open: the widened fetch is deferred (B7) — nothing
+    // stored yet, so the answer is the honest empty page while
+    // the refresh fires behind it.
+    const first = await service.listLibraryThemes('user-3');
+    expect(first).toEqual({ themes: [], total: 0, page: 1, limit: 50 });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fetchIds).toHaveBeenCalledWith('token-3', 42);
     // The combined set is what lands in the stored field.
     expect(models.userModel.findByIdAndUpdate).toHaveBeenCalledWith(
       'user-3',
@@ -1470,10 +1522,22 @@ describe('LibraryService.listLibraryThemes', () => {
     // service writes through Mongoose, so apply the persisted
     // state the assertion above verified, as Mongoose would.)
     const user3 = models.userModel.docs.find((u) => u._id === 'user-3') as
-      | { anilist?: { completedMediaIds?: number[] } }
+      | { anilist?: { completedMediaIds?: number[]; syncedAt?: Date } }
       | undefined;
     if (!user3?.anilist) throw new Error('user-3 lost its AniList link');
     user3.anilist.completedMediaIds = [42, 44];
+    user3.anilist.syncedAt = new Date();
+
+    // With the synced set stored fresh, the union read serves
+    // both the completed theme (42) and the watching theme (44);
+    // 2027 sorts before 2026.
+    const res = await service.listLibraryThemes('user-3');
+    expect(res.total).toBe(2);
+    expect(res.themes.map((t) => t.slug)).toEqual([
+      'watching_anime-op1-9',
+      'test_anime-op1-1',
+    ]);
+    expect(fetchIds).toHaveBeenCalledTimes(1);
     // Only the watching theme has an audio source (theme-1's
     // audioUrl is null), so the two endpoints agree on the id set
     // and differ only by the count's audio filter.
@@ -1794,6 +1858,190 @@ describe('LibraryService.listLibraryThemes', () => {
       'alpha-op2',
     ]);
     expect(ops1.hasMore).toBe(true);
+  });
+
+  /**
+   * B7 helper: counts the projected totals passes in the AniList
+   * segment — the only read there that projects `anilistId`.
+   */
+  function countTotalsPasses(models: ReturnType<typeof makeModels>) {
+    const counter = { passes: 0 };
+    const originalFind = models.themeModel.find;
+    models.themeModel.find = jest.fn(
+      (filter: Record<string, unknown>) => {
+        const q = originalFind(filter) as unknown as {
+          select: (projection: string) => unknown;
+        };
+        const baseSelect = q.select.bind(q);
+        q.select = (projection: string) => {
+          if (projection === 'anilistId') counter.passes += 1;
+          return baseSelect(projection);
+        };
+        return q;
+      },
+    ) as never;
+    return counter;
+  }
+
+  const flushDeferred = async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  it('caches the AniList group totals across pages per (user, type), expiring after ~60s — page contents stay live (B7)', async () => {
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryMediaIds: null,
+    });
+    models.userModel.docs.push({
+      _id: 'user-9',
+      username: 'nine',
+      totalRatings: 0,
+      totalTime: 0,
+      anilist: {
+        accessToken: 'token-9',
+        userId: 42,
+        username: 'AniNine',
+        completedMediaIds: [101, 102, 103],
+        syncedAt: new Date(),
+      },
+    });
+    models.themeModel.docs.push(
+      makeTheme({ _id: 'lib-a1', slug: 'alpha-op', animeTitle: 'Alpha', anilistId: 101, type: 'OP' }),
+      makeTheme({ _id: 'lib-a2', slug: 'alpha-ed', animeTitle: 'Alpha', anilistId: 101, type: 'ED' }),
+      makeTheme({ _id: 'lib-b1', slug: 'beta-op', animeTitle: 'Beta', anilistId: 102, type: 'OP' }),
+      makeTheme({ _id: 'lib-b2', slug: 'beta-ed', animeTitle: 'Beta', anilistId: 102, type: 'ED' }),
+      makeTheme({ _id: 'lib-g1', slug: 'gamma-op', animeTitle: 'Gamma', anilistId: 103, type: 'OP' }),
+      makeTheme({ _id: 'lib-g2', slug: 'gamma-ed', animeTitle: 'Gamma', anilistId: 103, type: 'ED' }),
+    );
+    const totals = countTotalsPasses(models);
+
+    const page1 = await service.listLibraryThemes('user-9', 1, 2, undefined, 'anilist');
+    expect(page1.totalGroups).toBe(3);
+    expect(page1.total).toBe(6);
+    expect(totals.passes).toBe(1);
+
+    // Page 2: the totals come from the cache (no second pass),
+    // while the page CONTENTS still come from the live query.
+    const page2 = await service.listLibraryThemes('user-9', 2, 2, undefined, 'anilist');
+    expect(page2.totalGroups).toBe(3);
+    expect(page2.total).toBe(6);
+    expect(page2.themes.map((t) => t.slug)).toEqual(['gamma-op', 'gamma-ed']);
+    expect(totals.passes).toBe(1);
+
+    // A type filter is a different cache key: its totals pass runs.
+    const ops = await service.listLibraryThemes('user-9', 1, undefined, 'OP', 'anilist');
+    expect(ops.total).toBe(3);
+    expect(totals.passes).toBe(2);
+
+    // After the TTL the totals are recomputed.
+    const nowSpy = jest.spyOn(Date, 'now');
+    try {
+      const base = Date.now();
+      nowSpy.mockImplementation(() => base + 61_000);
+      const again = await service.listLibraryThemes('user-9', 1, 2, undefined, 'anilist');
+      expect(again.totalGroups).toBe(3);
+      expect(totals.passes).toBe(3);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('invalidates the cached group totals when a sync lands a NEW id set (B7)', async () => {
+    const fetchIds = jest.fn(async () => [101, 102, 103, 104]);
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryMediaIds: fetchIds,
+    });
+    models.userModel.docs.push({
+      _id: 'user-10',
+      username: 'ten',
+      totalRatings: 0,
+      totalTime: 0,
+      anilist: {
+        accessToken: 'token-10',
+        userId: 42,
+        username: 'AniTen',
+        completedMediaIds: [101, 102, 103],
+        syncedAt: new Date(Date.now() - 7 * 60 * 60 * 1000),
+      },
+    });
+    models.themeModel.docs.push(
+      makeTheme({ _id: 'lib-a1', slug: 'alpha-op', animeTitle: 'Alpha', anilistId: 101, type: 'OP' }),
+      makeTheme({ _id: 'lib-b1', slug: 'beta-op', animeTitle: 'Beta', anilistId: 102, type: 'OP' }),
+      makeTheme({ _id: 'lib-g1', slug: 'gamma-op', animeTitle: 'Gamma', anilistId: 103, type: 'OP' }),
+      makeTheme({ _id: 'lib-d1', slug: 'delta-op', animeTitle: 'Delta', anilistId: 104, type: 'OP', animeSeasonYear: 2027 }),
+    );
+    const totals = countTotalsPasses(models);
+
+    // Stale stored ids are served (3 groups), the totals are
+    // cached, and the refresh fires behind the response.
+    const res1 = await service.listLibraryThemes('user-10', 1, undefined, undefined, 'anilist');
+    expect(res1.totalGroups).toBe(3);
+    expect(res1.anilistSyncDeferred).toBe(true);
+    expect(totals.passes).toBe(1);
+    await flushDeferred();
+    expect(models.userModel.findByIdAndUpdate).toHaveBeenCalledWith(
+      'user-10',
+      expect.objectContaining({ 'anilist.completedMediaIds': [101, 102, 103, 104] }),
+    );
+
+    // The next read (persisted state applied, as Mongoose would)
+    // recomputes the totals over the new set — 4 groups — instead
+    // of serving the cached 3.
+    const user10 = models.userModel.docs.find((u) => u._id === 'user-10') as {
+      anilist: { completedMediaIds: number[]; syncedAt: Date };
+    };
+    user10.anilist.completedMediaIds = [101, 102, 103, 104];
+    user10.anilist.syncedAt = new Date();
+    const res2 = await service.listLibraryThemes('user-10', 1, undefined, undefined, 'anilist');
+    expect(res2.totalGroups).toBe(4);
+    expect(res2.total).toBe(4);
+    expect(totals.passes).toBe(2);
+  });
+
+  it('drops the cached totals on a SAME-set sync too — the id fingerprint alone would have kept them (B7)', async () => {
+    const fetchIds = jest.fn(async () => [101, 102, 103]);
+    const { models, service } = makeServiceWithClient({
+      fetchLibraryMediaIds: fetchIds,
+    });
+    models.userModel.docs.push({
+      _id: 'user-11',
+      username: 'eleven',
+      totalRatings: 0,
+      totalTime: 0,
+      anilist: {
+        accessToken: 'token-11',
+        userId: 42,
+        username: 'AniEleven',
+        completedMediaIds: [101, 102, 103],
+        syncedAt: new Date(Date.now() - 7 * 60 * 60 * 1000),
+      },
+    });
+    models.themeModel.docs.push(
+      makeTheme({ _id: 'lib-a1', slug: 'alpha-op', animeTitle: 'Alpha', anilistId: 101, type: 'OP' }),
+      makeTheme({ _id: 'lib-b1', slug: 'beta-op', animeTitle: 'Beta', anilistId: 102, type: 'OP' }),
+      makeTheme({ _id: 'lib-g1', slug: 'gamma-op', animeTitle: 'Gamma', anilistId: 103, type: 'OP' }),
+    );
+    const totals = countTotalsPasses(models);
+
+    const res1 = await service.listLibraryThemes('user-11', 1, undefined, undefined, 'anilist');
+    expect(res1.totalGroups).toBe(3);
+    expect(totals.passes).toBe(1);
+    await flushDeferred();
+    expect(models.userModel.findByIdAndUpdate).toHaveBeenCalledWith(
+      'user-11',
+      expect.objectContaining({ 'anilist.completedMediaIds': [101, 102, 103] }),
+    );
+
+    // Same ids, fresh syncedAt: within the TTL and with an
+    // identical fingerprint, only the sync's explicit invalidation
+    // explains a recomputation.
+    const user11 = models.userModel.docs.find((u) => u._id === 'user-11') as {
+      anilist: { syncedAt: Date };
+    };
+    user11.anilist.syncedAt = new Date();
+    const res2 = await service.listLibraryThemes('user-11', 1, undefined, undefined, 'anilist');
+    expect(res2.totalGroups).toBe(3);
+    expect(totals.passes).toBe(2);
   });
 
   it('an unrecognised source value keeps the default union (byte-compatible)', async () => {

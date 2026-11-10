@@ -14,6 +14,7 @@ import {
   type QuizRoomAck,
   type QuizRoomPlayer,
   type QuizRoomState,
+  type QuizRoundAnswer,
 } from '@kaikansen/contracts';
 import { User, type UserDocument } from '../auth/user.schema';
 import { Favorite, type FavoriteDocument } from '../library/favorite.schema';
@@ -68,6 +69,10 @@ type RoomThemeDoc = QuizThemeLike & {
 };
 
 type RoomDoc = QuizRoomDocument;
+
+/** One stored round / answer row on a room document. */
+type RoomRound = RoomDoc['rounds'][number];
+type RoomAnswer = RoomRound['answers'][number];
 
 interface RoomModels {
   rooms: Model<QuizRoomDocument>;
@@ -387,7 +392,49 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  /** Room state for clients — the live round's answers stay hidden. */
+  /** The full answer row — live rounds in state, and the round-ended event's payload. */
+  private toRoundAnswer(a: RoomAnswer): QuizRoundAnswer {
+    return {
+      userId: a.userId,
+      submittedAnswer: a.submittedAnswer,
+      correct: a.correct,
+      answeredAt: iso(a.answeredAt),
+      secondsRemaining: a.secondsRemaining,
+      baseScore: a.baseScore,
+      bonusScore: a.bonusScore,
+      totalScoreGained: a.totalScoreGained,
+      autoLocked: a.autoLocked,
+    };
+  }
+
+  /**
+   * The reveal summary of an answer — ENDED rounds in room state
+   * (perf problem 15, B6): exactly the fields the clients read for
+   * a finished round (the reveal list renders userId /
+   * submittedAnswer / correct / totalScoreGained / autoLocked;
+   * standings rebuild from the players' totals, never from past
+   * answers). The per-answer scoring internals (answeredAt,
+   * secondsRemaining, baseScore, bonusScore) are dropped so the
+   * state payload stops growing with every round played; they
+   * remain on the live round's rows and in the round-ended event.
+   */
+  private toRoundAnswerSummary(a: RoomAnswer): QuizRoundAnswer {
+    return {
+      userId: a.userId,
+      submittedAnswer: a.submittedAnswer,
+      correct: a.correct,
+      totalScoreGained: a.totalScoreGained,
+      autoLocked: a.autoLocked,
+    };
+  }
+
+  /**
+   * Room state for clients — the live round's answers stay hidden
+   * (no answer material leaks) and stay FULL; ended rounds carry
+   * only their reveal summary per answer (B6, see above). Round
+   * -level reveal fields (themeId / correctAnswer / theme) are
+   * attached once a round has ended, as before.
+   */
   toRoomState(room: RoomDoc): QuizRoomState {
     return {
       roomId: String(room._id),
@@ -413,17 +460,9 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
           options: round.options,
           startedAt: iso(round.startedAt),
           endedAt: ended ? iso(round.endedAt) : null,
-          answers: round.answers.map((a) => ({
-            userId: a.userId,
-            submittedAnswer: a.submittedAnswer,
-            correct: a.correct,
-            answeredAt: iso(a.answeredAt),
-            secondsRemaining: a.secondsRemaining,
-            baseScore: a.baseScore,
-            bonusScore: a.bonusScore,
-            totalScoreGained: a.totalScoreGained,
-            autoLocked: a.autoLocked,
-          })),
+          answers: round.answers.map((a) =>
+            ended ? this.toRoundAnswerSummary(a) : this.toRoundAnswer(a),
+          ),
           firstCorrectUserId: round.firstCorrectUserId ?? null,
           ...(ended
             ? {
@@ -1956,7 +1995,11 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
 
     this.emit(room, 'room:round-ended', {
       round: room.currentRound,
-      answers: this.toRoomState(room).rounds[room.currentRound - 1].answers,
+      // The event is the live reveal: its answers keep the FULL
+      // row shape (B6 trims only ended rounds inside room STATE;
+      // this payload is built from the stored round directly so
+      // it stays byte-identical to the pre-trim event).
+      answers: round.answers.map((a) => this.toRoundAnswer(a)),
       correctAnswer: round.correctAnswer,
       gameOver: room.status === 'ended',
       players: room.players.map((p) => this.toPlayer(p)),

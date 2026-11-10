@@ -919,6 +919,209 @@ describe('QuizRoomsService — game flow + scoring', () => {
   });
 });
 
+describe('QuizRoomsService — room state trim (perf problem 15, B6)', () => {
+  // The reveal summary kept for an ENDED round's answers in state:
+  // exactly the fields the clients render for a finished round.
+  const SUMMARY_KEYS = [
+    'autoLocked',
+    'correct',
+    'submittedAnswer',
+    'totalScoreGained',
+    'userId',
+  ];
+  // The full stored row — live rounds in state and the
+  // room:round-ended event keep every field.
+  const FULL_KEYS = [
+    'answeredAt',
+    'autoLocked',
+    'baseScore',
+    'bonusScore',
+    'correct',
+    'secondsRemaining',
+    'submittedAnswer',
+    'totalScoreGained',
+    'userId',
+  ];
+
+  type AnyDoc = Record<string, unknown>;
+  const answersOf = (round: AnyDoc) => round.answers as AnyDoc[];
+  const keysOf = (row: unknown) => Object.keys(row as AnyDoc).sort();
+
+  /** A 3-player, 2-round party driven to a finished game. */
+  async function finishedGame(m: ReturnType<typeof makeFakeModels>) {
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      roundCount: 2,
+    });
+    const roomId = create.roomId!;
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    await m.service.joinByCode(GUEST2, create.roomCode!);
+    for (const id of [HOST, GUEST, GUEST2]) {
+      await m.service.toggleReady(id, roomId);
+    }
+    await m.service.startGame(HOST, roomId);
+    const doc = roomDoc(m, roomId);
+    const rounds = doc.rounds as AnyDoc[];
+
+    // Round 1: guest correct, host wrong → guest2 auto-locked.
+    rounds[0].startedAt = new Date(Date.now() - 10_000);
+    const wrong1 = (rounds[0].options as string[]).find(
+      (o) => o !== rounds[0].correctAnswer,
+    )!;
+    await m.service.submitAnswer(GUEST, roomId, 1, rounds[0].correctAnswer as string);
+    await m.service.submitAnswer(HOST, roomId, 1, wrong1);
+    expect(rounds[0].endedAt).toBeTruthy();
+
+    // Round 2: host correct, guest2 wrong → guest auto-locked;
+    // the game ends. The rewind is deeper than round 1's so the
+    // host's gain is strictly smaller — the standings comparison
+    // below must not hinge on tie order.
+    await m.service.nextRound(HOST, roomId, 1);
+    rounds[1].startedAt = new Date(Date.now() - 15_000);
+    const wrong2 = (rounds[1].options as string[]).find(
+      (o) => o !== rounds[1].correctAnswer,
+    )!;
+    await m.service.submitAnswer(HOST, roomId, 2, rounds[1].correctAnswer as string);
+    await m.service.submitAnswer(GUEST2, roomId, 2, wrong2);
+    expect(rounds[1].endedAt).toBeTruthy();
+    expect(doc.status).toBe('ended');
+    return { roomId, doc, rounds };
+  }
+
+  it('ended rounds carry only the reveal summary per answer; standings + results rebuild identically from it', async () => {
+    const m = makeFakeModels();
+    const { roomId, doc, rounds } = await finishedGame(m);
+
+    const state = m.service.toRoomState(doc as never);
+    expect(state.status).toBe('ended');
+    expect(state.rounds).toHaveLength(2);
+
+    // Every ended round: trimmed answer rows, exact key set, and
+    // the round-level reveal fields intact.
+    for (const round of state.rounds) {
+      expect(round.endedAt).toBeTruthy();
+      expect(round.themeId).toBeTruthy();
+      expect(round.correctAnswer).toBeTruthy();
+      expect(round.theme?.songTitle).toBeTruthy();
+      for (const a of round.answers) {
+        expect(keysOf(a)).toEqual(SUMMARY_KEYS);
+      }
+    }
+    // No scoring internals anywhere in a finished game's state.
+    expect(JSON.stringify(state)).not.toContain('"baseScore"');
+    expect(JSON.stringify(state)).not.toContain('"secondsRemaining"');
+
+    // REBUILD 1 — the reveal: projecting the stored full rows
+    // onto the summary fields reproduces the state's answers
+    // exactly, round by round (nothing a client renders is lost).
+    const project = (a: AnyDoc) => ({
+      userId: a.userId,
+      submittedAnswer: a.submittedAnswer,
+      correct: a.correct,
+      totalScoreGained: a.totalScoreGained,
+      autoLocked: a.autoLocked,
+    });
+    for (const [i, stored] of rounds.entries()) {
+      expect(state.rounds[i].answers).toEqual(answersOf(stored).map(project));
+      expect(state.rounds[i].correctAnswer).toBe(stored.correctAnswer);
+      expect(state.rounds[i].firstCorrectUserId).toBe(
+        stored.firstCorrectUserId ?? null,
+      );
+    }
+
+    // REBUILD 2 — the standings: totals summed from the stored
+    // full answers equal the state's player totals, and the
+    // ranking a client derives from the state is the ranking the
+    // full data produces.
+    const totals = new Map<string, number>();
+    for (const stored of rounds) {
+      for (const a of answersOf(stored)) {
+        totals.set(
+          a.userId as string,
+          (totals.get(a.userId as string) ?? 0) + (a.totalScoreGained as number),
+        );
+      }
+    }
+    for (const p of state.players) {
+      expect(p.totalScore).toBe(totals.get(p.userId) ?? 0);
+    }
+    const rankFromState = [...state.players]
+      .sort((x, y) => y.totalScore - x.totalScore)
+      .map((p) => p.userId);
+    const rankFromFull = [...totals.entries()]
+      .sort((x, y) => y[1] - x[1])
+      .map(([userId]) => userId);
+    expect(rankFromState).toEqual(rankFromFull);
+
+    // RECONNECT: the subscribe ack (what a rejoining or spectator
+    // client rebuilds from) carries the same trimmed state.
+    const ack = await m.service.getRoomStateForMember(GUEST, roomId);
+    expect(ack.room?.status).toBe('ended');
+    for (const round of ack.room!.rounds) {
+      for (const a of round.answers) {
+        expect(keysOf(a)).toEqual(SUMMARY_KEYS);
+      }
+    }
+    expect(ack.room?.players).toEqual(state.players);
+  });
+
+  it('the room:round-ended EVENT keeps the full answer rows (the live reveal is not trimmed)', async () => {
+    const m = makeFakeModels();
+    await finishedGame(m);
+    const endedEvents = m.events.filter((e) => e.event === 'room:round-ended');
+    expect(endedEvents).toHaveLength(2);
+    for (const e of endedEvents) {
+      const answers = e.payload.answers as AnyDoc[];
+      expect(answers.length).toBeGreaterThan(0);
+      for (const a of answers) {
+        expect(keysOf(a)).toEqual(FULL_KEYS);
+      }
+    }
+  });
+
+  it('the LIVE round keeps full answers in state while finished rounds are trimmed', async () => {
+    const m = makeFakeModels();
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      roundCount: 2,
+    });
+    const roomId = create.roomId!;
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    await m.service.joinByCode(GUEST2, create.roomCode!);
+    for (const id of [HOST, GUEST, GUEST2]) {
+      await m.service.toggleReady(id, roomId);
+    }
+    await m.service.startGame(HOST, roomId);
+    const doc = roomDoc(m, roomId);
+    const rounds = doc.rounds as AnyDoc[];
+
+    // Finish round 1 (guest correct, host wrong, guest2 locked).
+    rounds[0].startedAt = new Date(Date.now() - 10_000);
+    const wrong1 = (rounds[0].options as string[]).find(
+      (o) => o !== rounds[0].correctAnswer,
+    )!;
+    await m.service.submitAnswer(GUEST, roomId, 1, rounds[0].correctAnswer as string);
+    await m.service.submitAnswer(HOST, roomId, 1, wrong1);
+
+    // Round 2 starts; one answer lands and the round stays live.
+    await m.service.nextRound(HOST, roomId, 1);
+    rounds[1].startedAt = new Date(Date.now() - 10_000);
+    await m.service.submitAnswer(GUEST, roomId, 2, rounds[1].correctAnswer as string);
+    expect(rounds[1].endedAt).toBeFalsy();
+
+    const state = m.service.toRoomState(doc as never);
+    // Round 1 (ended): trimmed.
+    for (const a of state.rounds[0].answers) {
+      expect(keysOf(a)).toEqual(SUMMARY_KEYS);
+    }
+    // Round 2 (live): full rows, no reveal material leaked.
+    expect(state.rounds[1].answers).toHaveLength(1);
+    expect(keysOf(state.rounds[1].answers[0])).toEqual(FULL_KEYS);
+    expect(state.rounds[1].correctAnswer).toBeUndefined();
+    expect(state.rounds[1].themeId).toBeUndefined();
+  });
+});
+
 describe('QuizRoomsService — party cap 4 (owner spec, 2026-11-10)', () => {
   it('clamps create sizes into 2–4 and defaults unset to 4', async () => {
     const m = makeFakeModels();

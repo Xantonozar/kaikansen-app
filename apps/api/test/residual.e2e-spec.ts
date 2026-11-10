@@ -662,21 +662,38 @@ describe('Residual reads with mocked models (e2e)', () => {
     expect(anilistLibraryStub.fetchLibraryMediaIds).not.toHaveBeenCalled();
   });
 
-  it('GET /library/themes — first sync fetches, persists, and serves the fetched ids', async () => {
+  it('GET /library/themes — first sync is DEFERRED: serves what exists, the refresh persists the fetched ids (B7)', async () => {
     const res = await request(app.getHttpServer())
       .get('/library/themes')
       .set(asUser('user-3'))
       .expect(200);
-    // The stub's [200] is other-anime-op's anilistId.
-    expect(res.body.themes.map((t: Doc) => t.slug)).toEqual(['other-anime-op']);
-    expect(res.body.anilistUser).toBe('AniThree');
+    // Nothing stored and no history: the honest empty page — the
+    // fetched ids were NOT awaited inline (the pre-B7 behaviour
+    // served them in this very response).
+    expect(res.body.themes).toEqual([]);
+    expect(res.body.total).toBe(0);
     expect(anilistLibraryStub.fetchLibraryMediaIds).toHaveBeenCalledWith(
       'tok-3',
       7,
     );
+    // The deferred refresh persists the fetched ids behind the
+    // response.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
     const user3 = models.userModel.docs.find((u) => u._id === 'user-3') as Doc;
     expect((user3.anilist as Doc).completedMediaIds).toEqual([200]);
     expect((user3.anilist as Doc).syncedAt).toBeInstanceOf(Date);
+
+    // The next read serves the synced set fresh: the stub's [200]
+    // is other-anime-op's anilistId.
+    const res2 = await request(app.getHttpServer())
+      .get('/library/themes')
+      .set(asUser('user-3'))
+      .expect(200);
+    expect(res2.body.themes.map((t: Doc) => t.slug)).toEqual(['other-anime-op']);
+    expect(res2.body.anilistUser).toBe('AniThree');
+    expect(res2.body.anilistSyncDeferred).toBe(false);
+    expect(anilistLibraryStub.fetchLibraryMediaIds).toHaveBeenCalledTimes(1);
   });
 
   it('GET /library/count — reads the same persisted AniList set the themes sync stored', async () => {

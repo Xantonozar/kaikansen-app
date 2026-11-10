@@ -59,6 +59,26 @@ const FAVORITES_DEFAULT_LIMIT = 50;
 const ANILIST_GROUP_DEFAULT_LIMIT = 10;
 const ANILIST_GROUP_LIMIT_CAP = 50;
 
+/**
+ * Perf problem 15 (B7): how long the AniList source's group-order
+ * totals stay cached per (user, type filter), in memory. Only the
+ * TOTALS are cached — group order + theme count, the values the
+ * projected pass over the full matching set produces; every page's
+ * themes are still read live. An entry also pins the media-id
+ * fingerprint it was computed from, and a landed sync drops the
+ * user's entries outright (see refreshStoredLibraryIds), so a hit
+ * can never serve totals computed from a superseded id set.
+ */
+const ANILIST_GROUP_TOTALS_TTL_MS = 60_000;
+
+interface AnilistGroupTotals {
+  /** Fingerprint of the AniList media-id set the totals came from. */
+  fingerprint: string;
+  groupOrder: number[];
+  totalThemes: number;
+  expiresAt: number;
+}
+
 interface LibraryModels {
   themes: Model<ThemeCacheDocument>;
   users: Model<UserDocument>;
@@ -129,6 +149,32 @@ export class LibraryService {
     @Optional()
     private readonly profileStats?: ProfileStatsMaintenance,
   ) {}
+
+  /**
+   * B7 group-totals cache (see ANILIST_GROUP_TOTALS_TTL_MS),
+   * keyed `${userId}|${type ?? ''}`.
+   */
+  private readonly anilistGroupTotals = new Map<string, AnilistGroupTotals>();
+
+  /** The id SET defines the totals, not the stored order — hash a sorted copy. */
+  private anilistIdsFingerprint(ids: number[]): string {
+    const sorted = [...ids].sort((a, b) => a - b);
+    let hash = 0;
+    for (const id of sorted) {
+      hash = (hash * 31 + id) | 0;
+    }
+    return `${sorted.length}:${hash}`;
+  }
+
+  /** Drop every cached totals entry a user holds (a sync landed). */
+  private invalidateAnilistGroupTotals(userId: unknown): void {
+    const prefix = `${String(userId)}|`;
+    for (const key of this.anilistGroupTotals.keys()) {
+      if (key.startsWith(prefix)) {
+        this.anilistGroupTotals.delete(key);
+      }
+    }
+  }
 
   private requireModels(): LibraryModels {
     if (
@@ -524,7 +570,8 @@ export class LibraryService {
    * web: the AniList set covers COMPLETED + CURRENT (watching),
    * not the web's COMPLETED only — see AnilistLibraryClient.
    *
-   * The AniList side mirrors the web's cache dance exactly:
+   * The AniList side mirrors the web's cache dance, with ONE
+   * deliberate widening (perf problem 15, B7):
    * - the stored completedMediaIds are served as-is while fresh
    *   (syncedAt within 6 hours);
    * - stale WITH a stored cache: the stored ids are served, a
@@ -532,9 +579,13 @@ export class LibraryService {
    *   on the user document for next time — fire-and-forget, its
    *   failures swallowed), and the response flags
    *   anilistSyncDeferred + anilistDataStale;
-   * - no cache (or an empty one): a single awaited fetch under the
-   *   web's 1500 ms timeout; a non-empty result is persisted to
-   *   the user document before the response.
+   * - no cache (or an empty one): the web AWAITS one fetch under
+   *   its 1500 ms timeout here; since B7 this API defers it
+   *   exactly like the stale branch — what exists (possibly
+   *   nothing) is served, the refresh fires behind the response,
+   *   and the same two flags are set — so a first Library open
+   *   never blocks on AniList. The empty first-open page is the
+   *   honest empty state, never fabricated rows.
    * When NEITHER side yields anything, the web answers early with
    * an empty page whose meta carries NO AniList fields — mirrored
    * (the response simply omits them).
@@ -559,6 +610,9 @@ export class LibraryService {
    * has always grouped by — computed from ONE projected pass over
    * the matching set (anilistId only), so the totals cost no full
    * serialisation; only the page's own themes are read whole.
+   * Since B7 the pass's totals are cached per (user, type) for
+   * ~60 s (invalidated when a sync lands), so paging through the
+   * segment does not re-run the pass per page.
    *
    * Not-found: the caller's document being gone is the web's 404
    * 'User not found'; kept, in this module's style.
@@ -618,34 +672,23 @@ export class LibraryService {
       anilistDataStale = isStale;
 
       if (mediaIds.length === 0 || isStale) {
-        if (mediaIds.length > 0 && isStale) {
-          // Stale but cached: serve the cache, refresh behind the
-          // response (the web's deferred branch, verbatim intent).
-          anilistSyncDeferred = true;
-          void this.refreshStoredLibraryIds(
-            models,
-            user._id,
-            accessToken,
-            anilistUserId,
-          );
-        } else {
-          // First sync (or an empty cache): one awaited attempt.
-          const freshIds = this.anilistLibrary
-            ? await this.anilistLibrary.fetchLibraryMediaIds(
-                accessToken,
-                anilistUserId,
-              )
-            : null;
-          if (freshIds && freshIds.length > 0) {
-            mediaIds = freshIds;
-            await models.users
-              .findByIdAndUpdate(user._id, {
-                'anilist.completedMediaIds': mediaIds,
-                'anilist.syncedAt': new Date(),
-              })
-              .exec();
-          }
-        }
+        // Stale WITH a cache and first-ever/empty sync alike
+        // (perf problem 15, B7): serve what exists — the stored
+        // ids, or nothing — and refresh behind the response, so
+        // no Library open ever waits on AniList inline. (The web's
+        // deferred branch, generalised from the stale case to the
+        // first sync: its awaited fetch cost a first open up to
+        // the client's 1500 ms timeout.) The empty first-open
+        // state is the honest empty page — never fabricated rows —
+        // and the refreshed ids land on the user document for the
+        // next read.
+        anilistSyncDeferred = true;
+        void this.refreshStoredLibraryIds(
+          models,
+          user._id,
+          accessToken,
+          anilistUserId,
+        );
       }
       anilistMediaIds = mediaIds;
     }
@@ -686,23 +729,46 @@ export class LibraryService {
       // Group pagination: one projected pass over the matching set
       // in the served order fixes the group order (first appearance
       // in that order) and the per-group counts; the page then reads
-      // ONLY its own groups' themes, whole.
-      const idRows = (await models.themes
-        .find(filter)
-        .sort({ animeSeasonYear: -1, animeTitle: 1 })
-        .select('anilistId')
-        .lean()
-        .exec()) as unknown as { anilistId: number }[];
-      const groupOrder: number[] = [];
-      const seenGroups = new Set<number>();
-      for (const row of idRows) {
-        if (!seenGroups.has(row.anilistId)) {
-          seenGroups.add(row.anilistId);
-          groupOrder.push(row.anilistId);
+      // ONLY its own groups' themes, whole. The pass's OUTPUT (the
+      // totals) is cached per (user, type) for ~60s (B7) — pages
+      // 2..N and repeat opens reuse it instead of re-running the
+      // pass; the page read below always stays live.
+      const totalsKey = `${String(user._id)}|${type ?? ''}`;
+      const fingerprint = this.anilistIdsFingerprint(anilistMediaIds);
+      const cachedTotals = this.anilistGroupTotals.get(totalsKey);
+      let groupOrder: number[];
+      let totalThemes: number;
+      if (
+        cachedTotals &&
+        cachedTotals.fingerprint === fingerprint &&
+        cachedTotals.expiresAt > Date.now()
+      ) {
+        groupOrder = cachedTotals.groupOrder;
+        totalThemes = cachedTotals.totalThemes;
+      } else {
+        const idRows = (await models.themes
+          .find(filter)
+          .sort({ animeSeasonYear: -1, animeTitle: 1 })
+          .select('anilistId')
+          .lean()
+          .exec()) as unknown as { anilistId: number }[];
+        groupOrder = [];
+        const seenGroups = new Set<number>();
+        for (const row of idRows) {
+          if (!seenGroups.has(row.anilistId)) {
+            seenGroups.add(row.anilistId);
+            groupOrder.push(row.anilistId);
+          }
         }
+        totalThemes = idRows.length;
+        this.anilistGroupTotals.set(totalsKey, {
+          fingerprint,
+          groupOrder,
+          totalThemes,
+          expiresAt: Date.now() + ANILIST_GROUP_TOTALS_TTL_MS,
+        });
       }
       const totalGroups = groupOrder.length;
-      const totalThemes = idRows.length;
       const pageIds = groupOrder.slice(
         (safePage - 1) * groupLimit,
         safePage * groupLimit,
@@ -781,6 +847,12 @@ export class LibraryService {
             'anilist.syncedAt': new Date(),
           })
           .exec();
+        // B7: a landed sync supersedes any cached group totals
+        // for this user. (The entries' id fingerprint would catch
+        // a changed set on its own; the explicit drop also covers
+        // a same-set refresh, whose totals may still have moved
+        // with the catalogue.)
+        this.invalidateAnilistGroupTotals(userId);
       }
     } catch {
       // Best-effort refresh — a failure leaves the stored cache as-is.

@@ -980,15 +980,24 @@ export interface QuizRoomPlayer {
   lastSeenAt: string;
 }
 
-/** One recorded answer inside a round — the web `rounds[].answers[]` shape. */
+/**
+ * One recorded answer inside a round — the web `rounds[].answers[]`
+ * shape. The scoring internals (answeredAt / secondsRemaining /
+ * baseScore / bonusScore) are present on the LIVE round's rows and
+ * in the `room:round-ended` event, but are OMITTED from ended
+ * rounds inside room state (perf problem 15, B6): there an answer
+ * is its reveal summary — userId, submittedAnswer, correct,
+ * totalScoreGained, autoLocked — exactly what clients render for
+ * a finished round, so state payloads stop growing all game.
+ */
 export interface QuizRoundAnswer {
   userId: string;
   submittedAnswer: string;
   correct: boolean;
-  answeredAt: string;
-  secondsRemaining: number;
-  baseScore: number;
-  bonusScore: number;
+  answeredAt?: string;
+  secondsRemaining?: number;
+  baseScore?: number;
+  bonusScore?: number;
   totalScoreGained: number;
   autoLocked: boolean;
 }

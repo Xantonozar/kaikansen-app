@@ -178,3 +178,29 @@ export class ThemeCache {
 }
 
 export const ThemeCacheSchema = SchemaFactory.createForClass(ThemeCache);
+
+/**
+ * Perf problem 15 (B8) — season read index, declared AFTER the
+ * factory in the web schema's own style (its
+ * `ThemeCacheSchema.index(...)` block, lib/models/index.ts).
+ * The season read (ThemesService.getSeasonThemes) filters
+ * { animeSeason, animeSeasonYear } and sorts
+ * { sequence: 1, avgRating: -1 }; the web declares only the
+ * filter pair ({ animeSeason: 1, animeSeasonYear: 1 }), so its
+ * sort runs in memory — this compound covers filter + sort.
+ *
+ * DECLARATION ONLY: `autoIndex: false` above (and no autoIndex
+ * override in the module wiring, and nothing in this backend
+ * calls syncIndexes/createIndexes) means Mongoose will NOT build
+ * this index on deploy — by design, this backend never creates
+ * indexes on the shared production collection. Creating it on
+ * the live cluster is a follow-up for the guarded ensure route,
+ * alongside the Atlas Search indexes; until then the declaration
+ * records the intent and pins the query shape in tests.
+ */
+ThemeCacheSchema.index({
+  animeSeason: 1,
+  animeSeasonYear: 1,
+  sequence: 1,
+  avgRating: -1,
+});
