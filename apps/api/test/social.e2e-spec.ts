@@ -634,6 +634,14 @@ describe('Social flow with mocked models (e2e)', () => {
         avatarUrl: 'https://example.com/alice.png',
         bio: 'Alice bio',
         tier: 'academy',
+        // No rank document → the 0 RP ladder standing.
+        ladder: {
+          rank: 'academy-student',
+          index: 0,
+          nextRank: 'mizunoto',
+          toNext: 250,
+          fraction: 0,
+        },
       },
     ]);
     expect(network.body.followers[0]).not.toHaveProperty('isFollowing');
@@ -709,6 +717,14 @@ describe('Social flow with mocked models (e2e)', () => {
         avatarUrl: null,
         bio: '',
         tier: 'genin',
+        // Bob's seeded 500 RP derives the ladder Genin standing.
+        ladder: {
+          rank: 'genin',
+          index: 3,
+          nextRank: 'shinobi',
+          toNext: 500,
+          fraction: 50 / 550,
+        },
         isFollowing: true,
       },
     ]);

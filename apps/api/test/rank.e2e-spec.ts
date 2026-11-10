@@ -313,6 +313,16 @@ describe('Rank with mocked models (e2e)', () => {
       tier: 'genin',
       division: 3,
       tierFloor: 400,
+      // The additive ladder standing (app ladder 2026-11-10):
+      // 900 RP → Chunin, target Assassin, peak = the same rank.
+      ladder: {
+        rank: 'chunin',
+        index: 4,
+        nextRank: 'assassin',
+        toNext: 500,
+        fraction: 200 / 700,
+        peakRank: 'chunin',
+      },
       currentWinStreak: 1,
       longestWinStreak: 4,
       stats: {
@@ -323,6 +333,7 @@ describe('Rank with mocked models (e2e)', () => {
         winRate: 0.6,
         peakRP: 900,
         peakTier: 'genin',
+        peakLadderRank: 'chunin',
       },
       season: {
         seasonId: 'all-time',
@@ -379,6 +390,13 @@ describe('Rank with mocked models (e2e)', () => {
       rp: 900,
       tier: 'genin',
       division: 3,
+      ladder: {
+        rank: 'chunin',
+        index: 4,
+        nextRank: 'assassin',
+        toNext: 500,
+        fraction: 200 / 700,
+      },
       wins: 6,
       winRate: 0.6,
     });
@@ -418,6 +436,14 @@ describe('Rank with mocked models (e2e)', () => {
         rp: 950,
         tier: 'genin',
         division: 3,
+        // 950 RP derives the same Chunin standing, 450 to Assassin.
+        ladder: {
+          rank: 'chunin',
+          index: 4,
+          nextRank: 'assassin',
+          toNext: 450,
+          fraction: 250 / 700,
+        },
         wins: 7,
         winRate: 0.7,
       },

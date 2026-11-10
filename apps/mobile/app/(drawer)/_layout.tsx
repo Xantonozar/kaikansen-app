@@ -42,6 +42,7 @@ export default function DrawerLayout() {
       <Drawer.Screen name="player" options={{ drawerItemStyle: { display: 'none' } }} />
       <Drawer.Screen name="quiz/solo" options={{ drawerItemStyle: { display: 'none' } }} />
       <Drawer.Screen name="quiz/leaderboard" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen name="quiz/ladder" options={{ drawerItemStyle: { display: 'none' } }} />
       <Drawer.Screen name="quiz/lobby" options={{ drawerItemStyle: { display: 'none' } }} />
       <Drawer.Screen name="quiz/create" options={{ drawerItemStyle: { display: 'none' } }} />
       <Drawer.Screen name="quiz/room" options={{ drawerItemStyle: { display: 'none' } }} />

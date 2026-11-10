@@ -6,6 +6,7 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Types, type Model } from 'mongoose';
 import type {
+  LadderStanding,
   PlayerRankSummary,
   PlayerRanksResponse,
   RankLeaderboardEntry,
@@ -14,6 +15,7 @@ import type {
   UserRankProfile,
 } from '@kaikansen/contracts';
 import { User, type UserDocument } from '../auth/user.schema';
+import { ladderForRp } from '../quiz/quiz-game.utils';
 import { UserRank, type UserRankDocument } from '../quiz/user-rank.schema';
 import {
   LeaderboardSnapshot,
@@ -130,13 +132,22 @@ export class RankReadService {
   }
 
   private toProfile(doc: UserRankDoc): UserRankProfile {
+    const rp = doc.rp ?? 0;
+    const peakRP = doc.stats?.peakRP ?? 0;
     return {
       id: String(doc._id),
       userId: doc.userId,
-      rp: doc.rp ?? 0,
+      rp,
       tier: (doc.tier ?? 'academy') as RankTier,
       division: doc.division ?? null,
       tierFloor: doc.tierFloor ?? 0,
+      // The app's 24-rank ladder, derived from RP at read time
+      // (additive — the stored document is never touched; the
+      // peak standing rides along on the same object).
+      ladder: {
+        ...ladderForRp(rp),
+        peakRank: ladderForRp(peakRP).rank,
+      } satisfies LadderStanding,
       currentWinStreak: doc.currentWinStreak ?? 0,
       longestWinStreak: doc.longestWinStreak ?? 0,
       stats: {
@@ -145,8 +156,9 @@ export class RankReadService {
         losses: doc.stats?.losses ?? 0,
         draws: doc.stats?.draws ?? 0,
         winRate: doc.stats?.winRate ?? 0,
-        peakRP: doc.stats?.peakRP ?? 0,
+        peakRP,
         peakTier: (doc.stats?.peakTier ?? 'academy') as RankTier,
+        peakLadderRank: ladderForRp(peakRP).rank,
       },
       season: {
         seasonId: doc.season?.seasonId ?? 'all-time',
@@ -207,12 +219,19 @@ export class RankReadService {
           userId: String(d.userId),
           tier: (d.tier ?? 'academy') as RankTier,
           rp: d.rp ?? 0,
+          ladder: ladderForRp(d.rp ?? 0),
         } satisfies PlayerRankSummary,
       ]),
     );
     return {
       players: unique.map(
-        (id) => byId.get(id) ?? { userId: id, tier: 'academy', rp: 0 },
+        (id) =>
+          byId.get(id) ?? {
+            userId: id,
+            tier: 'academy',
+            rp: 0,
+            ladder: ladderForRp(0),
+          },
       ),
     };
   }
@@ -259,6 +278,7 @@ export class RankReadService {
           rp: entry.rp,
           tier: entry.tier as RankTier,
           division: entry.division ?? null,
+          ladder: ladderForRp(entry.rp ?? 0),
           username: entry.username,
           // The web's snapshot map serves the username as the
           // displayName. Mirrored quirk.
@@ -311,6 +331,7 @@ export class RankReadService {
         rp: rank.rp ?? 0,
         tier: (rank.tier ?? 'academy') as RankTier,
         division: rank.division ?? null,
+        ladder: ladderForRp(rank.rp ?? 0),
         username: user.username,
         displayName: user.displayName,
         avatarUrl: user.avatarUrl ?? null,

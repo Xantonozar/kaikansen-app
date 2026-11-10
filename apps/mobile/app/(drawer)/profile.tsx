@@ -13,7 +13,6 @@ import {
   ChevronRight,
   Download,
   History,
-  Medal,
   Pencil,
   RefreshCw,
   Settings as SettingsIcon,
@@ -24,12 +23,7 @@ import { fixtureMode } from '../../src/api';
 import { useAuth } from '../../src/auth';
 import { fetchMe } from '../../src/authApi';
 import { Avatar } from '../../src/components/Avatar';
-import {
-  divisionChip,
-  formatRp,
-  tierLabel,
-  tierProgress,
-} from '../../src/rankUtil';
+import { RankProfileCard } from '../../src/components/RankCard';
 import { getAccessToken } from '../../src/session';
 import { fetchMyRank } from '../../src/socialApi';
 import {
@@ -53,11 +47,13 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * kaikansen-profile-v2-candidate): ONE hero card holding the
  * centered identity (avatar with a pencil badge, name, @handle),
  * the inline "N Followers · N Following" line ABOVE a full-width
- * Edit Profile pill, a divider, and the rank row (medal disc,
- * tier + division chip, RP, "N RP to next", progress bar) — then
- * the divided listening-stats card (Mean Rating · Themes
- * Listened · Hours Listened), the five-row menu card, and Log
- * Out. No banner, no AniList-connected pill.
+ * Edit Profile pill — then the divided listening-stats card
+ * (Mean Rating · Themes Listened · Hours Listened), the
+ * standalone QUIZ RANK card (the approved rank mock's placement
+ * — icon tile, "Jonin · N RP", bar, "View full ladder ›",
+ * opening /quiz/ladder; it supersedes the earlier hero-embedded
+ * rank row), the five-row menu card, and Log Out. No banner, no
+ * AniList-connected pill.
  *
  * Data: identity + stats ride GET /auth/me (the session profile,
  * refreshed on mount so the aggregates are current — register /
@@ -154,9 +150,6 @@ export default function OwnProfileScreen() {
   const stats = user?.stats;
   const followers = stats?.followersCount ?? user?.totalFollowers ?? 0;
   const following = stats?.followingCount ?? user?.totalFollowing ?? 0;
-
-  const progress = rank ? tierProgress(rank.rp, rank.tier) : null;
-  const chip = rank ? divisionChip(rank.division) : null;
 
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -266,57 +259,6 @@ export default function OwnProfileScreen() {
                 <Text style={styles.editPillText}>Edit Profile</Text>
               </Pressable>
 
-              {rank && progress ? (
-                <>
-                  <View style={styles.heroDivider} />
-                  <View style={styles.rankHeadRow}>
-                    <View style={styles.rankDisc}>
-                      <Medal size={20} color={theme.accent} strokeWidth={2} />
-                    </View>
-                    <View style={styles.rankNameBlock}>
-                      <View style={styles.rankTierRow}>
-                        <Text style={styles.rankTierName}>
-                          {tierLabel(rank.tier)}
-                        </Text>
-                        {chip && (
-                          <View style={styles.rankChip}>
-                            <Text style={styles.rankChipText}>{chip}</Text>
-                          </View>
-                        )}
-                      </View>
-                      <Text style={styles.rankRp}>{formatRp(rank.rp)}</Text>
-                    </View>
-                    {progress.nextTier && (
-                      <Text style={styles.rankToNext}>
-                        {progress.toNext.toLocaleString('en-US')} RP to{' '}
-                        {tierLabel(progress.nextTier)}
-                      </Text>
-                    )}
-                  </View>
-                  <View style={styles.rankBarTrack}>
-                    <View
-                      style={[
-                        styles.rankBarFill,
-                        {
-                          width: `${Math.round(progress.fraction * 100)}%`,
-                        },
-                      ]}
-                    />
-                  </View>
-                </>
-              ) : rankLoading ? (
-                <>
-                  <View style={styles.heroDivider} />
-                  <View
-                    style={styles.rankSkeleton}
-                    accessibilityLabel="Loading your rank"
-                  >
-                    <View style={styles.rankDisc} />
-                    <View style={styles.rankSkeletonBar} />
-                  </View>
-                  <View style={styles.rankBarTrack} />
-                </>
-              ) : null}
             </View>
 
             <View style={styles.statsCard}>
@@ -335,6 +277,24 @@ export default function OwnProfileScreen() {
                 true,
               )}
             </View>
+
+            {rank ? (
+              <RankProfileCard
+                profile={rank}
+                onOpenLadder={() => router.push('/quiz/ladder')}
+              />
+            ) : rankLoading ? (
+              <View
+                style={styles.rankSkeletonCard}
+                accessibilityLabel="Loading your rank"
+              >
+                <View style={styles.rankSkeletonDisc} />
+                <View style={styles.rankSkeletonLines}>
+                  <View style={styles.rankSkeletonBar} />
+                  <View style={styles.rankSkeletonBarShort} />
+                </View>
+              </View>
+            ) : null}
 
             <View style={styles.menuCard}>
               {menuRow(History, 'Listening History', () =>
@@ -500,86 +460,37 @@ const createStyles = (theme: Theme) =>
       fontFamily: fontFamilies.bodyStrong,
       color: theme.onAccentContainer,
     },
-    heroDivider: {
-      alignSelf: 'stretch',
-      borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: theme.border,
-      marginTop: spacing.xl,
-      marginBottom: spacing.lg,
-    },
-    rankHeadRow: {
+    /* The rank card's loading shell (RankProfileCard's shape:
+       an icon tile beside two lines). */
+    rankSkeletonCard: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
-      alignSelf: 'stretch',
+      gap: spacing.lg,
+      backgroundColor: theme.surface,
+      borderRadius: radii.card,
+      padding: spacing.xl,
+      marginTop: 14,
     },
-    rankDisc: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      backgroundColor: theme.accentContainer,
-      alignItems: 'center',
-      justifyContent: 'center',
+    rankSkeletonDisc: {
+      width: 84,
+      height: 84,
+      borderRadius: 20,
+      backgroundColor: theme.raised,
     },
-    rankNameBlock: {
+    rankSkeletonLines: {
       flex: 1,
-      gap: 2,
-    },
-    rankTierRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 6,
-    },
-    rankTierName: {
-      ...typeStyles.display,
-      fontSize: 16,
-      color: theme.text,
-    },
-    rankChip: {
-      backgroundColor: theme.accentContainer,
-      borderRadius: 4,
-      paddingHorizontal: 6,
-      paddingVertical: 2,
-    },
-    rankChipText: {
-      fontFamily: fontFamilies.bodyStrong,
-      fontSize: 10,
-      color: theme.onAccentContainer,
-    },
-    rankRp: {
-      fontFamily: fontFamilies.caption,
-      fontSize: 12,
-      color: theme.muted,
-    },
-    rankToNext: {
-      fontFamily: fontFamilies.bodyStrong,
-      fontSize: 12,
-      color: theme.muted,
-      textAlign: 'right',
-    },
-    rankBarTrack: {
-      height: 8,
-      borderRadius: 4,
-      backgroundColor: theme.accentContainer,
-      overflow: 'hidden',
-      alignSelf: 'stretch',
-      marginTop: 10,
-    },
-    rankBarFill: {
-      height: '100%',
-      borderRadius: 4,
-      backgroundColor: theme.accent,
-    },
-    rankSkeleton: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
-      alignSelf: 'stretch',
+      gap: spacing.sm,
     },
     rankSkeletonBar: {
-      flex: 1,
-      height: 12,
-      borderRadius: 6,
+      width: '70%',
+      height: 14,
+      borderRadius: 7,
+      backgroundColor: theme.raised,
+    },
+    rankSkeletonBarShort: {
+      width: '45%',
+      height: 10,
+      borderRadius: 5,
       backgroundColor: theme.raised,
     },
     statsCard: {

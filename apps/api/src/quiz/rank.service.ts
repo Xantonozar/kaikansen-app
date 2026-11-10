@@ -9,6 +9,7 @@ import {
   getBaseRP,
   getStreakBonus,
   getTierFromRP,
+  ladderForRp,
   tierIndex,
 } from './quiz-game.utils';
 import { RoomBroadcaster } from './room-broadcaster';
@@ -166,16 +167,27 @@ export class RankService {
         demoted,
       });
 
+      // The room:rank-updated event is app-only (the web's twin
+      // rides its own Pusher channel), so its tier fields carry
+      // the 24-rank LADDER slugs and its promoted/demoted compare
+      // ladder indices (owner spec 2026-11-10). The results list
+      // and the stored rank-history row above keep the legacy
+      // 6-tier values — nothing written changes.
+      const ladderBefore = ladderForRp(rpBefore);
+      const ladderAfter = ladderForRp(rpAfter);
+      const ladderPromoted = ladderAfter.index > ladderBefore.index;
+      const ladderDemoted = ladderAfter.index < ladderBefore.index;
+
       results.push({
         userId: player.userId,
         rpBefore,
         rpAfter,
         rpChange: actualRpChange,
         streakBonus,
-        tierBefore,
-        tierAfter: newTier,
-        promoted,
-        demoted,
+        tierBefore: ladderBefore.rank,
+        tierAfter: ladderAfter.rank,
+        promoted: ladderPromoted,
+        demoted: ladderDemoted,
         newStreak,
         placement,
       });
@@ -186,10 +198,10 @@ export class RankService {
         rpAfter,
         rpChange: actualRpChange,
         streakBonus,
-        tierBefore,
-        tierAfter: newTier,
-        promoted,
-        demoted,
+        tierBefore: ladderBefore.rank,
+        tierAfter: ladderAfter.rank,
+        promoted: ladderPromoted,
+        demoted: ladderDemoted,
         newStreak,
       } satisfies RankUpdatedEvent);
     }

@@ -351,3 +351,131 @@ export function getStreakBonus(winStreak: number): number {
 export function tierIndex(tier: string): number {
   return RANK_TIERS.findIndex((t) => t.tier === tier);
 }
+
+/* ------------------------------------------------------------------ */
+/* The app's 24-rank ladder (owner spec 2026-11-10) — a pure         */
+/* function of RP, derived at read time and served additively        */
+/* next to the legacy tier fields. It is NEVER written to the        */
+/* shared `userranks` documents (the website runs the 6-tier          */
+/* system on them): the only stored value it ever influences is      */
+/* none — even the rank-updated event's ladder slugs are derived     */
+/* in memory at emit time, while rank-history rows keep the          */
+/* legacy tiers. The mobile rankUtil mirrors this exact table;       */
+/* both sides carry the same boundary tests.                         */
+/* ------------------------------------------------------------------ */
+
+export type LadderRankSlug =
+  | 'academy-student'
+  | 'scout'
+  | 'mizunoto'
+  | 'genin'
+  | 'chunin'
+  | 'shinobi'
+  | 'assassin'
+  | 'firebender'
+  | 'kitsune'
+  | 'lone-wolf'
+  | 'karasu'
+  | 'jonin'
+  | 'ronin'
+  | 'shogun'
+  | 'anbu'
+  | 'pilot'
+  | 'sannin'
+  | 'berserk'
+  | 'wizard-king'
+  | 'jinchuriki'
+  | 'newtype'
+  | 'overlord'
+  | 'shadow-monarch'
+  | 'pirate-king';
+
+export const LADDER_RANKS: { rank: LadderRankSlug; min: number }[] = [
+  { rank: 'academy-student', min: 0 },
+  { rank: 'scout', min: 100 },
+  { rank: 'mizunoto', min: 250 },
+  { rank: 'genin', min: 450 },
+  { rank: 'chunin', min: 700 },
+  { rank: 'shinobi', min: 1000 },
+  { rank: 'assassin', min: 1400 },
+  { rank: 'firebender', min: 1900 },
+  { rank: 'kitsune', min: 2500 },
+  { rank: 'lone-wolf', min: 3200 },
+  { rank: 'karasu', min: 4000 },
+  { rank: 'jonin', min: 4900 },
+  { rank: 'ronin', min: 5900 },
+  { rank: 'shogun', min: 7000 },
+  { rank: 'anbu', min: 8200 },
+  { rank: 'pilot', min: 9500 },
+  { rank: 'sannin', min: 14000 },
+  { rank: 'berserk', min: 15700 },
+  { rank: 'wizard-king', min: 19400 },
+  { rank: 'jinchuriki', min: 21400 },
+  { rank: 'newtype', min: 23500 },
+  { rank: 'overlord', min: 25700 },
+  { rank: 'shadow-monarch', min: 28000 },
+  { rank: 'pirate-king', min: 30000 },
+];
+
+export interface LadderStandingFacts {
+  rank: LadderRankSlug;
+  /** 0-based position on the ladder (0–23). */
+  index: number;
+  /**
+   * The PROGRESS TARGET rank (see ladderForRp — the approved
+   * designs aim the bar at the rank after next), or null at
+   * Pirate King.
+   */
+  nextRank: LadderRankSlug | null;
+  /** RP still needed to reach `nextRank` (0 at the top). */
+  toNext: number;
+  /** 0–1 progress toward `nextRank` (1 at the top). */
+  fraction: number;
+}
+
+/**
+ * The ladder standing for an RP total.
+ *
+ * ⚠️ PROGRESS TARGET — the approved designs' rule, not the
+ * obvious one. Every owner-approved rank surface (mockups +
+ * Stitch screens, verified in their HTML) draws the sample
+ * identity — Jonin at 5,340 RP — with the bar filled 21% and
+ * the line "1,660 RP to Shogun", and names NO other target:
+ * progress is measured from the current rank's threshold to
+ * the threshold of the rank AFTER next (Jonin 4,900 → Shogun
+ * 7,000, skipping Ronin 5,900), i.e. fraction =
+ * (5340−4900)/(7000−4900) = 440/2100 ≈ 0.21, exactly the bar
+ * the designs draw. The spec's worked example locks the same
+ * numbers, so the target here is LADDER_RANKS[idx + 2],
+ * falling back to idx + 1 for Shadow Monarch (whose only
+ * rank above is Pirate King). The ladder screen's rows are
+ * unaffected — reached/locked there follows the thresholds
+ * themselves. (Flagged in the wiring report: if the sample
+ * was a design slip, the fix is idx + 2 → idx + 1 here and
+ * in the mobile mirror.)
+ *
+ * Negative RP reads as the bottom rank; Pirate King is
+ * open-ended (fraction 1).
+ */
+export function ladderForRp(rp: number): LadderStandingFacts {
+  const safe = Number.isFinite(rp) ? Math.max(0, Math.floor(rp)) : 0;
+  let idx = 0;
+  for (let i = 0; i < LADDER_RANKS.length; i++) {
+    if (safe >= LADDER_RANKS[i].min) idx = i;
+    else break;
+  }
+  const cur = LADDER_RANKS[idx];
+  const target = LADDER_RANKS[idx + 2] ?? LADDER_RANKS[idx + 1] ?? null;
+  if (!target) {
+    return { rank: cur.rank, index: idx, nextRank: null, toNext: 0, fraction: 1 };
+  }
+  const span = target.min - cur.min;
+  const done = Math.min(Math.max(safe - cur.min, 0), span);
+  return {
+    rank: cur.rank,
+    index: idx,
+    nextRank: target.rank,
+    toNext: target.min - safe,
+    fraction: span > 0 ? done / span : 1,
+  };
+}

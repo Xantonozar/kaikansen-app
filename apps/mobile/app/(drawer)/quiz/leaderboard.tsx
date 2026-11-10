@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { ChevronLeft, Medal } from 'lucide-react-native';
+import { ChevronLeft } from 'lucide-react-native';
 import type {
   RankLeaderboardEntry,
   UserRankProfile,
@@ -21,25 +21,33 @@ import {
   fetchRankLeaderboard,
 } from '../../../src/socialApi';
 import { RankRow } from '../../../src/components/RankRow';
+import { RankIcon } from '../../../src/components/RankIcon';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 import {
   fontFamilies,
   radii,
   spacing,
   typeStyles,
-  withOpacity,
   type Theme,
 } from '../../../src/theme';
 import { useTheme } from '../../../src/theme-context';
-import { formatRp, tierLabel, tierProgress } from '../../../src/rankUtil';
+import { formatRp, ladderLabel, standingOf } from '../../../src/rankUtil';
+
+/** The approved rank designs' deep plum (see ladder.tsx). */
+const PLUM = '#3D2436';
+const PLUM_SUB = 'rgba(247, 242, 247, 0.75)';
 
 /**
- * Leaderboard — rebuilt against the screen's Stitch mock/HTML:
- * back header, the Weekly/All-time segmented control, the
- * ranked rows full-bleed in one grouped white card (the
- * caller's row inset-tinted with its YOU pill), and the pinned
- * mauve "Your rank" card at the bottom. Rows tap through to
- * the player's public profile.
+ * Leaderboard — rebuilt to the owner-approved rank design
+ * (2026-11-10): back header, the "All-time" mauve pill beside
+ * the muted "Weekly · soon" pill, each ranked row as its OWN
+ * white card (position, avatar LEFT, name + ladder-rank line,
+ * rank icon chip RIGHT, RP figure — the owner-confirmed
+ * anatomy), and the pinned DARK PLUM your-rank card at the
+ * bottom: rank icon tile LEFT (NO avatar — the owner's
+ * "Prev one was better" ruling), "Your rank #N" + "Rank ·
+ * N RP", and the YOU pill. Rows tap through to the player's
+ * public profile.
  *
  * Data is GET /rank/leaderboard (the web's /api/leaderboard
  * port: top 100 by RP) plus GET /rank/me for the caller's
@@ -110,9 +118,7 @@ export default function LeaderboardScreen() {
     return idx >= 0 ? idx + 1 : null;
   }, [entries, myRank]);
 
-  const myProgress = myRank
-    ? tierProgress(myRank.rp, myRank.tier)
-    : null;
+  const myStanding = myRank ? standingOf(myRank) : null;
 
   // The drawer navigator shows no header, so the screen clears the
   // status bar / notch itself — the sibling drawer screens' pattern
@@ -141,33 +147,32 @@ export default function LeaderboardScreen() {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.column}>
-          {/* Segmented control, the mock's geometry — Weekly is
-              disabled because no weekly board exists (see the
-              header comment); All time is the real, active
-              segment. */}
+          {/* The approved design's pills — Weekly is disabled
+              because no weekly board exists (see the header
+              comment); All-time is the real, active pill. */}
           <View
-            style={styles.segmentTrack}
+            style={styles.pillRow}
             accessibilityLabel="Timeframe: all time. Weekly rankings are not tracked yet."
           >
+            <View
+              style={[styles.pill, styles.pillActive]}
+              accessibilityState={{ selected: true }}
+            >
+              <Text style={[styles.pillText, styles.pillTextActive]}>
+                All-time
+              </Text>
+            </View>
             <Pressable
               disabled
               accessibilityRole="button"
               accessibilityState={{ disabled: true, selected: false }}
               accessibilityLabel="Weekly — not available yet"
-              style={[styles.segment, styles.segmentDisabled]}
+              style={[styles.pill, styles.pillIdle]}
             >
-              <Text style={[styles.segmentText, styles.segmentTextIdle]}>
-                Weekly
+              <Text style={[styles.pillText, styles.pillTextIdle]}>
+                Weekly · soon
               </Text>
             </Pressable>
-            <View
-              style={[styles.segment, styles.segmentActive]}
-              accessibilityState={{ selected: true }}
-            >
-              <Text style={[styles.segmentText, styles.segmentTextActive]}>
-                All time
-              </Text>
-            </View>
           </View>
 
           {entries === null && !error ? (
@@ -185,7 +190,7 @@ export default function LeaderboardScreen() {
               </Pressable>
             </View>
           ) : entries && entries.length > 0 ? (
-            <View style={styles.card}>
+            <View style={styles.rows}>
               {entries.map((entry, i) => (
                 <RankRow
                   key={entry.userId}
@@ -193,7 +198,6 @@ export default function LeaderboardScreen() {
                   position={i + 1}
                   entry={entry}
                   isYou={myRank !== null && entry.userId === myRank.userId}
-                  bordered={i < entries.length - 1}
                   onPress={() => router.push(`/user/${entry.username}`)}
                 />
               ))}
@@ -208,9 +212,10 @@ export default function LeaderboardScreen() {
         </View>
       </ScrollView>
 
-      {myRank && (
+      {myRank && myStanding && (
         <View style={styles.pinWrap}>
           <View style={styles.pinCard}>
+            <RankIcon rank={myStanding.rank} size={64} tileRadius={16} />
             <View style={styles.pinMain}>
               <Text style={styles.pinTitle}>
                 {myPosition
@@ -218,14 +223,11 @@ export default function LeaderboardScreen() {
                   : 'Your rank'}
               </Text>
               <Text style={styles.pinSub}>
-                {formatRp(myRank.rp)}
-                {myProgress?.nextTier
-                  ? ` · ${myProgress.toNext.toLocaleString('en-US')} RP to ${tierLabel(myProgress.nextTier)}`
-                  : ' · Top tier'}
+                {ladderLabel(myStanding.rank)} · {formatRp(myRank.rp)}
               </Text>
             </View>
-            <View style={styles.pinDisc}>
-              <Medal size={22} color={theme.onAccent} strokeWidth={2} />
+            <View style={styles.pinYouPill}>
+              <Text style={styles.pinYouText}>YOU</Text>
             </View>
           </View>
         </View>
@@ -278,48 +280,38 @@ const createStyles = (theme: Theme) =>
       maxWidth: CONTENT_MAX_WIDTH,
       alignSelf: 'center',
     },
-    segmentTrack: {
+    /* The approved design's pills: the mauve filled pill for
+       the real board, a pale surface pill for the disabled
+       Weekly. */
+    pillRow: {
       flexDirection: 'row',
-      alignItems: 'center',
-      // The HTML's pale track (#EFE8EE): the raised token is
-      // the closest measured Lavender Dusk tone.
-      backgroundColor: theme.raised,
-      borderRadius: radii.pill,
-      padding: 4,
+      gap: spacing.sm,
       marginBottom: spacing.lg,
     },
-    segment: {
-      flex: 1,
-      paddingVertical: 6,
-      paddingHorizontal: spacing.lg,
+    pill: {
       borderRadius: radii.pill,
-      alignItems: 'center',
-      justifyContent: 'center',
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.sm,
     },
-    segmentActive: {
+    pillActive: {
       backgroundColor: theme.accent,
     },
-    segmentDisabled: {
-      opacity: 0.55,
+    pillIdle: {
+      backgroundColor: theme.surface,
+      opacity: 0.7,
     },
-    segmentText: {
+    pillText: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 12,
+      fontSize: 13,
     },
-    segmentTextIdle: {
-      color: theme.secondary,
-    },
-    segmentTextActive: {
+    pillTextActive: {
       color: theme.onAccent,
     },
-    card: {
-      backgroundColor: theme.surface,
-      borderRadius: radii.cardLg,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.border,
-      // Rows are full-bleed (their own px-4) with hairlines
-      // spanning the card; the viewer's row is inset inside.
-      overflow: 'hidden',
+    pillTextIdle: {
+      color: theme.muted,
+    },
+    rows: {
+      gap: spacing.md,
     },
     spin: {
       paddingVertical: spacing.xxl,
@@ -360,9 +352,10 @@ const createStyles = (theme: Theme) =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
-      backgroundColor: theme.accent,
-      // The HTML's rounded-2xl (16) at p-4 (16).
-      borderRadius: radii.md,
+      // The approved design's dark plum card (not a theme
+      // token — see the file header).
+      backgroundColor: PLUM,
+      borderRadius: radii.card,
       padding: spacing.lg,
     },
     pinMain: {
@@ -371,24 +364,23 @@ const createStyles = (theme: Theme) =>
     },
     pinTitle: {
       fontFamily: fontFamilies.display,
-      fontSize: 18,
+      fontSize: 17,
       letterSpacing: -0.3,
-      color: theme.onAccent,
+      color: '#F7F2F7',
     },
     pinSub: {
-      fontFamily: fontFamilies.caption,
-      fontSize: 12,
-      color: withOpacity(theme.onAccent, 0.85),
+      ...typeStyles.bodySmall,
+      color: PLUM_SUB,
     },
-    pinDisc: {
-      width: 40,
-      height: 40,
-      borderRadius: 20,
-      // The HTML's white/15 disc with a white/10 rim.
-      backgroundColor: withOpacity(theme.onAccent, 0.15),
-      borderWidth: 1,
-      borderColor: withOpacity(theme.onAccent, 0.1),
-      alignItems: 'center',
-      justifyContent: 'center',
+    pinYouPill: {
+      backgroundColor: theme.accent,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 4,
+    },
+    pinYouText: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 11,
+      color: theme.onAccent,
     },
   });

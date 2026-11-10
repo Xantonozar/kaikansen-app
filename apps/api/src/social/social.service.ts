@@ -27,6 +27,7 @@ import type {
 } from '@kaikansen/contracts';
 import { AuthService } from '../auth/auth.service';
 import { User, type UserDocument } from '../auth/user.schema';
+import { ladderForRp } from '../quiz/quiz-game.utils';
 import {
   UserRank,
   type UserRankDocument,
@@ -456,6 +457,8 @@ export class SocialService {
    * documents) and, when the request carried a valid Bearer <redacted>
    * `isFollowing` for the caller. Anonymous reads omit
    * `isFollowing`, mirroring the follow check's pre-lookup false.
+   * The rows also carry the additive `ladder` standing derived
+   * from the same documents' RP (app ladder, 2026-11-10).
    */
   async getNetwork(
     username: string,
@@ -562,11 +565,16 @@ export class SocialService {
       const docs = (await this.userRankModel
         .find({ userId: { $in: ids } })
         .lean()
-        .exec()) as { userId?: unknown; tier?: unknown }[];
+        .exec()) as { userId?: unknown; tier?: unknown; rp?: unknown }[];
       const tiers = new Map(docs.map((d) => [String(d.userId), d.tier]));
+      const rps = new Map(docs.map((d) => [String(d.userId), d.rp]));
       for (const row of rows) {
         const tier = tiers.get(row.id);
         row.tier = (typeof tier === 'string' ? tier : 'academy') as RankTier;
+        // The app ladder standing, from the same document's RP
+        // (additive; a missing document defaults to 0 RP).
+        const rp = rps.get(row.id);
+        row.ladder = ladderForRp(typeof rp === 'number' ? rp : 0);
       }
     }
 

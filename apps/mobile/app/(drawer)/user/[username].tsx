@@ -21,7 +21,6 @@ import {
   Pencil,
   Share2,
   Star,
-  Trophy,
   UserPlus,
   X,
 } from 'lucide-react-native';
@@ -47,7 +46,12 @@ import {
   followUser,
   unfollowUser,
 } from '../../../src/socialApi';
-import { formatRp, tierLabel } from '../../../src/rankUtil';
+import { RankIcon } from '../../../src/components/RankIcon';
+import {
+  formatRp,
+  ladderLabel,
+  standingOf,
+} from '../../../src/rankUtil';
 import {
   formatCount,
   formatHoursListened,
@@ -473,9 +477,9 @@ export default function UserProfileScreen() {
             <Text style={styles.handle}>@{profile.username}</Text>
             {rank && (
               <View style={styles.rankChip}>
-                <Trophy size={15} color={theme.accent} strokeWidth={2} />
+                <RankIcon rank={standingOf(rank).rank} size={24} />
                 <Text style={styles.rankChipText}>
-                  {tierLabel(rank.tier)} · {formatRp(rank.rp)}
+                  {ladderLabel(standingOf(rank).rank)} · {formatRp(rank.rp)}
                 </Text>
               </View>
             )}

@@ -212,7 +212,18 @@ export default function QuizScreen() {
         ) : (
           <>
             {myRank ? (
-              <RankCard profile={myRank} />
+              <>
+                <RankCard profile={myRank} />
+                {/* The approved hub mock's line under the rank
+                    card: rank standing is read-only here — RP
+                    moves in multiplayer only. */}
+                <View style={styles.rankNote}>
+                  <View style={styles.rankNoteHairline} />
+                  <Text style={styles.rankNoteText}>
+                    Rank card only — RP is earned in multiplayer
+                  </Text>
+                </View>
+              </>
             ) : rankLoading ? (
               <RankCardSkeleton />
             ) : null}
@@ -545,6 +556,18 @@ const createStyles = (theme: Theme) =>
     },
     boardSpin: {
       paddingVertical: spacing.lg,
+    },
+    rankNote: {
+      marginTop: -6,
+      gap: spacing.sm,
+    },
+    rankNoteHairline: {
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: theme.border,
+    },
+    rankNoteText: {
+      ...typeStyles.bodySmall,
+      color: theme.muted,
     },
     boardState: {
       alignItems: 'center',

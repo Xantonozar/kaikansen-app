@@ -1,81 +1,121 @@
-import type { RankTier } from '@kaikansen/contracts';
+import type {
+  LadderRank,
+  LadderStanding,
+} from '@kaikansen/contracts';
 
 /**
- * Rank ladder display helpers — the thresholds are the web's
- * (kaisen-src lib/rank-utils TIERS, mirrored by the API's rank
- * module): Academy 0 / Genin 400 / Chunin 800 / Jonin 1400 /
- * ANBU 2200 / Kage 3200. Presentation only: the API's rank reads
- * already serve `tier` and `division`; nothing here recomputes
- * standing, it just phrases progress toward the next tier the way
- * the Lavender Dusk quiz hub / leaderboard mocks draw it.
+ * The app's 24-rank ladder (owner spec 2026-11-10) — the ONLY
+ * rank system the app displays. A pure function of RP with the
+ * locked thresholds; the API derives the identical standing
+ * server-side (ladderForRp in the API's quiz-game.utils — the
+ * two tables and their boundary tests are mirrors, keep them in
+ * step). The web's 6 tiers still arrive on rank payloads (the
+ * shared database's legacy field) but no app surface phrases
+ * them any more; divisions are gone from display entirely.
+ *
+ * ⚠️ PROGRESS TARGET — the approved designs' rule: the bar and
+ * the "N RP to X" line aim at the rank AFTER next. Every
+ * owner-approved rank surface draws the sample identity (Jonin,
+ * 5,340 RP) as "1,660 RP to Shogun" with a 21% bar — fraction
+ * (5340−4900)/(7000−4900) = 440/2100 — naming no other target,
+ * even though Ronin (5,900) sits between. Locked by the spec's
+ * worked example; if it was a design slip the fix is TARGET
+ * OFFSET 2 → 1 here and in the API mirror.
  */
-export const RANK_TIER_MIN: { tier: RankTier; min: number }[] = [
-  { tier: 'academy', min: 0 },
-  { tier: 'genin', min: 400 },
-  { tier: 'chunin', min: 800 },
-  { tier: 'jonin', min: 1400 },
-  { tier: 'anbu', min: 2200 },
-  { tier: 'kage', min: 3200 },
+
+export interface LadderRankInfo {
+  rank: LadderRank;
+  label: string;
+  /** The anime the rank's title/icon comes from (ladder rows). */
+  source: string;
+  min: number;
+  /** Cloudinary delivery URL (cloud chirkut, verified 2026-11-10). */
+  iconUrl: string;
+  /** Bundled webp fallback (assets/ranks) for offline/failure. */
+  iconAsset: number;
+}
+
+const CLOUD = 'https://res.cloudinary.com/chirkut/image/upload';
+
+export const LADDER: LadderRankInfo[] = [
+  { rank: 'academy-student', label: 'Academy Student', source: 'Naruto', min: 0, iconUrl: `${CLOUD}/v1794313741/rank-01-academy-student.webp`, iconAsset: require('../assets/ranks/rank-01-academy-student.webp') },
+  { rank: 'scout', label: 'Scout', source: 'Attack on Titan', min: 100, iconUrl: `${CLOUD}/v1794313742/rank-02-scout.webp`, iconAsset: require('../assets/ranks/rank-02-scout.webp') },
+  { rank: 'mizunoto', label: 'Mizunoto', source: 'Demon Slayer', min: 250, iconUrl: `${CLOUD}/v1794313742/rank-03-mizunoto.webp`, iconAsset: require('../assets/ranks/rank-03-mizunoto.webp') },
+  { rank: 'genin', label: 'Genin', source: 'Naruto', min: 450, iconUrl: `${CLOUD}/v1794313742/rank-04-genin.webp`, iconAsset: require('../assets/ranks/rank-04-genin.webp') },
+  { rank: 'chunin', label: 'Chunin', source: 'Naruto', min: 700, iconUrl: `${CLOUD}/v1794313742/rank-05-chunin.webp`, iconAsset: require('../assets/ranks/rank-05-chunin.webp') },
+  { rank: 'shinobi', label: 'Shinobi', source: 'Naruto', min: 1000, iconUrl: `${CLOUD}/v1794313744/rank-06-shinobi.webp`, iconAsset: require('../assets/ranks/rank-06-shinobi.webp') },
+  { rank: 'assassin', label: 'Assassin', source: 'Fate', min: 1400, iconUrl: `${CLOUD}/v1794313745/rank-07-assassin.webp`, iconAsset: require('../assets/ranks/rank-07-assassin.webp') },
+  { rank: 'firebender', label: 'Firebender', source: 'Avatar', min: 1900, iconUrl: `${CLOUD}/v1794313746/rank-08-firebender.webp`, iconAsset: require('../assets/ranks/rank-08-firebender.webp') },
+  { rank: 'kitsune', label: 'Kitsune', source: 'Naruto / folklore', min: 2500, iconUrl: `${CLOUD}/v1794313747/rank-09-kitsune.webp`, iconAsset: require('../assets/ranks/rank-09-kitsune.webp') },
+  { rank: 'lone-wolf', label: 'Lone Wolf', source: 'Lone Wolf and Cub', min: 3200, iconUrl: `${CLOUD}/v1794313748/rank-10-lone-wolf.webp`, iconAsset: require('../assets/ranks/rank-10-lone-wolf.webp') },
+  { rank: 'karasu', label: 'Karasu', source: 'Naruto', min: 4000, iconUrl: `${CLOUD}/v1794313748/rank-11-karasu.webp`, iconAsset: require('../assets/ranks/rank-11-karasu.webp') },
+  { rank: 'jonin', label: 'Jonin', source: 'Naruto', min: 4900, iconUrl: `${CLOUD}/v1794313750/rank-12-jonin.webp`, iconAsset: require('../assets/ranks/rank-12-jonin.webp') },
+  { rank: 'ronin', label: 'Ronin', source: 'Rurouni Kenshin', min: 5900, iconUrl: `${CLOUD}/v1794313751/rank-13-ronin.webp`, iconAsset: require('../assets/ranks/rank-13-ronin.webp') },
+  { rank: 'shogun', label: 'Shogun', source: 'One Piece', min: 7000, iconUrl: `${CLOUD}/v1794313753/rank-14-shogun.webp`, iconAsset: require('../assets/ranks/rank-14-shogun.webp') },
+  { rank: 'anbu', label: 'ANBU', source: 'Naruto', min: 8200, iconUrl: `${CLOUD}/v1794313753/rank-15-anbu.webp`, iconAsset: require('../assets/ranks/rank-15-anbu.webp') },
+  { rank: 'pilot', label: 'Pilot', source: 'Evangelion', min: 9500, iconUrl: `${CLOUD}/v1794313754/rank-16-pilot.webp`, iconAsset: require('../assets/ranks/rank-16-pilot.webp') },
+  { rank: 'sannin', label: 'Sannin', source: 'Naruto', min: 14000, iconUrl: `${CLOUD}/v1794313755/rank-17-sannin.webp`, iconAsset: require('../assets/ranks/rank-17-sannin.webp') },
+  { rank: 'berserk', label: 'Berserk', source: 'Evangelion', min: 15700, iconUrl: `${CLOUD}/v1794313756/rank-18-berserk.webp`, iconAsset: require('../assets/ranks/rank-18-berserk.webp') },
+  { rank: 'wizard-king', label: 'Wizard King', source: 'Black Clover', min: 19400, iconUrl: `${CLOUD}/v1794313757/rank-19-wizard-king.webp`, iconAsset: require('../assets/ranks/rank-19-wizard-king.webp') },
+  { rank: 'jinchuriki', label: 'Jinchuriki', source: 'Naruto', min: 21400, iconUrl: `${CLOUD}/v1794313759/rank-20-jinchuriki.webp`, iconAsset: require('../assets/ranks/rank-20-jinchuriki.webp') },
+  { rank: 'newtype', label: 'Newtype', source: 'Gundam', min: 23500, iconUrl: `${CLOUD}/v1794313760/rank-21-newtype.webp`, iconAsset: require('../assets/ranks/rank-21-newtype.webp') },
+  { rank: 'overlord', label: 'Overlord', source: 'Overlord', min: 25700, iconUrl: `${CLOUD}/v1794313760/rank-22-overlord.webp`, iconAsset: require('../assets/ranks/rank-22-overlord.webp') },
+  { rank: 'shadow-monarch', label: 'Shadow Monarch', source: 'Solo Leveling', min: 28000, iconUrl: `${CLOUD}/v1794313761/rank-23-shadow-monarch.webp`, iconAsset: require('../assets/ranks/rank-23-shadow-monarch.webp') },
+  { rank: 'pirate-king', label: 'Pirate King', source: 'One Piece', min: 30000, iconUrl: `${CLOUD}/v1794313763/rank-24-pirate-king.webp`, iconAsset: require('../assets/ranks/rank-24-pirate-king.webp') },
 ];
 
-const TIER_LABEL: Record<RankTier, string> = {
-  academy: 'Academy',
-  genin: 'Genin',
-  chunin: 'Chunin',
-  jonin: 'Jonin',
-  anbu: 'ANBU',
-  kage: 'Kage',
-};
+const BY_RANK = new Map(LADDER.map((info, index) => [info.rank, { info, index }]));
 
-/** "Chunin" — the tier's display name. */
-export function tierLabel(tier: RankTier): string {
-  return TIER_LABEL[tier];
+/** The ladder entry for a rank slug (Academy Student on junk input). */
+export function ladderInfo(rank: LadderRank | string): LadderRankInfo {
+  return BY_RANK.get(rank as LadderRank)?.info ?? LADDER[0];
+}
+
+/** "Shadow Monarch" — the rank's display name. */
+export function ladderLabel(rank: LadderRank | string): string {
+  return ladderInfo(rank).label;
 }
 
 /**
- * The division's roman numeral, exactly as the web phrases it
- * (`'I'.repeat(4 - division)` — division 1 → III, 3 → I), or null
- * for the division-less tiers (Academy, Kage).
+ * The standing for an RP total — the exact mirror of the API's
+ * ladderForRp (same thresholds, same progress-target rule).
+ * Prefer a served `ladder` field when one is at hand
+ * (standingOf); this derives for values the client already
+ * holds (socket events, fixtures).
  */
-export function divisionRoman(division: number | null): string | null {
-  if (division === null || division < 1 || division > 3) return null;
-  return 'I'.repeat(4 - division);
-}
-
-/** "Tier II" chip text, or null when the tier has no divisions. */
-export function divisionChip(division: number | null): string | null {
-  const roman = divisionRoman(division);
-  return roman ? `Tier ${roman}` : null;
-}
-
-/** Sub-line under a leaderboard name: "Jonin" / "Chunin · II". */
-export function tierLine(tier: RankTier, division: number | null): string {
-  const roman = divisionRoman(division);
-  return roman ? `${tierLabel(tier)} · ${roman}` : tierLabel(tier);
-}
-
-export interface TierProgress {
-  /** The next tier up, or null at Kage (the top of the ladder). */
-  nextTier: RankTier | null;
-  /** RP still needed to reach `nextTier` (0 at the top). */
-  toNext: number;
-  /** 0–1 progress through the current tier (1 at the top). */
-  fraction: number;
-}
-
-/** Progress through the tier the given RP sits in. */
-export function tierProgress(rp: number, tier: RankTier): TierProgress {
-  const idx = RANK_TIER_MIN.findIndex((t) => t.tier === tier);
-  const cur = RANK_TIER_MIN[idx] ?? RANK_TIER_MIN[0];
-  const next = RANK_TIER_MIN[idx + 1] ?? null;
-  if (!next) return { nextTier: null, toNext: 0, fraction: 1 };
-  const span = next.min - cur.min;
-  const done = Math.min(Math.max(rp - cur.min, 0), span);
+export function ladderForRp(rp: number): LadderStanding {
+  const safe = Number.isFinite(rp) ? Math.max(0, Math.floor(rp)) : 0;
+  let idx = 0;
+  for (let i = 0; i < LADDER.length; i++) {
+    if (safe >= LADDER[i].min) idx = i;
+    else break;
+  }
+  const cur = LADDER[idx];
+  const target = LADDER[idx + 2] ?? LADDER[idx + 1] ?? null;
+  if (!target) {
+    return { rank: cur.rank, index: idx, nextRank: null, toNext: 0, fraction: 1 };
+  }
+  const span = target.min - cur.min;
+  const done = Math.min(Math.max(safe - cur.min, 0), span);
   return {
-    nextTier: next.tier,
-    toNext: next.min - rp,
+    rank: cur.rank,
+    index: idx,
+    nextRank: target.rank,
+    toNext: target.min - safe,
     fraction: span > 0 ? done / span : 1,
   };
+}
+
+/**
+ * The standing to draw for a rank payload: the served ladder
+ * field when present (the API's derivation), else derived from
+ * the RP locally (older payloads, fixtures).
+ */
+export function standingOf(payload: {
+  rp: number;
+  ladder?: LadderStanding;
+}): LadderStanding {
+  return payload.ladder ?? ladderForRp(payload.rp);
 }
 
 /** "1,270 RP" — grouped RP figure, as drawn on the rank surfaces. */

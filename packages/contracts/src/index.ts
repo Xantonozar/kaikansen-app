@@ -1166,7 +1166,15 @@ export interface RoundEndedEvent {
   theme: QuizRoundThemeMeta;
 }
 
-/** Server → clients `room:rank-updated` (one per player at game end). */
+/**
+ * Server → clients `room:rank-updated` (one per player at game end).
+ * Since the app ladder (2026-11-10): `tierBefore` / `tierAfter`
+ * carry LADDER rank slugs ('jonin', 'shadow-monarch', …) — this
+ * socket channel is app-only (the web's Pusher twin is its own),
+ * so the values the app promotes/demotes against are the ladder's.
+ * `promoted` / `demoted` likewise compare ladder indices. The
+ * stored rank-history rows keep the legacy 6-tier values.
+ */
 export interface RankUpdatedEvent {
   userId: string;
   rpBefore: number;
@@ -1215,6 +1223,14 @@ export interface NetworkUser {
    * projection there has no rank either).
    */
   tier?: RankTier;
+  /**
+   * The user's 24-rank ladder standing, derived from their RP at
+   * read time — enriched ONLY by the network endpoint, alongside
+   * `tier` (the rows draw the ladder label). A user with no rank
+   * document gets the materialised default (Academy Student,
+   * 0 RP). See the Rank section's ladder note.
+   */
+  ladder?: LadderStanding;
   /**
    * Whether the CALLER follows this user — enriched ONLY by the
    * network endpoint, and only when the request carried a valid
@@ -1631,6 +1647,83 @@ export type RankTier =
   | 'anbu'
   | 'kage';
 
+/* ------------------------------------------------------------------ */
+/* The app's 24-rank ladder (owner spec 2026-11-10)                    */
+/*                                                                     */
+/* A SECOND ladder layered over the web's 6 tiers: 24 in-world         */
+/* named ranks, a PURE FUNCTION of RP, derived at read time by         */
+/* both the API and the app's rankUtil (identical threshold            */
+/* tables, kept in step by mirrored unit tests). It is NEVER           */
+/* written into the shared `tier` field — the live website runs        */
+/* its own 6-tier system on the same `userranks` documents, so the     */
+/* ladder exists only in served payloads and app display. Legacy       */
+/* tier/division/tierFloor writes and the RP clamp are unchanged.      */
+/* Thresholds (RP): academy-student 0 · scout 100 · mizunoto 250 ·     */
+/* genin 450 · chunin 700 · shinobi 1000 · assassin 1400 ·             */
+/* firebender 1900 · kitsune 2500 · lone-wolf 3200 · karasu 4000 ·     */
+/* jonin 4900 · ronin 5900 · shogun 7000 · anbu 8200 · pilot 9500 ·    */
+/* sannin 14000 · berserk 15700 · wizard-king 19400 ·                  */
+/* jinchuriki 21400 · newtype 23500 · overlord 25700 ·                 */
+/* shadow-monarch 28000 · pirate-king 30000 (top, open-ended).         */
+/* ------------------------------------------------------------------ */
+
+/** The app's 24 ladder ranks, low to high. */
+export type LadderRank =
+  | 'academy-student'
+  | 'scout'
+  | 'mizunoto'
+  | 'genin'
+  | 'chunin'
+  | 'shinobi'
+  | 'assassin'
+  | 'firebender'
+  | 'kitsune'
+  | 'lone-wolf'
+  | 'karasu'
+  | 'jonin'
+  | 'ronin'
+  | 'shogun'
+  | 'anbu'
+  | 'pilot'
+  | 'sannin'
+  | 'berserk'
+  | 'wizard-king'
+  | 'jinchuriki'
+  | 'newtype'
+  | 'overlord'
+  | 'shadow-monarch'
+  | 'pirate-king';
+
+/**
+ * A user's ladder standing at a given RP — the additive payload
+ * the rank reads serve next to the legacy tier fields so clients
+ * can draw the ladder without re-deriving it (the app's rankUtil
+ * mirrors the same derivation for values it already holds, e.g.
+ * socket events). `fraction` is 0–1 progress through the current
+ * rank's span (1 at Pirate King, the open-ended top).
+ */
+export interface LadderStanding {
+  /** The ladder rank the RP sits in. */
+  rank: LadderRank;
+  /** 0-based position on the ladder (0–23). */
+  index: number;
+  /**
+   * The progress target the rank cards aim at — per the
+   * owner-approved designs, the rank AFTER next (5,340 RP in
+   * Jonin reads "1,660 RP to Shogun", bar 440/2100 ≈ 21%;
+   * Ronin in between is never the named target). Null at
+   * Pirate King. See ladderForRp in the API / rankUtil in the
+   * app for the locked derivation.
+   */
+  nextRank: LadderRank | null;
+  /** RP still needed to reach `nextRank` (0 at the top). */
+  toNext: number;
+  /** 0–1 progress toward `nextRank` (1 at the top). */
+  fraction: number;
+  /** The ladder rank derived from stats.peakRP (profile only). */
+  peakRank?: LadderRank;
+}
+
 /** The UserRank `stats` sub-document. */
 export interface UserRankStats {
   totalGames: number;
@@ -1640,6 +1733,12 @@ export interface UserRankStats {
   winRate: number;
   peakRP: number;
   peakTier: RankTier;
+  /**
+   * The ladder rank at stats.peakRP, derived at read time
+   * (additive, app ladder 2026-11-10). peakTier above stays the
+   * stored legacy value, untouched.
+   */
+  peakLadderRank: LadderRank;
 }
 
 /** The UserRank `season` sub-document. */
@@ -1665,6 +1764,8 @@ export interface UserRankProfile {
   tier: RankTier;
   division: number | null;
   tierFloor: number;
+  /** The 24-rank ladder standing derived from `rp` (additive). */
+  ladder: LadderStanding;
   currentWinStreak: number;
   longestWinStreak: number;
   stats: UserRankStats;
@@ -1685,6 +1786,8 @@ export interface PlayerRankSummary {
   userId: string;
   tier: RankTier;
   rp: number;
+  /** The 24-rank ladder standing derived from `rp` (additive). */
+  ladder: LadderStanding;
 }
 
 /** Response body of GET /rank/players?ids=<csv> (public, read-only). */
@@ -1710,6 +1813,8 @@ export interface RankLeaderboardEntry {
   rp: number;
   tier: RankTier;
   division: number | null;
+  /** The 24-rank ladder standing derived from `rp` (additive). */
+  ladder: LadderStanding;
   wins: number;
   winRate: number;
 }

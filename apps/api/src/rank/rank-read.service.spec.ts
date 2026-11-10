@@ -207,6 +207,37 @@ function makeService(world: ReturnType<typeof makeWorld>) {
   );
 }
 
+/* The additive ladder standings the reads derive (ladderForRp).   */
+/* Target = the rank after next (the approved designs' rule).      */
+const LADDER_0 = {
+  rank: 'academy-student',
+  index: 0,
+  nextRank: 'mizunoto',
+  toNext: 250,
+  fraction: 0,
+} as const;
+const LADDER_100 = {
+  rank: 'scout',
+  index: 1,
+  nextRank: 'genin',
+  toNext: 350,
+  fraction: 0,
+} as const;
+const LADDER_500 = {
+  rank: 'genin',
+  index: 3,
+  nextRank: 'shinobi',
+  toNext: 500,
+  fraction: 50 / 550,
+} as const;
+const LADDER_900 = {
+  rank: 'chunin',
+  index: 4,
+  nextRank: 'assassin',
+  toNext: 500,
+  fraction: 200 / 700,
+} as const;
+
 /* ------------------------------------------------------------------ */
 /* getRank — the web's getUserRank (find-or-create)                    */
 /* ------------------------------------------------------------------ */
@@ -224,6 +255,7 @@ describe('RankReadService.getRank', () => {
       tier: 'genin',
       division: 3,
       tierFloor: 400,
+      ladder: { ...LADDER_900, peakRank: 'chunin' },
       currentWinStreak: 1,
       longestWinStreak: 4,
       stats: {
@@ -234,6 +266,7 @@ describe('RankReadService.getRank', () => {
         winRate: 0.6,
         peakRP: 900,
         peakTier: 'genin',
+        peakLadderRank: 'chunin',
       },
       season: {
         seasonId: 'all-time',
@@ -270,6 +303,11 @@ describe('RankReadService.getRank', () => {
       winRate: 0,
       peakRP: 0,
       peakTier: 'academy',
+      peakLadderRank: 'academy-student',
+    });
+    expect(profile.ladder).toEqual({
+      ...LADDER_0,
+      peakRank: 'academy-student',
     });
     // A second read finds the created document — no second create.
     await service.getRank('new-player');
@@ -287,8 +325,18 @@ describe('RankReadService.getPlayerRanks', () => {
     const service = makeService(world);
     const res = await service.getPlayerRanks(['507f1f77bcf86cd7994390a4', '507f1f77bcf86cd7994390a1']);
     expect(res.players).toEqual([
-      { userId: '507f1f77bcf86cd7994390a4', tier: 'academy', rp: 100 },
-      { userId: '507f1f77bcf86cd7994390a1', tier: 'genin', rp: 900 },
+      {
+        userId: '507f1f77bcf86cd7994390a4',
+        tier: 'academy',
+        rp: 100,
+        ladder: LADDER_100,
+      },
+      {
+        userId: '507f1f77bcf86cd7994390a1',
+        tier: 'genin',
+        rp: 900,
+        ladder: LADDER_900,
+      },
     ]);
     expect(world.createCalls()).toBe(0);
   });
@@ -298,8 +346,13 @@ describe('RankReadService.getPlayerRanks', () => {
     const service = makeService(world);
     const res = await service.getPlayerRanks(['507f1f77bcf86cd7994390a1', 'new-player']);
     expect(res.players).toEqual([
-      { userId: '507f1f77bcf86cd7994390a1', tier: 'genin', rp: 900 },
-      { userId: 'new-player', tier: 'academy', rp: 0 },
+      {
+        userId: '507f1f77bcf86cd7994390a1',
+        tier: 'genin',
+        rp: 900,
+        ladder: LADDER_900,
+      },
+      { userId: 'new-player', tier: 'academy', rp: 0, ladder: LADDER_0 },
     ]);
     // The whole point of the endpoint: unlike getRank, no write.
     expect(world.createCalls()).toBe(0);
@@ -311,7 +364,12 @@ describe('RankReadService.getPlayerRanks', () => {
     const service = makeService(world);
     const res = await service.getPlayerRanks(['507f1f77bcf86cd7994390a2', '507f1f77bcf86cd7994390a2', '']);
     expect(res.players).toEqual([
-      { userId: '507f1f77bcf86cd7994390a2', tier: 'genin', rp: 500 },
+      {
+        userId: '507f1f77bcf86cd7994390a2',
+        tier: 'genin',
+        rp: 500,
+        ladder: LADDER_500,
+      },
     ]);
     await expect(service.getPlayerRanks([])).resolves.toEqual({
       players: [],
@@ -359,6 +417,7 @@ describe('RankReadService.getLeaderboard', () => {
         rp: 900,
         tier: 'genin',
         division: 3,
+        ladder: LADDER_900,
         wins: 6,
         winRate: 0.6,
       },
@@ -425,6 +484,7 @@ describe('RankReadService.getLeaderboard', () => {
       rp: 900,
       tier: 'genin',
       division: 3,
+      ladder: LADDER_900,
       wins: 6,
       winRate: 0.6,
     });

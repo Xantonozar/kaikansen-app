@@ -48,6 +48,7 @@ import type {
 import { ROUND_COUNTDOWN_SECONDS } from '@kaikansen/contracts';
 import { useAuth } from '../../../src/auth';
 import { fetchPlayerRanks } from '../../../src/socialApi';
+import { ladderLabel, standingOf } from '../../../src/rankUtil';
 import {
   clearRoomOwnership,
   disconnectQuizSocket,
@@ -668,17 +669,17 @@ export default function QuizRoomScreen() {
           {phase === 'ended' && rank ? (
             <Text style={styles.playerSub}>
               RP {rank.rpChange >= 0 ? '+' : ''}
-              {rank.rpChange} · {rank.tierAfter}
+              {rank.rpChange} · {ladderLabel(rank.tierAfter)}
             </Text>
           ) : phase === 'waiting' ? (
             // The design's waiting subline is the player's rank
-            // standing ("Chunin · 1,270 RP"); readiness moved to
-            // the right-side pills below (Slice 6).
+            // standing ("Chunin · 1,270 RP" — the ladder rank
+            // name); readiness moved to the right-side pills
+            // below (Slice 6).
             standing ? (
               <Text style={styles.playerSub}>
-                {standing.tier.charAt(0).toUpperCase() +
-                  standing.tier.slice(1)}{' '}
-                · {standing.rp.toLocaleString()} RP
+                {ladderLabel(standingOf(standing).rank)} ·{' '}
+                {standing.rp.toLocaleString()} RP
               </Text>
             ) : null
           ) : (
@@ -736,9 +737,8 @@ export default function QuizRoomScreen() {
           </Text>
           {standing ? (
             <Text style={styles.waitPlayerSub}>
-              {standing.tier.charAt(0).toUpperCase() +
-                standing.tier.slice(1)}{' '}
-              · {standing.rp.toLocaleString()} RP
+              {ladderLabel(standingOf(standing).rank)} ·{' '}
+              {standing.rp.toLocaleString()} RP
             </Text>
           ) : null}
         </View>
@@ -1478,7 +1478,7 @@ export default function QuizRoomScreen() {
                         {rank && (
                           <Text style={styles.playerSub}>
                             RP {rank.rpChange >= 0 ? '+' : ''}
-                            {rank.rpChange} · {rank.tierAfter}
+                            {rank.rpChange} · {ladderLabel(rank.tierAfter)}
                           </Text>
                         )}
                       </View>
@@ -1496,7 +1496,8 @@ export default function QuizRoomScreen() {
                     {myRank.rpChange})
                   </Text>
                   <Text style={styles.summaryText}>
-                    {myRank.tierBefore} → {myRank.tierAfter}
+                    {ladderLabel(myRank.tierBefore)} →{' '}
+                    {ladderLabel(myRank.tierAfter)}
                     {myRank.promoted
                       ? ' · Promoted!'
                       : myRank.demoted

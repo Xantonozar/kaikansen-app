@@ -124,6 +124,46 @@ describe('RankService.calculateAndApplyRP (web rank-utils)', () => {
     expect(rankEvents).toHaveLength(3);
   });
 
+  it('broadcasts LADDER slugs on room:rank-updated while history keeps legacy tiers (app ladder 2026-11-10)', async () => {
+    // A duel crossing the ladder's Scout threshold (100 RP):
+    // ladder academy-student → scout, while the legacy tier stays
+    // academy on both sides of the boundary (400 RP).
+    const room = {
+      _id: 'room-ladder',
+      roomType: 'duel',
+      players: [player('alice', 30), player('bob', 10)],
+    };
+    const { service, ranks, history, events } = makeFakes(room);
+    ranks.set(
+      'alice',
+      makeRankDoc('alice', { rp: 95, currentWinStreak: 0 }),
+    );
+
+    await service.calculateAndApplyRP('room-ladder');
+
+    // 95 + 10 (duel win) = 105 — crossed Scout, legacy tier unmoved.
+    expect(ranks.get('alice')!.rp).toBe(105);
+    expect(ranks.get('alice')!.tier).toBe('academy');
+    expect(history.find((h) => h.userId === 'alice')).toMatchObject({
+      tierBefore: 'academy',
+      tierAfter: 'academy',
+      promoted: false,
+    });
+    const event = events.find(
+      (e) =>
+        e.event === 'room:rank-updated' &&
+        (e.payload as { userId: string }).userId === 'alice',
+    )!;
+    expect(event.payload).toMatchObject({
+      tierBefore: 'academy-student',
+      tierAfter: 'scout',
+      promoted: true,
+      demoted: false,
+    });
+    // And the stored document never carries a ladder value.
+    expect(ranks.get('alice')!.tier).not.toBe('scout');
+  });
+
   it('applies every row of the owner party-of-4 table, floor clamp included', async () => {
     const room = {
       _id: 'room-p4',

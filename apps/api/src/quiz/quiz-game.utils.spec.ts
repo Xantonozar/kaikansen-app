@@ -8,6 +8,8 @@ import {
   getStreakBonus,
   getThemeValue,
   getTierFromRP,
+  LADDER_RANKS,
+  ladderForRp,
   multiplayerScoreFor,
   secondsRemainingAt,
   shouldAutoLock,
@@ -343,5 +345,97 @@ describe('rank math (web lib/rank-utils.ts)', () => {
     expect(getStreakBonus(4)).toBe(15);
     expect(getStreakBonus(5)).toBe(20);
     expect(getStreakBonus(11)).toBe(20);
+  });
+});
+
+describe('ladderForRp (app 24-rank ladder, owner spec 2026-11-10)', () => {
+  it('has the locked 24 thresholds in ascending order', () => {
+    expect(LADDER_RANKS).toHaveLength(24);
+    expect(LADDER_RANKS.map((r) => r.min)).toEqual([
+      0, 100, 250, 450, 700, 1000, 1400, 1900, 2500, 3200, 4000, 4900,
+      5900, 7000, 8200, 9500, 14000, 15700, 19400, 21400, 23500, 25700,
+      28000, 30000,
+    ]);
+    expect(LADDER_RANKS.map((r) => r.rank)).toEqual([
+      'academy-student', 'scout', 'mizunoto', 'genin', 'chunin',
+      'shinobi', 'assassin', 'firebender', 'kitsune', 'lone-wolf',
+      'karasu', 'jonin', 'ronin', 'shogun', 'anbu', 'pilot', 'sannin',
+      'berserk', 'wizard-king', 'jinchuriki', 'newtype', 'overlord',
+      'shadow-monarch', 'pirate-king',
+    ]);
+  });
+
+  it('derives the rank at every threshold boundary (min-1, min, min+1)', () => {
+    // The progress target is the rank AFTER next (the approved
+    // designs' rule — see ladderForRp): target(i) = LADDER[i+2],
+    // falling back to LADDER[i+1] for Shadow Monarch.
+    const targetOf = (i: number) =>
+      LADDER_RANKS[i + 2] ?? LADDER_RANKS[i + 1] ?? null;
+    LADDER_RANKS.forEach((entry, i) => {
+      const at = ladderForRp(entry.min);
+      expect(at.rank).toBe(entry.rank);
+      expect(at.index).toBe(i);
+      const target = targetOf(i);
+      if (target) {
+        // At the threshold: fraction 0 toward the target.
+        expect(at.nextRank).toBe(target.rank);
+        expect(at.toNext).toBe(target.min - entry.min);
+        expect(at.fraction).toBe(0);
+        // One above the threshold: still this rank.
+        const above = ladderForRp(entry.min + 1);
+        expect(above.rank).toBe(entry.rank);
+        expect(above.toNext).toBe(target.min - entry.min - 1);
+      } else {
+        // Pirate King's own threshold: terminal standing.
+        expect(at.nextRank).toBeNull();
+        expect(at.toNext).toBe(0);
+        expect(at.fraction).toBe(1);
+      }
+      if (i > 0) {
+        // One below the threshold: the previous rank, whose
+        // target is the rank after IT (targetOf(i-1)); at the
+        // top that target is Pirate King itself.
+        const belowTarget = targetOf(i - 1)!;
+        const below = ladderForRp(entry.min - 1);
+        expect(below.rank).toBe(LADDER_RANKS[i - 1].rank);
+        expect(below.index).toBe(i - 1);
+        expect(below.nextRank).toBe(belowTarget.rank);
+        expect(below.toNext).toBe(belowTarget.min - (entry.min - 1));
+      }
+    });
+  });
+
+  it('matches the spec worked example: 5,340 RP -> Jonin', () => {
+    const s = ladderForRp(5340);
+    expect(s.rank).toBe('jonin');
+    expect(s.index).toBe(11);
+    expect(s.nextRank).toBe('shogun');
+    expect(s.toNext).toBe(1660);
+    expect(s.fraction).toBeCloseTo(440 / 2100, 10);
+  });
+
+  it('treats Pirate King as open-ended', () => {
+    for (const rp of [30000, 30001, 31240, 999999]) {
+      const s = ladderForRp(rp);
+      expect(s.rank).toBe('pirate-king');
+      expect(s.index).toBe(23);
+      expect(s.nextRank).toBeNull();
+      expect(s.toNext).toBe(0);
+      expect(s.fraction).toBe(1);
+    }
+    const belowTop = ladderForRp(29999);
+    expect(belowTop.rank).toBe('shadow-monarch');
+    expect(belowTop.toNext).toBe(1);
+  });
+
+  it('floors at Academy Student for zero and negative RP', () => {
+    for (const rp of [0, -1, -5000]) {
+      const s = ladderForRp(rp);
+      expect(s.rank).toBe('academy-student');
+      expect(s.index).toBe(0);
+      // Target is Mizunoto (250) — the rank after next.
+      expect(s.nextRank).toBe('mizunoto');
+      expect(s.toNext).toBe(250 - Math.max(0, rp));
+    }
   });
 });

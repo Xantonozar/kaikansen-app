@@ -14,7 +14,7 @@ import type { NetworkResponse, NetworkUser } from '@kaikansen/contracts';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
 import { SkeletonPersonRow } from '../../../src/components/Skeleton';
-import { tierLabel } from '../../../src/rankUtil';
+import { ladderLabel } from '../../../src/rankUtil';
 import {
   fetchUserNetwork,
   followUser,
@@ -301,10 +301,13 @@ export default function NetworkScreen() {
           </Text>
           <Text style={styles.rowMeta} numberOfLines={1}>
             @{person.username}
-            {person.tier ? (
+            {/* The ladder rank name from the served standing —
+                rows without one simply show no rank segment (the
+                legacy 6-tier label is never rendered). */}
+            {person.ladder ? (
               <>
                 <Text style={styles.metaSeparator}> · </Text>
-                {tierLabel(person.tier)}
+                {ladderLabel(person.ladder.rank)}
               </>
             ) : (
               ''

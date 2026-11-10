@@ -12,4 +12,11 @@ module.exports = {
   transform: {
     '^.+\\.tsx?$': '<rootDir>/jest.transformer.js',
   },
+  // Bundled binary assets (rank-icon webp in rankUtil) resolve
+  // through Metro at runtime; in tests they map to a stub id —
+  // the table test asserts every iconAsset is a number, which
+  // the stub satisfies without parsing binary content.
+  moduleNameMapper: {
+    '\\.(webp|png|jpg|jpeg|gif)$': '<rootDir>/jest.asset-stub.js',
+  },
 };

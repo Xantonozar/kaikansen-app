@@ -536,9 +536,17 @@ describe('SocialService — network lists', () => {
       displayName: 'Bob B',
       avatarUrl: null,
       bio: '',
-      // App enrichment: no rank document → the default tier; the
-      // anonymous read carries no isFollowing field at all.
+      // App enrichment: no rank document → the default tier and
+      // the default (0 RP) ladder standing; the anonymous read
+      // carries no isFollowing field at all.
       tier: 'academy',
+      ladder: {
+        rank: 'academy-student',
+        index: 0,
+        nextRank: 'mizunoto',
+        toNext: 250,
+        fraction: 0,
+      },
     });
     expect(network.followers[0]).not.toHaveProperty('isFollowing');
     // The projection never leaks private fields.
@@ -566,10 +574,13 @@ describe('SocialService — network lists', () => {
     expect(network.followers[0]).toMatchObject({
       username: 'bob',
       tier: 'academy',
+      ladder: { rank: 'academy-student', index: 0 },
     });
     expect(network.followers[1]).toMatchObject({
       username: 'carol',
       tier: 'chunin',
+      // Carol's 900 RP derives the ladder Chunin standing.
+      ladder: { rank: 'chunin', index: 4, nextRank: 'assassin' },
     });
     // The enrichment is a read: it never materialises rank docs.
     expect(models.userRankModel.docs).toHaveLength(1);

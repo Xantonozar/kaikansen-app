@@ -1,6 +1,5 @@
 import { useMemo } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
-import { Medal } from 'lucide-react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { UserRankProfile } from '@kaikansen/contracts';
 import {
   fontFamilies,
@@ -10,19 +9,20 @@ import {
   type Theme,
 } from '../theme';
 import { useTheme } from '../theme-context';
-import {
-  divisionChip,
-  formatRp,
-  tierLabel,
-  tierProgress,
-} from '../rankUtil';
+import { formatRp, ladderLabel, standingOf } from '../rankUtil';
+import { RankIcon } from './RankIcon';
 
 /**
- * The Lavender Dusk rank card (quiz hub, top) — medal in a
- * lavender disc, tier name + division chip, the RP total, a
- * progress bar through the current tier and the right-aligned
- * "N RP to <next tier>" line. At Kage the next-target line and
- * the bar's remainder simply complete: tier + RP only.
+ * The Quiz Hub rank card (approved rank mock, 2026-11-10): the
+ * rank's icon tile (84px pale square) at the left, "YOUR RANK"
+ * eyebrow, the ladder rank's name large, the RP total STACKED
+ * under it (the mockups stack it — where the Stitch HTML put it
+ * right-aligned, the mockups rule), the progress bar toward
+ * the ladder target and the "N RP to <target>" line under it.
+ * The hub draws the "Rank card only" footer below the bar —
+ * that line is the hub screen's own; this card ends at the
+ * to-next line. At Pirate King the bar completes and the
+ * to-next line goes away.
  */
 /**
  * The rank card's loading state (design polish pass): the same
@@ -52,40 +52,31 @@ export function RankCardSkeleton() {
 export function RankCard({ profile }: { profile: UserRankProfile }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const progress = tierProgress(profile.rp, profile.tier);
-  const chip = divisionChip(profile.division);
+  const standing = standingOf(profile);
 
   return (
     <View style={styles.card}>
       <View style={styles.headRow}>
-        <View style={styles.disc}>
-          <Medal size={20} color={theme.accent} strokeWidth={2} />
-        </View>
+        <RankIcon rank={standing.rank} size={84} tileRadius={20} />
         <View style={styles.nameBlock}>
-          <View style={styles.tierRow}>
-            <Text style={styles.tierName}>{tierLabel(profile.tier)}</Text>
-            {chip && (
-              <View style={styles.chip}>
-                <Text style={styles.chipText}>{chip}</Text>
-              </View>
-            )}
-          </View>
+          <Text style={styles.eyebrow}>YOUR RANK</Text>
+          <Text style={styles.rankName}>{ladderLabel(standing.rank)}</Text>
           <Text style={styles.rpText}>{formatRp(profile.rp)}</Text>
+          <View style={styles.barTrack}>
+            <View
+              style={[
+                styles.barFill,
+                { width: `${Math.round(standing.fraction * 100)}%` },
+              ]}
+            />
+          </View>
+          {standing.nextRank && (
+            <Text style={styles.toNext}>
+              {standing.toNext.toLocaleString('en-US')} RP to{' '}
+              {ladderLabel(standing.nextRank)}
+            </Text>
+          )}
         </View>
-        {progress.nextTier && (
-          <Text style={styles.toNext}>
-            {progress.toNext.toLocaleString('en-US')} RP to{' '}
-            {tierLabel(progress.nextTier)}
-          </Text>
-        )}
-      </View>
-      <View style={styles.barTrack}>
-        <View
-          style={[
-            styles.barFill,
-            { width: `${Math.round(progress.fraction * 100)}%` },
-          ]}
-        />
       </View>
     </View>
   );
@@ -93,16 +84,15 @@ export function RankCard({ profile }: { profile: UserRankProfile }) {
 
 /**
  * The quiz RESULTS rank card (Quiz Results mock, solo §6.25) —
- * the same profile source and rank helpers as RankCard, drawn to
- * the results layout: medal disc + tier name / RP total, the
- * progress bar, and the "N RP to <next tier>" caption
- * right-aligned UNDER the bar. The results mock draws the tier
- * name alone, so there is no division chip here. The sage
- * "+N RP" pill at the head row's right renders ONLY when
- * `gainedRp` is a real positive gain the just-finished session
- * granted (multiplayer rooms award RP via room:rank-updated);
- * solo runs award no RP, so solo passes nothing and the pill
- * stays hidden.
+ * the same profile source as RankCard, drawn to the results
+ * layout: the rank's icon tile + rank name / RP total, the
+ * progress bar, and the "N RP to <target>" caption
+ * right-aligned UNDER the bar. The sage "+N RP" pill at the
+ * head row's right renders ONLY when `gainedRp` is a real
+ * positive gain the just-finished session granted
+ * (multiplayer rooms award RP via room:rank-updated); solo
+ * runs award no RP, so solo passes nothing and the pill stays
+ * hidden (standing rule — solo never shows a +RP pill).
  */
 export function RankResultCard({
   profile,
@@ -113,16 +103,14 @@ export function RankResultCard({
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createResultStyles(theme), [theme]);
-  const progress = tierProgress(profile.rp, profile.tier);
+  const standing = standingOf(profile);
 
   return (
     <View style={styles.card}>
       <View style={styles.headRow}>
-        <View style={styles.disc}>
-          <Medal size={20} color={theme.accent} strokeWidth={2} />
-        </View>
+        <RankIcon rank={standing.rank} size={44} />
         <View style={styles.nameBlock}>
-          <Text style={styles.tierName}>{tierLabel(profile.tier)}</Text>
+          <Text style={styles.tierName}>{ladderLabel(standing.rank)}</Text>
           <Text style={styles.rpText}>{formatRp(profile.rp)}</Text>
         </View>
         {gainedRp != null && gainedRp > 0 && (
@@ -137,14 +125,14 @@ export function RankResultCard({
         <View
           style={[
             styles.barFill,
-            { width: `${Math.round(progress.fraction * 100)}%` },
+            { width: `${Math.round(standing.fraction * 100)}%` },
           ]}
         />
       </View>
-      {progress.nextTier && (
+      {standing.nextRank && (
         <Text style={styles.toNext}>
-          {progress.toNext.toLocaleString('en-US')} RP to{' '}
-          {tierLabel(progress.nextTier)}
+          {standing.toNext.toLocaleString('en-US')} RP to{' '}
+          {ladderLabel(standing.nextRank)}
         </Text>
       )}
     </View>
@@ -152,53 +140,58 @@ export function RankResultCard({
 }
 
 /**
- * The PROFILE rank card (Profile §6.15) — same profile source
- * and rank helpers as RankCard, drawn to the Profile mock's own
- * measurements, which differ from the Quiz Hub card's (36px
- * medal disc, 16px card radius, square division chip,
- * medium-weight RP line, semibold next-tier line in the head
- * row): each surface follows its own mock — the RankResultCard
- * precedent above.
+ * The PROFILE QUIZ RANK card (approved rank mock, 2026-11-10) —
+ * a standalone white card on the own-Profile screen: the
+ * rank's icon tile (84px), "QUIZ RANK" eyebrow, "Jonin · 5,340
+ * RP" as one line, the progress bar with the "N RP to
+ * <target>" line UNDER it, and the "View full ladder ›" link
+ * at the card's bottom-left (the mockup's placement) opening
+ * /quiz/ladder. The whole card is the press target as well.
+ * At Pirate King the to-next line goes away; the link stays.
  */
-export function RankProfileCard({ profile }: { profile: UserRankProfile }) {
+export function RankProfileCard({
+  profile,
+  onOpenLadder,
+}: {
+  profile: UserRankProfile;
+  onOpenLadder: () => void;
+}) {
   const theme = useTheme();
   const styles = useMemo(() => createProfileStyles(theme), [theme]);
-  const progress = tierProgress(profile.rp, profile.tier);
-  const chip = divisionChip(profile.division);
+  const standing = standingOf(profile);
 
   return (
-    <View style={styles.card}>
+    <Pressable
+      onPress={onOpenLadder}
+      accessibilityRole="button"
+      accessibilityLabel={`Quiz rank ${ladderLabel(standing.rank)}, ${formatRp(profile.rp)}. View the full rank ladder`}
+      style={({ pressed }) => [styles.card, pressed && styles.pressed]}
+    >
       <View style={styles.headRow}>
-        <View style={styles.disc}>
-          <Medal size={20} color={theme.accent} strokeWidth={2} />
-        </View>
+        <RankIcon rank={standing.rank} size={84} tileRadius={20} />
         <View style={styles.nameBlock}>
-          <View style={styles.tierRow}>
-            <Text style={styles.tierName}>{tierLabel(profile.tier)}</Text>
-            {chip && (
-              <View style={styles.chip}>
-                <Text style={styles.chipText}>{chip}</Text>
-              </View>
-            )}
-          </View>
-          <Text style={styles.rpText}>{formatRp(profile.rp)}</Text>
-        </View>
-        {progress.nextTier && (
-          <Text style={styles.toNext}>
-            {progress.toNext.toLocaleString('en-US')} RP to{' '}
-            {tierLabel(progress.nextTier)}
+          <Text style={styles.eyebrow}>QUIZ RANK</Text>
+          <Text style={styles.rankLine}>
+            {ladderLabel(standing.rank)} · {formatRp(profile.rp)}
           </Text>
-        )}
+          <View style={styles.barTrack}>
+            <View
+              style={[
+                styles.barFill,
+                { width: `${Math.round(standing.fraction * 100)}%` },
+              ]}
+            />
+          </View>
+          {standing.nextRank && (
+            <Text style={styles.toNext}>
+              {standing.toNext.toLocaleString('en-US')} RP to{' '}
+              {ladderLabel(standing.nextRank)}
+            </Text>
+          )}
+        </View>
       </View>
-      <View style={styles.barTrack}>
-        <View
-          style={[
-            styles.barFill,
-            { width: `${Math.round(progress.fraction * 100)}%` },
-          ]}
-        />
-      </View>
-    </View>
+      <Text style={styles.ladderLink}>View full ladder ›</Text>
+    </Pressable>
   );
 }
 
@@ -206,60 +199,43 @@ const createProfileStyles = (theme: Theme) =>
   StyleSheet.create({
     card: {
       backgroundColor: theme.surface,
-      // The Profile mock's cards are rounded-2xl (16) — radii.md,
-      // not the radii.card the Quiz Hub card sits at.
-      borderRadius: radii.md,
-      padding: spacing.lg,
-      gap: 10,
+      // The approved Profile mock's cards sit at radii.card (24)
+      // like the screen's other cards.
+      borderRadius: radii.card,
+      padding: spacing.xl,
+      gap: spacing.lg,
+    },
+    pressed: {
+      opacity: 0.85,
     },
     headRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
-    },
-    disc: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      backgroundColor: theme.accentContainer,
-      alignItems: 'center',
-      justifyContent: 'center',
+      gap: spacing.lg,
     },
     nameBlock: {
       flex: 1,
-      gap: 2,
-    },
-    tierRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
       gap: 6,
     },
-    tierName: {
-      ...typeStyles.display,
-      fontSize: 16,
+    eyebrow: {
+      fontFamily: fontFamilies.sectionLabel,
+      fontSize: 12,
+      letterSpacing: 1,
+      color: theme.secondary,
+    },
+    rankLine: {
+      fontFamily: fontFamilies.display,
+      fontSize: 21,
       color: theme.text,
     },
-    chip: {
-      backgroundColor: theme.accentContainer,
-      borderRadius: 4,
-      paddingHorizontal: 6,
-      paddingVertical: 2,
-    },
-    chipText: {
-      fontFamily: fontFamilies.bodyStrong,
-      fontSize: 10,
-      color: theme.onAccentContainer,
-    },
-    rpText: {
-      fontFamily: fontFamilies.caption,
-      fontSize: 12,
-      color: theme.muted,
-    },
     toNext: {
-      fontFamily: fontFamilies.bodyStrong,
-      fontSize: 12,
+      ...typeStyles.bodySmall,
       color: theme.muted,
-      textAlign: 'right',
+    },
+    ladderLink: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 14,
+      color: theme.accent,
     },
     barTrack: {
       height: 8,
@@ -285,14 +261,6 @@ const createResultStyles = (theme: Theme) =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
-    },
-    disc: {
-      width: 40,
-      height: 40,
-      borderRadius: 20,
-      backgroundColor: theme.accentContainer,
-      alignItems: 'center',
-      justifyContent: 'center',
     },
     nameBlock: {
       flex: 1,
@@ -343,53 +311,44 @@ const createStyles = (theme: Theme) =>
     card: {
       backgroundColor: theme.surface,
       borderRadius: radii.card,
-      padding: spacing.lg,
+      padding: spacing.xl,
       gap: spacing.md,
     },
     headRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
+      gap: spacing.lg,
     },
     disc: {
-      width: 40,
-      height: 40,
+      // The skeleton's placeholder for the icon tile.
+      width: 84,
+      height: 84,
       borderRadius: 20,
       backgroundColor: theme.accentContainer,
-      alignItems: 'center',
-      justifyContent: 'center',
     },
     nameBlock: {
       flex: 1,
-      gap: 2,
+      gap: 6,
     },
-    tierRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
+    eyebrow: {
+      fontFamily: fontFamilies.sectionLabel,
+      fontSize: 12,
+      letterSpacing: 1,
+      color: theme.secondary,
     },
-    tierName: {
-      ...typeStyles.heading,
+    rankName: {
+      fontFamily: fontFamilies.display,
+      fontSize: 30,
       color: theme.text,
     },
-    chip: {
-      backgroundColor: theme.accentContainer,
-      borderRadius: radii.pill,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 2,
-    },
-    chipText: {
-      ...typeStyles.caption,
-      color: theme.onAccentContainer,
-    },
     rpText: {
-      ...typeStyles.bodySmall,
+      ...typeStyles.body,
+      fontSize: 15,
       color: theme.muted,
     },
     toNext: {
       ...typeStyles.bodySmall,
       color: theme.muted,
-      textAlign: 'right',
     },
     skeletonDisc: {
       backgroundColor: theme.accentContainer,
@@ -410,6 +369,7 @@ const createStyles = (theme: Theme) =>
       borderRadius: 4,
       backgroundColor: theme.accentContainer,
       overflow: 'hidden',
+      marginTop: 2,
     },
     barFill: {
       height: '100%',

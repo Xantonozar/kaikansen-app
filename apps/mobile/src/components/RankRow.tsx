@@ -6,28 +6,31 @@ import {
   radii,
   spacing,
   typeStyles,
-  withOpacity,
   type Theme,
 } from '../theme';
 import { useTheme } from '../theme-context';
 import { Avatar } from './Avatar';
-import { formatRp, tierLabel, tierLine } from '../rankUtil';
+import { formatRp, ladderLabel, standingOf } from '../rankUtil';
+import { RankIcon } from './RankIcon';
 
 /**
  * One RP leaderboard row. Two geometries:
  *
  * - `standard` (default): the quiz hub preview row — position,
- *   avatar, display name over its tier line, and the RP figure
- *   right; the signed-in user's row is tinted with the lavender
- *   container and carries the YOU pill.
- * - `board`: the full Leaderboard screen's rows, re-measured
- *   against that screen's Stitch HTML (px-4/py-2.5 full-bleed
- *   rows in the unpadded grouped card, 32px avatars, 12px RP,
- *   tier in the mauve secondary, the viewer's row as an INSET
- *   rounded card with the accent border). The board shows the
- *   username (the mock's bold line; the Notifications slice set
- *   the same precedent) and the plain tier name. `onPress` makes
- *   the row tappable (the board routes to the user's profile).
+ *   avatar, display name over its ladder-rank line, the rank
+ *   icon chip and the RP figure right; the signed-in user's
+ *   row is tinted with the lavender container and carries the
+ *   YOU pill.
+ * - `board`: the full Leaderboard screen's rows, per the
+ *   owner-approved rank mock (2026-11-10): each row is its OWN
+ *   white card — position, avatar LEFT, username over the
+ *   ladder-rank name line, the rank icon chip (a pale tile,
+ *   ~44px) RIGHT of the name block, then the bold RP figure.
+ *   The anatomy is owner-confirmed: avatar never moves to the
+ *   card, the icon never leaves the right side. The viewer's
+ *   row keeps its lavender tint + YOU pill. The board shows
+ *   the username (the mock's bold line). `onPress` makes the
+ *   row tappable (the board routes to the user's profile).
  */
 export function RankRow({
   position,
@@ -48,13 +51,10 @@ export function RankRow({
   const styles = useMemo(() => createStyles(theme), [theme]);
   const board = variant === 'board';
   const name = board ? entry.username : entry.displayName || entry.username;
+  const standing = standingOf(entry);
 
   const rowStyle = board
-    ? [
-        styles.boardRow,
-        bordered && !isYou && styles.boardRowBordered,
-        isYou && styles.boardRowYou,
-      ]
+    ? [styles.boardRow, isYou && styles.boardRowYou]
     : [
         styles.row,
         bordered && !isYou && styles.rowBordered,
@@ -72,22 +72,12 @@ export function RankRow({
       >
         {position}
       </Text>
-      <View
-        style={
-          board
-            ? isYou
-              ? styles.boardAvatarYou
-              : styles.boardAvatar
-            : undefined
-        }
-      >
-        <Avatar
-          url={entry.avatarUrl}
-          name={name}
-          seed={entry.username}
-          size={board ? 32 : 40}
-        />
-      </View>
+      <Avatar
+        url={entry.avatarUrl}
+        name={name}
+        seed={entry.username}
+        size={board ? 44 : 40}
+      />
       <View style={board ? styles.boardMain : styles.main}>
         <View style={board ? styles.boardNameRow : styles.nameRow}>
           <Text
@@ -112,9 +102,10 @@ export function RankRow({
           style={board ? styles.boardTier : styles.tier}
           numberOfLines={1}
         >
-          {board ? tierLabel(entry.tier) : tierLine(entry.tier, entry.division)}
+          {ladderLabel(standing.rank)}
         </Text>
       </View>
+      <RankIcon rank={standing.rank} size={board ? 44 : 36} />
       <Text
         style={
           board
@@ -122,7 +113,7 @@ export function RankRow({
             : styles.rp
         }
       >
-        {formatRp(entry.rp)}
+        {board ? entry.rp.toLocaleString('en-US') : formatRp(entry.rp)}
       </Text>
     </>
   );
@@ -199,45 +190,28 @@ const createStyles = (theme: Theme) =>
       fontSize: 14,
       color: theme.text,
     },
-    /* Board variant — the Leaderboard screen's HTML values. */
+    /* Board variant — the approved rank mock's row cards. */
     boardRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      paddingVertical: 10,
+      gap: spacing.md,
+      backgroundColor: theme.surface,
+      borderRadius: radii.card,
+      paddingVertical: spacing.md,
       paddingHorizontal: spacing.lg,
-    },
-    boardRowBordered: {
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      // The HTML's pale divide (#F0EBF0): the border token at
-      // 0.6, the Notifications slice's treatment for grouped
-      // card hairlines.
-      borderBottomColor: withOpacity(theme.border, 0.6),
     },
     boardRowYou: {
       backgroundColor: theme.accentContainer,
-      borderRadius: radii.base,
-      borderWidth: 1,
-      // The HTML's accent-at-10% inset border.
-      borderColor: withOpacity(theme.accent, 0.1),
-      marginHorizontal: 6,
-      marginVertical: 2,
-      paddingHorizontal: spacing.md,
     },
     boardPosition: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 14,
-      color: theme.text,
-      width: 20,
-    },
-    boardAvatar: {
-      marginLeft: spacing.sm,
-    },
-    boardAvatarYou: {
-      marginLeft: 6,
+      fontSize: 16,
+      color: theme.accent,
+      width: 22,
+      textAlign: 'center',
     },
     boardMain: {
       flex: 1,
-      marginLeft: spacing.md,
       gap: 1,
     },
     boardNameRow: {
@@ -247,7 +221,7 @@ const createStyles = (theme: Theme) =>
     },
     boardName: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 14,
+      fontSize: 15,
       color: theme.text,
       flexShrink: 1,
     },
@@ -263,12 +237,12 @@ const createStyles = (theme: Theme) =>
       color: theme.onAccent,
     },
     boardTier: {
-      ...typeStyles.caption,
-      color: theme.secondary,
+      ...typeStyles.bodySmall,
+      color: theme.muted,
     },
     boardRp: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 12,
+      fontSize: 15,
       color: theme.text,
     },
     boardAccentText: {
