@@ -7,13 +7,13 @@ import {
 } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { AppImage } from '../../../src/components/AppImage';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
@@ -737,8 +737,8 @@ export default function SoloQuizScreen() {
             </View>
             <View style={styles.revealRow}>
               {feedback.reveal.coverImage ? (
-                <Image
-                  source={{ uri: feedback.reveal.coverImage }}
+                <AppImage
+                  source={feedback.reveal.coverImage}
                   style={styles.revealCover}
                 />
               ) : (

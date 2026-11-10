@@ -417,7 +417,10 @@ export async function startDownload(
     animeTitle: detail.animeTitle,
     artistName: artists.length > 0 ? artists : null,
     version: entry.version,
-    coverImage: detail.animeCoverImage,
+    // Perf problem 11: the stored cover snapshot feeds only
+    // thumbnails (Downloads rows, the mini player's offline
+    // fallback) — store the SMALL variant, never the large one.
+    coverImage: detail.animeCoverImageSmall ?? detail.animeCoverImage,
   });
   inFlightFiles.add(fileName);
   try {
@@ -471,7 +474,10 @@ export async function startDownload(
       animeTitle: detail.animeTitle,
       artistName: artists.length > 0 ? artists : null,
       version: entry.version,
-      coverImage: detail.animeCoverImage,
+      // Perf problem 11: the stored cover snapshot feeds only
+    // thumbnails (Downloads rows, the mini player's offline
+    // fallback) — store the SMALL variant, never the large one.
+    coverImage: detail.animeCoverImageSmall ?? detail.animeCoverImage,
       downloadedAt: new Date().toISOString(),
     };
     const records = [record, ...state.records.filter((r) => r.id !== id)].sort(

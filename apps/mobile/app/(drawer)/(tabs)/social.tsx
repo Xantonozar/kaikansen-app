@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,6 +17,7 @@ import type {
 import { cacheKeyFor, fixtureMode, subscribeCache } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
+import { AppImage } from '../../../src/components/AppImage';
 import { PersonRow } from '../../../src/components/PersonRow';
 import {
   fetchFriendsActivity,
@@ -266,9 +266,10 @@ export default function SocialScreen() {
             style={({ pressed }) => pressed && styles.pressed}
           >
             {item.item.cover ? (
-              <Image
-                source={{ uri: item.item.cover }}
+              <AppImage
+                source={item.item.cover}
                 style={styles.feedThumb}
+                recyclingKey={item.item.slug}
               />
             ) : (
               <View style={[styles.feedThumb, styles.feedThumbPlaceholder]} />

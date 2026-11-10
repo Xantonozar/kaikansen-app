@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Linking,
   Pressable,
   ScrollView,
@@ -9,6 +8,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { AppImage } from '../../../src/components/AppImage';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft, ExternalLink } from 'lucide-react-native';
@@ -194,7 +194,7 @@ export default function AnimeDetailScreen() {
         >
           {/* Full-bleed banner, 224dp (mock: h-56). */}
           {bannerUri ? (
-            <Image source={{ uri: bannerUri }} style={styles.banner} />
+            <AppImage source={bannerUri} style={styles.banner} />
           ) : (
             <View style={[styles.banner, styles.placeholder]} />
           )}

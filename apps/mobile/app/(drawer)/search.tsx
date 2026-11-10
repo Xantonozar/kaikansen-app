@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
+  FlatList,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -9,6 +9,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { AppImage } from '../../src/components/AppImage';
+import { Image as ExpoImage } from '../../src/expoImage';
+import type { ImageSource as ExpoImageSource } from 'expo-image';
+import { cloudinarySized } from '../../src/imageVariants';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import {
@@ -27,6 +31,11 @@ import type {
 } from '@kaikansen/contracts';
 import { fetchHome, searchThemes } from '../../src/api';
 import { pickDefaultArtist } from '../../src/defaultArtists';
+import {
+  mergeSearchPage,
+  searchResultKeys,
+  SEARCH_PAGE_SIZE,
+} from '../../src/searchPaging';
 import { useFavorites } from '../../src/favoritesStore';
 import {
   queueItemsFromSummaries,
@@ -91,9 +100,11 @@ function ArtistRowAvatar({
     !photoFailed
   ) {
     return (
-      <Image
-        source={{ uri: imageUrl }}
+      <ExpoImage
+        source={{ uri: cloudinarySized(imageUrl, 144) }}
         style={styles.entityDisc}
+        contentFit="cover"
+        cachePolicy="memory-disk"
         onError={() => setPhotoFailed(true)}
         accessibilityLabel={`${name}'s image`}
       />
@@ -101,9 +112,11 @@ function ArtistRowAvatar({
   }
   if (!chibiFailed) {
     return (
-      <Image
-        source={pickDefaultArtist(slug)}
+      <ExpoImage
+        source={pickDefaultArtist(slug) as ExpoImageSource}
         style={styles.entityDisc}
+        contentFit="cover"
+        cachePolicy="memory-disk"
         onError={() => setChibiFailed(true)}
         accessibilityLabel={`${name}'s image`}
       />
@@ -147,9 +160,14 @@ function ArtistRowAvatar({
  *   filter row are owner additions 2026-11-10, the mock predates
  *   them). A filter chip row sits above the groups — All ·
  *   Artists · Users · Anime · Themes in the Season chips' pill
- *   language; a chip narrows the list to its group, and a filter
- *   with no matches falls back to the plain no-results line, never
- *   a blank page. The landing state carries no filter row: Recent,
+ *   language. The All view is the Option B preview (spec
+ *   2026-11-10): at most 5 rows per group, the group header
+ *   carrying its total and a "View all" affordance when more
+ *   exist. A chip — or View all — opens that group's full view:
+ *   a virtualised list lazy-loading pages of 15 (GET /search's
+ *   group + limit params) with infinite scroll, deduped on the
+ *   group's identity key. A view with no matches falls back to
+ *   the plain no-results line, never a blank page. The landing state carries no filter row: Recent,
  *   Trending and Popular are not group results. Empty groups are
  *   omitted; fixture mode honestly serves empty anime/artist/user
  *   groups, so it renders Themes alone. The anime subline omits
@@ -166,6 +184,53 @@ function ArtistRowAvatar({
  * the list. Row play claims the shown list as the queue and opens
  * the player, exactly like Home's Popular and the Playlist rows.
  */
+/** The non-'all' filters — each is one full-view group. */
+type FullGroup = Exclude<SearchFilter, 'all'>;
+type SearchRowItem =
+  | ThemeSummary
+  | SearchAnimeResult
+  | SearchArtistResult
+  | NetworkUser;
+
+/** The rows of one group out of a search response. */
+function groupRows(res: SearchResponse, group: FullGroup): SearchRowItem[] {
+  switch (group) {
+    case 'themes':
+      return res.results;
+    case 'anime':
+      return res.anime;
+    case 'artists':
+      return res.artists;
+    case 'users':
+      return res.users;
+  }
+}
+
+/** A row's identity key within its group (dedupe + FlatList keys). */
+function itemKey(group: FullGroup, item: SearchRowItem): string {
+  switch (group) {
+    case 'themes':
+      return searchResultKeys.themes(item as ThemeSummary);
+    case 'anime':
+      return searchResultKeys.anime(item as SearchAnimeResult);
+    case 'artists':
+      return searchResultKeys.artists(item as SearchArtistResult);
+    case 'users':
+      return searchResultKeys.users(item as NetworkUser);
+  }
+}
+
+/** One group's full-view state: pages of 15, appended as the list scrolls. */
+interface FullState {
+  group: FullGroup;
+  items: SearchRowItem[];
+  page: number;
+  hasMore: boolean;
+  loading: boolean;
+  loaded: boolean;
+  failed: boolean;
+}
+
 export default function SearchScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -292,6 +357,95 @@ export default function SearchScreen() {
     return () => clearTimeout(timer);
   }, [query]);
 
+  /* Full view (Option B): a picked chip loads that group's first
+     page of 15; onEndReached appends further pages, deduped by
+     the group's identity key (searchPaging). A generation counter
+     keeps a superseded request (chip switch, query change — which
+     also resets the filter to 'all') from landing its rows. */
+  const [full, setFull] = useState<FullState | null>(null);
+  const fullSeq = useRef(0);
+
+  useEffect(() => {
+    if (filter === 'all') {
+      fullSeq.current += 1;
+      setFull(null);
+      return;
+    }
+    const q = query.trim();
+    if (q.length === 0) return;
+    const group = filter;
+    const seq = ++fullSeq.current;
+    setFull({
+      group,
+      items: [],
+      page: 0,
+      hasMore: true,
+      loading: true,
+      loaded: false,
+      failed: false,
+    });
+    searchThemes(q, { group, page: 1, limit: SEARCH_PAGE_SIZE })
+      .then((res) => {
+        if (fullSeq.current !== seq) return;
+        setFull({
+          group,
+          items: groupRows(res, group),
+          page: 1,
+          hasMore: res.hasMore,
+          loading: false,
+          loaded: true,
+          failed: false,
+        });
+      })
+      .catch(() => {
+        if (fullSeq.current !== seq) return;
+        setFull({
+          group,
+          items: [],
+          page: 0,
+          hasMore: false,
+          loading: false,
+          loaded: true,
+          failed: true,
+        });
+      });
+  }, [filter, query]);
+
+  const loadMoreFull = () => {
+    if (!full || full.loading || !full.hasMore || !full.loaded) return;
+    const { group } = full;
+    const nextPage = full.page + 1;
+    const seq = fullSeq.current;
+    setFull({ ...full, loading: true });
+    searchThemes(query.trim(), {
+      group,
+      page: nextPage,
+      limit: SEARCH_PAGE_SIZE,
+    })
+      .then((res) => {
+        if (fullSeq.current !== seq) return;
+        setFull((prev) =>
+          prev && prev.group === group
+            ? {
+                ...prev,
+                items: mergeSearchPage(
+                  prev.items,
+                  groupRows(res, group),
+                  (item) => itemKey(group, item),
+                ),
+                page: nextPage,
+                hasMore: res.hasMore,
+                loading: false,
+              }
+            : prev,
+        );
+      })
+      .catch(() => {
+        if (fullSeq.current !== seq) return;
+        setFull((prev) => (prev ? { ...prev, loading: false } : prev));
+      });
+  };
+
   const playFromList = (items: ThemeSummary[], index: number) => {
     const item = items[index];
     if (!item) return;
@@ -342,7 +496,7 @@ export default function SearchScreen() {
       style={({ pressed }) => [styles.entityRow, pressed && styles.pressed]}
     >
       {a.coverImageLarge ? (
-        <Image source={{ uri: a.coverImageLarge }} style={styles.entityCover} />
+        <AppImage source={a.coverImageLarge} style={styles.entityCover} recyclingKey={String(a.anilistId)} />
       ) : (
         <View style={[styles.entityCover, styles.placeholder]} />
       )}
@@ -442,6 +596,103 @@ export default function SearchScreen() {
         })}
       </View>
     </ScrollView>
+  );
+
+  // Preview group header: the heading, the group's total, and
+  // "View all" while more pages exist (Option B preview rules).
+  const groupHeader = (label: string, group: FullGroup) => {
+    const meta = response?.groups[group];
+    if (!meta) return <Text style={styles.resultHeading}>{label}</Text>;
+    return (
+      <View style={styles.groupHeaderRow}>
+        <Text style={styles.resultHeadingRow}>{label}</Text>
+        <View style={styles.groupHeaderSide}>
+          <Text style={styles.groupTotal}>{meta.total}</Text>
+          {meta.hasMore && (
+            <Pressable
+              onPress={() => setFilter(group)}
+              hitSlop={6}
+              accessibilityRole="button"
+              accessibilityLabel={`View all ${label}`}
+            >
+              <Text style={styles.viewAllText}>View all</Text>
+            </Pressable>
+          )}
+        </View>
+      </View>
+    );
+  };
+
+  const renderFullRow = (item: SearchRowItem, index: number) => {
+    if (filter === 'themes') {
+      const t = item as ThemeSummary;
+      const items = (full?.items ?? []) as ThemeSummary[];
+      return (
+        <ThemeRow
+          item={t}
+          search
+          onPress={() => openTheme(t.slug)}
+          onPlay={() => playFromList(items, index)}
+          saved={favorites.isFavorite(t.slug)}
+          savePending={favorites.isPending(t.slug)}
+          onToggleSave={() => void favorites.toggle(t.slug)}
+        />
+      );
+    }
+    if (filter === 'anime') return animeRow(item as SearchAnimeResult);
+    if (filter === 'artists') return artistRow(item as SearchArtistResult);
+    if (filter === 'users') return userRow(item as NetworkUser);
+    return null;
+  };
+
+  // The full view: one group's virtualised list (pages of 15,
+  // footer spinner while the next page loads, honest empty and
+  // failed states — never a blank page).
+  const fullItems =
+    full && filter !== 'all' && full.group === filter ? full.items : [];
+  const fullViewList = (
+    <FlatList
+      style={styles.results}
+      data={fullItems}
+      keyExtractor={(item) => itemKey(filter as FullGroup, item)}
+      renderItem={({ item, index }) => renderFullRow(item, index)}
+      onEndReached={loadMoreFull}
+      onEndReachedThreshold={0.4}
+      keyboardShouldPersistTaps="handled"
+      contentContainerStyle={[
+        styles.resultsContent,
+        styles.resultsContentResults,
+      ]}
+      ListHeaderComponent={
+        favorites.lastError ? (
+          <Pressable
+            onPress={favorites.clearError}
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss"
+          >
+            <Text style={styles.saveError}>{favorites.lastError}</Text>
+          </Pressable>
+        ) : undefined
+      }
+      ListFooterComponent={
+        full?.loading && fullItems.length > 0 ? (
+          <View style={styles.center}>
+            <ActivityIndicator color={theme.accent} />
+          </View>
+        ) : undefined
+      }
+      ListEmptyComponent={
+        full?.failed ? (
+          <Text style={styles.hint}>Search failed. Try again.</Text>
+        ) : full?.loaded ? (
+          <Text style={styles.hint}>No results for “{query.trim()}”.</Text>
+        ) : (
+          <View style={styles.center}>
+            <ActivityIndicator color={theme.accent} />
+          </View>
+        )
+      }
+    />
   );
 
   // The drawer navigator shows no header, so the screen clears the
@@ -610,7 +861,9 @@ export default function SearchScreen() {
         ) : response ? (
           <>
             {filterChips}
-            {noVisibleResults ? (
+            {filter !== 'all' ? (
+              fullViewList
+            ) : noVisibleResults ? (
               <Text style={styles.hint}>
                 No results for “{query.trim()}”.
               </Text>
@@ -634,7 +887,7 @@ export default function SearchScreen() {
                 )}
                 {showThemes && results.length > 0 && (
                   <View>
-                    <Text style={styles.resultHeading}>Themes</Text>
+                    {groupHeader('Themes', 'themes')}
                     {results.map((item, index) => (
                       <ThemeRow
                         key={item.slug}
@@ -651,19 +904,19 @@ export default function SearchScreen() {
                 )}
                 {showAnime && anime.length > 0 && (
                   <View style={animeSpaced ? styles.groupSpaced : undefined}>
-                    <Text style={styles.resultHeading}>Anime</Text>
+                    {groupHeader('Anime', 'anime')}
                     {anime.map(animeRow)}
                   </View>
                 )}
                 {showArtists && artists.length > 0 && (
                   <View style={artistsSpaced ? styles.groupSpaced : undefined}>
-                    <Text style={styles.resultHeading}>Artists</Text>
+                    {groupHeader('Artists', 'artists')}
                     {artists.map(artistRow)}
                   </View>
                 )}
                 {showUsers && users.length > 0 && (
                   <View style={usersSpaced ? styles.groupSpaced : undefined}>
-                    <Text style={styles.resultHeading}>Users</Text>
+                    {groupHeader('Users', 'users')}
                     {users.map(userRow)}
                   </View>
                 )}
@@ -776,6 +1029,36 @@ const createStyles = (theme: Theme) =>
     color: theme.text,
     marginBottom: 10,
     paddingHorizontal: 2,
+  },
+  groupHeaderRow: {
+    // The Option B preview header: heading left, the group's
+    // total + "View all" right, the heading's own mb-2.5 rhythm.
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+    paddingHorizontal: 2,
+  },
+  resultHeadingRow: {
+    // resultHeading without its bottom margin (the row owns it).
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 14,
+    letterSpacing: -0.2,
+    color: theme.text,
+  },
+  groupHeaderSide: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  groupTotal: {
+    ...typeStyles.bodySmall,
+    color: theme.muted,
+  },
+  viewAllText: {
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.accent,
   },
   groupSpaced: {
     // search-results.html: sections after the first sit mt-3.5

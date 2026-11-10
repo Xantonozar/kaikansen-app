@@ -8,7 +8,6 @@ import {
 } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -61,6 +60,7 @@ import { ThemeRow } from '../../../src/components/ThemeRow';
 import { ThemeRowMenu } from '../../../src/components/ThemeRowMenu';
 import { AddToPlaylistSheet } from '../../../src/components/AddToPlaylistSheet';
 import { WatchQualityPicker } from '../../../src/components/WatchQualityPicker';
+import { AppImage } from '../../../src/components/AppImage';
 import { watchArtworkUnderPlayer } from '../../../src/mediaEngine';
 import { useAuth } from '../../../src/auth';
 import {
@@ -940,8 +940,8 @@ export default function ThemeDetailScreen() {
                       nativeControls={false}
                     />
                     {cover ? (
-                      <Image
-                        source={{ uri: cover }}
+                      <AppImage
+                        source={cover}
                         style={styles.heroVideo}
                       />
                     ) : (
@@ -966,8 +966,8 @@ export default function ThemeDetailScreen() {
                       hasArtwork: !!cover,
                       framesRendered: playback.framesRendered,
                     }) && cover ? (
-                      <Image
-                        source={{ uri: cover }}
+                      <AppImage
+                        source={cover}
                         style={styles.heroArtworkUnder}
                         resizeMode="cover"
                       />
@@ -1012,8 +1012,8 @@ export default function ThemeDetailScreen() {
                   />
                   <View style={styles.listenArtWrap}>
                     {cover ? (
-                      <Image
-                        source={{ uri: cover }}
+                      <AppImage
+                        source={cover}
                         style={styles.listenArt}
                       />
                     ) : (
@@ -1107,7 +1107,7 @@ export default function ThemeDetailScreen() {
               ) : (
                 <>
                   {cover ? (
-                    <Image source={{ uri: cover }} style={styles.cover} />
+                    <AppImage source={cover} style={styles.cover} />
                   ) : (
                     <View style={[styles.cover, styles.coverEmpty]} />
                   )}

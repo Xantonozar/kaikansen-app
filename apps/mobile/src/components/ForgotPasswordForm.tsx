@@ -1,7 +1,6 @@
 import { useMemo, useState, type ComponentType, type ReactNode } from 'react';
 import {
   ActivityIndicator,
-  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -23,6 +22,7 @@ import {
 } from 'lucide-react-native';
 import { radii, spacing, typeStyles, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
+import { AppImage } from './AppImage';
 import { useAuth } from '../auth';
 import { ApiError, requestPasswordReset, resetPasswordWithCode } from '../authApi';
 import { FORM_MAX_WIDTH } from '../layout';
@@ -231,7 +231,7 @@ export function ForgotPasswordForm() {
           </Pressable>
 
           <View style={styles.brand}>
-            <Image source={GLYPH} style={styles.glyph} resizeMode="contain" />
+            <AppImage source={GLYPH} style={styles.glyph} resizeMode="contain" />
             <Text style={styles.brandName}>KAIKANSEN</Text>
             <Text style={styles.tagline}>Anime openings &amp; endings</Text>
           </View>

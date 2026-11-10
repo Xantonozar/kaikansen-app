@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -12,6 +11,8 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { AppImage } from '../../src/components/AppImage';
+import type { ImageSource as ExpoImageSource } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import {
@@ -275,8 +276,8 @@ export default function EditProfileScreen() {
                                 color={theme.accent}
                               />
                             ) : (
-                              <Image
-                                source={source}
+                              <AppImage
+                                source={source as ExpoImageSource}
                                 style={styles.pickerImage}
                               />
                             )}

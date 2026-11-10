@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -36,6 +35,7 @@ import type {
 import { cacheKeyFor, fixtureMode, subscribeCache } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
+import { AppImage } from '../../../src/components/AppImage';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import {
   fetchFollowState,
@@ -389,7 +389,7 @@ export default function UserProfileScreen() {
         ]}
       >
         {cover ? (
-          <Image source={{ uri: cover }} style={styles.ratingCover} />
+          <AppImage source={cover} style={styles.ratingCover} recyclingKey={entry.themeSlug} />
         ) : (
           <View style={[styles.ratingCover, styles.ratingCoverEmpty]} />
         )}
@@ -420,16 +420,16 @@ export default function UserProfileScreen() {
   const playlistMosaic = (covers: string[]) => {
     if (covers.length === 1) {
       return (
-        <Image source={{ uri: covers[0] }} style={styles.plGridSingle} />
+        <AppImage source={covers[0]} style={styles.plGridSingle} />
       );
     }
     return (
       <View style={styles.plGrid}>
         {[0, 1, 2, 3].map((i) =>
           covers[i] ? (
-            <Image
+            <AppImage
               key={i}
-              source={{ uri: covers[i] }}
+              source={covers[i]}
               style={styles.plGridCell}
             />
           ) : (

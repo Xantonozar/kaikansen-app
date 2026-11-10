@@ -18,5 +18,9 @@ module.exports = {
   // the stub satisfies without parsing binary content.
   moduleNameMapper: {
     '\\.(webp|png|jpg|jpeg|gif)$': '<rootDir>/jest.asset-stub.js',
+    // expo-image is a native module; component modules reach it
+    // through src/expoImage.ts. Pure-logic suites never render,
+    // so the component maps to a stub (perf problem 11).
+    '^expo-image$': '<rootDir>/jest.expo-image-stub.js',
   },
 };

@@ -7,12 +7,12 @@ import {
 } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Pressable,
   StyleSheet,
   View,
   Text,
 } from 'react-native';
+import { AppImage } from './AppImage';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEvent, useEventListener } from 'expo';
 import { Music2, Volume2, VolumeX } from 'lucide-react-native';
@@ -556,7 +556,7 @@ export function QuizMedia({
       ) : (
         <>
           {coverImage ? (
-            <Image source={{ uri: coverImage }} style={styles.artwork} />
+            <AppImage source={coverImage} style={styles.artwork} />
           ) : (
             <View style={[styles.artwork, styles.artworkPlaceholder]} />
           )}

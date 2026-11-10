@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef } from 'react';
 import {
   Animated,
   Easing,
-  Image,
   Pressable,
   StyleSheet,
   Text,
@@ -24,6 +23,7 @@ import {
   type Theme,
 } from '../src/theme';
 import { useTheme } from '../src/theme-context';
+import { AppImage } from '../src/components/AppImage';
 
 // The brand glyph — the current brush-K logo asset (the same
 // splash-icon the login/register brand headers draw).
@@ -123,7 +123,7 @@ export default function AnilistHandoffScreen() {
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.column}>
         <View style={styles.main}>
-          <Image source={GLYPH} style={styles.glyph} resizeMode="contain" />
+          <AppImage source={GLYPH} style={styles.glyph} resizeMode="contain" />
           <Text style={styles.wordmark}>KAIKANSEN</Text>
 
           <View style={styles.card}>

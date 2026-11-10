@@ -1,12 +1,13 @@
 import { useMemo } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { AppImage } from './AppImage';
+import { themeCoverForSlot } from '../imageVariants';
 import { Heart, Play, X } from 'lucide-react-native';
 import type { ThemeSummary } from '@kaikansen/contracts';
 import { fontFamilies, radii, spacing, typeStyles, type Theme } from '../theme';
@@ -198,7 +199,8 @@ export function ThemeRow({
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const cover = item.animeCoverImageSmall ?? item.animeCoverImage;
+  // Row thumbnail: the SMALL cover variant (perf problem 11).
+  const cover = themeCoverForSlot(item, 'row');
   const artistText = item.artistName ?? item.allArtists.join(', ');
 
   const playButton = (
@@ -266,8 +268,9 @@ export function ThemeRow({
       ]}
     >
       {cover ? (
-        <Image
-          source={{ uri: cover }}
+        <AppImage
+          source={cover}
+          recyclingKey={item.slug}
           style={[
             styles.thumb,
             compact && styles.thumbCompact,

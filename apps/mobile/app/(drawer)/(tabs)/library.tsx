@@ -8,7 +8,6 @@ import {
 } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Modal,
   Pressable,
   RefreshControl,
@@ -74,6 +73,7 @@ import {
   useDownloads,
 } from '../../../src/downloads';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import { AppImage } from '../../../src/components/AppImage';
 import { ThemeRowMenu } from '../../../src/components/ThemeRowMenu';
 import {
   queueItemFromSummary,
@@ -1110,9 +1110,10 @@ export default function LibraryScreen() {
               ]}
             >
               {cover ? (
-                <Image
-                  source={{ uri: cover }}
+                <AppImage
+                  source={cover}
                   style={styles.recentCover}
+                  recyclingKey={item.slug}
                 />
               ) : (
                 <View
@@ -1204,16 +1205,16 @@ export default function LibraryScreen() {
   const renderMosaic = (covers: string[]) => {
     if (covers.length === 1) {
       return (
-        <Image source={{ uri: covers[0] }} style={styles.plGridSingle} />
+        <AppImage source={covers[0]} style={styles.plGridSingle} />
       );
     }
     return (
       <View style={styles.plGrid}>
         {[0, 1, 2, 3].map((i) =>
           covers[i] ? (
-            <Image
+            <AppImage
               key={i}
-              source={{ uri: covers[i] }}
+              source={covers[i]}
               style={styles.plGridCell}
             />
           ) : (
@@ -1649,8 +1650,8 @@ export default function LibraryScreen() {
             ]}
           >
             {section.cover ? (
-              <Image
-                source={{ uri: section.cover }}
+              <AppImage
+                source={section.cover}
                 style={styles.groupCover}
               />
             ) : (
@@ -1785,9 +1786,10 @@ export default function LibraryScreen() {
                 ]}
               >
                 {record.coverImage ? (
-                  <Image
-                    source={{ uri: record.coverImage }}
+                  <AppImage
+                    source={record.coverImage}
                     style={styles.dlThumb}
+                    recyclingKey={record.slug}
                   />
                 ) : (
                   <View style={[styles.dlThumb, styles.plCoverEmpty]} />

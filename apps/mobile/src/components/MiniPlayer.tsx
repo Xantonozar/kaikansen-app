@@ -1,12 +1,12 @@
 import { useMemo } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { AppImage } from './AppImage';
 import { usePathname, useRouter } from 'expo-router';
 import { Pause, Play, SkipForward } from 'lucide-react-native';
 import {
@@ -125,7 +125,7 @@ export function MiniPlayer({
         />
       </View>
       {nowPlaying.cover ? (
-        <Image source={{ uri: nowPlaying.cover }} style={styles.cover} />
+        <AppImage source={nowPlaying.cover} style={styles.cover} />
       ) : (
         <View style={[styles.cover, styles.coverEmpty]} />
       )}

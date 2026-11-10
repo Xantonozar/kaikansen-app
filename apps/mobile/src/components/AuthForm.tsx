@@ -1,7 +1,6 @@
 import { useMemo, useState, type ComponentType, type ReactNode } from 'react';
 import {
   ActivityIndicator,
-  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -30,6 +29,7 @@ import {
   type Theme,
 } from '../theme';
 import { useTheme } from '../theme-context';
+import { AppImage } from './AppImage';
 import { useAuth } from '../auth';
 import { FORM_MAX_WIDTH } from '../layout';
 
@@ -285,7 +285,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
                 real glyph, the tracked KAIKANSEN wordmark and the
                 tagline — replacing the plain wordmark text. */}
             <View style={styles.brand}>
-              <Image source={GLYPH} style={styles.glyph} resizeMode="contain" />
+              <AppImage source={GLYPH} style={styles.glyph} resizeMode="contain" />
               <Text style={styles.brandName}>KAIKANSEN</Text>
               <Text style={styles.tagline}>Anime openings &amp; endings</Text>
             </View>

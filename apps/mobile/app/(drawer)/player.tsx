@@ -1,12 +1,12 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { AppImage } from '../../src/components/AppImage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   useFocusEffect,
@@ -342,8 +342,8 @@ export default function PlayerScreen() {
                 hasArtwork: !!cover,
                 framesRendered: playback.framesRendered,
               }) && cover ? (
-                <Image
-                  source={{ uri: cover }}
+                <AppImage
+                  source={cover}
                   style={styles.artworkUnder}
                   resizeMode="cover"
                 />
@@ -360,8 +360,8 @@ export default function PlayerScreen() {
           ) : (
             <>
               {cover ? (
-                <Image
-                  source={{ uri: cover }}
+                <AppImage
+                  source={cover}
                   style={styles.artwork}
                   resizeMode="cover"
                 />

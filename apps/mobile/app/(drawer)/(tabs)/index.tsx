@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   FlatList,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -36,6 +35,8 @@ import {
 import { fetchFriendsActivity, fetchUserNetwork } from '../../../src/socialApi';
 import { Avatar } from '../../../src/components/Avatar';
 import { PopularCard } from '../../../src/components/PopularCard';
+import { AppImage } from '../../../src/components/AppImage';
+import { themeCoverForSlot } from '../../../src/imageVariants';
 import { PosterCard } from '../../../src/components/PosterCard';
 import {
   SkeletonBlock,
@@ -398,7 +399,8 @@ export default function HomeScreen() {
   const coverBySlug = useMemo(() => {
     const map = new Map<string, string>();
     const add = (t: ThemeSummary) => {
-      const cover = t.animeCoverImage ?? t.animeCoverImageSmall;
+      // Feed thumbs are row slots: the SMALL variant (perf problem 11).
+      const cover = t.animeCoverImageSmall ?? t.animeCoverImage;
       if (cover && !map.has(t.slug)) map.set(t.slug, cover);
     };
     if (home) {
@@ -462,7 +464,7 @@ export default function HomeScreen() {
   /* The Surprise banner's artwork: the rolled theme's anime cover —
      the same field the Home rails draw (PosterCard's order). */
   const surpriseCover = surprisePick
-    ? (surprisePick.animeCoverImage ?? surprisePick.animeCoverImageSmall)
+    ? themeCoverForSlot(surprisePick, 'hero')
     : null;
 
   return (
@@ -606,8 +608,8 @@ export default function HomeScreen() {
         >
           {surpriseCover && (
             <View style={styles.surpriseArtWrap} pointerEvents="none">
-              <Image
-                source={{ uri: surpriseCover }}
+              <AppImage
+                source={surpriseCover}
                 style={styles.surpriseArt}
                 resizeMode="cover"
               />
@@ -754,10 +756,11 @@ export default function HomeScreen() {
                   ]}
                 >
                   <View style={styles.continueArtWrap}>
-                    {entry.theme!.animeCoverImage ? (
-                      <Image
-                        source={{ uri: entry.theme!.animeCoverImage }}
+                    {themeCoverForSlot(entry.theme!, 'row') ? (
+                      <AppImage
+                        source={themeCoverForSlot(entry.theme!, 'row')!}
                         style={styles.continueArt}
+                        recyclingKey={entry.theme!.slug}
                       />
                     ) : (
                       <View
@@ -970,9 +973,10 @@ export default function HomeScreen() {
                               }
                             >
                               {cover ? (
-                                <Image
-                                  source={{ uri: cover }}
+                                <AppImage
+                                  source={cover}
                                   style={styles.feedThumb}
+                                  recyclingKey={activity.item.slug}
                                 />
                               ) : (
                                 <View

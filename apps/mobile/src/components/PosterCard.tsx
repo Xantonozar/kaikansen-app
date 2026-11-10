@@ -1,5 +1,7 @@
 import { useMemo } from 'react';
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { AppImage } from './AppImage';
+import { themeCoverForSlot } from '../imageVariants';
 import type { ThemeSummary } from '@kaikansen/contracts';
 import { fontFamilies, radii, spacing, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
@@ -44,7 +46,9 @@ export function PosterCard({
   const theme = useTheme();
   const width = usePosterCardWidth();
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const cover = item.animeCoverImage ?? item.animeCoverImageSmall;
+  // Portrait card art is a card/hero slot: the LARGE cover
+  // variant (perf problem 11 — themeCoverForSlot 'hero').
+  const cover = themeCoverForSlot(item, 'hero');
 
   return (
     <Pressable
@@ -57,7 +61,7 @@ export function PosterCard({
     >
       <View style={styles.art}>
         {cover ? (
-          <Image source={{ uri: cover }} style={styles.image} />
+          <AppImage source={cover} style={styles.image} recyclingKey={item.slug} />
         ) : (
           <View style={[styles.image, styles.placeholder]} />
         )}

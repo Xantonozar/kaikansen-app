@@ -1,12 +1,13 @@
 import { useMemo } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { AppImage } from './AppImage';
+import { themeCoverForSlot } from '../imageVariants';
 import { Heart, Play } from 'lucide-react-native';
 import type { ThemeSummary } from '@kaikansen/contracts';
 import {
@@ -53,7 +54,8 @@ export function PopularCard({
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const cover = item.animeCoverImageSmall ?? item.animeCoverImage;
+  // Row thumbnail: the SMALL cover variant (perf problem 11).
+  const cover = themeCoverForSlot(item, 'row');
   const artist = item.artistName ?? item.allArtists.join(', ');
   const subtitle = artist || item.animeTitle;
 
@@ -63,7 +65,7 @@ export function PopularCard({
       style={({ pressed }) => [styles.card, pressed && styles.pressed]}
     >
       {cover ? (
-        <Image source={{ uri: cover }} style={styles.thumb} />
+        <AppImage source={cover} style={styles.thumb} recyclingKey={item.slug} />
       ) : (
         <View style={[styles.thumb, styles.placeholder]} />
       )}

@@ -1,8 +1,11 @@
 import { useMemo, useState } from 'react';
-import { Image, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { Image } from '../expoImage';
 import { fontFamilies, typeStyles, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
 import { pickDefaultAvatar } from '../defaultAvatars';
+import type { ImageSource as ExpoImageSource } from 'expo-image';
+import { avatarUrlUsable, cloudinarySized } from '../imageVariants';
 
 /**
  * User avatar (Slice M5) — the shared circle for feed rows, comments,
@@ -33,6 +36,15 @@ import { pickDefaultAvatar } from '../defaultAvatars';
  * same chibi (or initial disc) instead of leaving an empty circle
  * on every surface. The failure is keyed by URL, so a changed
  * avatarUrl is tried fresh.
+ *
+ * Perf problem 11: the renderer is expo-image (disk+memory cache)
+ * and the chain's decisions run through the pure, unit-tested
+ * helpers in imageVariants.ts (isRenderableImageUrl /
+ * avatarUrlUsable) — the chain itself is byte-for-byte the one
+ * described above. A stored URL on Cloudinary (the app's own
+ * default-avatar picks are saved as Cloudinary URLs) is fetched
+ * at 3× the display size via cloudinarySized; other hosts pass
+ * through unchanged.
  */
 export function Avatar({
   url,
@@ -51,13 +63,7 @@ export function Avatar({
   const styles = useMemo(() => createStyles(theme), [theme]);
   /** The exact URL whose load failed (see the header note). */
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  const hasUrl = url !== null && url.length > 0;
-  const urlPath = hasUrl ? url.toLowerCase().split(/[?#]/)[0] : '';
-  const usable =
-    hasUrl &&
-    !urlPath.endsWith('.svg') &&
-    !urlPath.endsWith('/svg') &&
-    failedUrl !== url;
+  const usable = avatarUrlUsable(url, failedUrl);
   const initial = (name.trim().charAt(0) || '?').toUpperCase();
   const box = {
     width: size,
@@ -65,11 +71,13 @@ export function Avatar({
     borderRadius: size / 2,
   };
 
-  if (usable) {
+  if (usable && url !== null) {
     return (
       <Image
-        source={{ uri: url }}
+        source={{ uri: cloudinarySized(url, size * 3) }}
         style={[styles.image, box]}
+        contentFit="cover"
+        cachePolicy="memory-disk"
         accessibilityLabel={`${name}'s avatar`}
         onError={() => setFailedUrl(url)}
       />
@@ -78,8 +86,10 @@ export function Avatar({
   if (!usable && !disableDefaultAvatar) {
     return (
       <Image
-        source={pickDefaultAvatar(seed ?? name)}
+        source={pickDefaultAvatar(seed ?? name) as ExpoImageSource}
         style={[styles.image, box]}
+        contentFit="cover"
+        cachePolicy="memory-disk"
         accessibilityLabel={`${name}'s avatar`}
       />
     );

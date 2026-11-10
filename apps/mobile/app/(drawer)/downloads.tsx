@@ -2,7 +2,6 @@ import { useMemo } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -26,6 +25,7 @@ import {
   useDownloads,
 } from '../../src/downloads';
 import { fixtureMode } from '../../src/api';
+import { AppImage } from '../../src/components/AppImage';
 import {
   usePlaybackSession,
   type QueueItem,
@@ -122,7 +122,7 @@ export default function DownloadsScreen() {
 
   const cover = (uri: string | null) =>
     uri ? (
-      <Image source={{ uri }} style={styles.cover} />
+      <AppImage source={uri} style={styles.cover} />
     ) : (
       <View style={[styles.cover, styles.coverEmpty]} />
     );

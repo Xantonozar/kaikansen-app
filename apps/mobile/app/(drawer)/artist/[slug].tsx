@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { Image as ExpoImage } from '../../../src/expoImage';
+import type { ImageSource as ExpoImageSource } from 'expo-image';
+import { cloudinarySized } from '../../../src/imageVariants';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft } from 'lucide-react-native';
@@ -167,16 +169,20 @@ export default function ArtistDetailScreen() {
               {data.artist.imageUrl &&
               !data.artist.imageUrl.toLowerCase().includes('.svg') &&
               !imageError ? (
-                <Image
-                  source={{ uri: data.artist.imageUrl }}
+                <ExpoImage
+                  source={{ uri: cloudinarySized(data.artist.imageUrl, 360) }}
                   style={styles.artistImage}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
                   onError={() => setImageError(true)}
                   accessibilityLabel={`${data.artist.name}'s image`}
                 />
               ) : (
-                <Image
-                  source={pickDefaultArtist(data.artist.slug)}
+                <ExpoImage
+                  source={pickDefaultArtist(data.artist.slug) as ExpoImageSource}
                   style={styles.artistImage}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
                   accessibilityLabel={`${data.artist.name}'s image`}
                 />
               )}

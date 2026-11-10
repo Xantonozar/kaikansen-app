@@ -172,7 +172,10 @@ export function queueItemFromSummary(item: ThemeSummary): QueueItem {
       item.allArtists.length > 0
         ? item.allArtists.join(' / ')
         : (item.artistName ?? ''),
-    coverUrl: item.animeCoverImage ?? item.animeCoverImageSmall,
+    // Perf problem 11: the queue cover feeds the mini-player's
+    // 44px thumb (and the player page's Up Next card) — the SMALL
+    // variant, never the large/banner-class field.
+    coverUrl: item.animeCoverImageSmall ?? item.animeCoverImage,
   };
 }
 
@@ -208,7 +211,10 @@ export interface PlaybackResolution {
 
 type Playback = ReturnType<typeof usePlayback>;
 
-/** What the mini player renders — title, artist line, cover. */
+/** What the mini player renders — title, artist line, cover.
+    `cover` is the SMALL variant only (perf problem 11): the
+    detail's grill image is the ~1900px AniList banner and must
+    never feed the 44px thumb. */
 export interface NowPlaying {
   title: string;
   artist: string;
@@ -790,7 +796,12 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
           detail.allArtists.length > 0
             ? detail.allArtists.join(' / ')
             : (detail.artistName ?? ''),
-        cover: detail.animeGrillImage ?? detail.animeCoverImage,
+        // Perf problem 11: the mini-player thumb takes the
+        // theme's SMALL cover variant — the detail's grill image
+        // is the ~1900px banner and its large cover is hero-sized;
+        // neither may feed a 44px thumb again.
+        cover:
+          detail.animeCoverImageSmall ?? detail.animeCoverImage,
       };
     }
     if (currentQueueItem) {

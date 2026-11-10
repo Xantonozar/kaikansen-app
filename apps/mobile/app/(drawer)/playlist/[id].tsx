@@ -7,7 +7,6 @@ import {
 } from 'react';
 import {
   ActivityIndicator,
-  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -49,6 +48,7 @@ import {
   updatePlaylist,
 } from '../../../src/libraryApi';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import { AppImage } from '../../../src/components/AppImage';
 import { formatTime } from '../../../src/playback';
 import {
   queueItemsFromSummaries,
@@ -450,19 +450,17 @@ export default function PlaylistDetailScreen() {
             <View style={styles.headerTop}>
               {gridCovers.length === 1 ||
               (gridCovers.length === 0 && playlist.coverImage) ? (
-                <Image
-                  source={{
-                    uri: gridCovers[0] ?? playlist.coverImage ?? undefined,
-                  }}
+                <AppImage
+                  source={gridCovers[0] ?? playlist.coverImage ?? ''}
                   style={styles.gridSingle}
                 />
               ) : (
                 <View style={styles.grid}>
                   {[0, 1, 2, 3].map((i) =>
                     gridCovers[i] ? (
-                      <Image
+                      <AppImage
                         key={i}
-                        source={{ uri: gridCovers[i] }}
+                        source={gridCovers[i]}
                         style={styles.gridCell}
                       />
                     ) : (

@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
-import { Image, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
+import { Image } from '../expoImage';
 import type { LadderRank } from '@kaikansen/contracts';
 import { radii, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
 import { ladderInfo } from '../rankUtil';
+import { cloudinarySized } from '../imageVariants';
 
 /**
  * The shared rank-icon tile (app ladder, 2026-11-10): the rank's
@@ -45,9 +47,10 @@ export function RankIcon({
       accessibilityLabel={`${info.label} rank icon`}
     >
       <Image
-        source={failed ? info.iconAsset : { uri: info.iconUrl }}
+        source={failed ? info.iconAsset : { uri: cloudinarySized(info.iconUrl, size * 3) }}
         style={{ width: size, height: size }}
-        resizeMode="cover"
+        contentFit="cover"
+        cachePolicy="memory-disk"
         onError={() => setFailed(true)}
         accessibilityIgnoresInvertColors
       />
