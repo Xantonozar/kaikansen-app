@@ -90,6 +90,57 @@ function makeTheme(id: string, title: string, extra: Record<string, unknown> = {
   };
 }
 
+/**
+ * Perf-problem-6 probe: wraps a fake models object and counts
+ * the library reads the room engine issues.
+ *
+ * - users.find is the contribution computation's signature
+ *   read (the AniList id lookup): a whole-roster computation
+ *   issues exactly ONE users.find for the entire roster (the
+ *   web's buildRoomPlayerLibraryProfiles reads all players in
+ *   one find), a join-time computation issues one for the
+ *   joiner. contributions() = users.find count.
+ * - distinct reads the three per-player library models
+ *   (history/ratings/favourites distinctCalls counters). The
+ *   dynamicThemeFilter also issues distincts — these tests
+ *   stay on common/anilist pools, whose round paths never
+ *   call it, so distinct totals here are library-only.
+ * - themesFind counts theme-catalogue finds (candidate
+ *   derivation, NOT a library read — tracked only to show it
+ *   is deliberately excluded from the assertions).
+ */
+function withLibrarySpies(m: ReturnType<typeof makeFakeModels>) {
+  const counts = { usersFind: 0, themesFind: 0 };
+  const origUserFind = m.userModel.find.bind(m.userModel);
+  (m.userModel as Record<string, unknown>).find = (
+    filter: Record<string, unknown>,
+  ) => {
+    counts.usersFind += 1;
+    return origUserFind(filter);
+  };
+  const origThemesFind = m.themeModel.find.bind(m.themeModel);
+  (m.themeModel as Record<string, unknown>).find = (
+    filter: Record<string, unknown>,
+  ) => {
+    counts.themesFind += 1;
+    return origThemesFind(filter);
+  };
+  return {
+    counts,
+    distinct(): number {
+      return (
+        m.historyModel.distinctCalls +
+        m.ratingsModel.distinctCalls +
+        m.favoritesModel.distinctCalls
+      );
+    },
+    /** Contribution-computation passes (one users.find each). */
+    contributions(): number {
+      return counts.usersFind;
+    },
+  };
+}
+
 function makeFakeModels() {
   const themes: Record<string, unknown>[] = [
     makeTheme('theme-correct', 'Correct'),
@@ -189,21 +240,64 @@ function makeFakeModels() {
     },
   };
 
+  const ratings: Record<string, unknown>[] = [];
+  const favorites: Record<string, unknown>[] = [];
+  const ratingsModel = {
+    docs: ratings,
+    /** Spy knob: total distinct() calls issued against this model. */
+    distinctCalls: 0,
+    distinct(_field: string, filter: Record<string, unknown>) {
+      this.distinctCalls += 1;
+      return queryOf([
+        ...new Set(
+          ratings
+            .filter((r) => String(r.userId) === String(filter.userId))
+            .map((r) => r.themeId),
+        ),
+      ]);
+    },
+    find: () => chain([]),
+  };
+  const favoritesModel = {
+    docs: favorites,
+    /** Spy knob: total distinct() calls issued against this model. */
+    distinctCalls: 0,
+    distinct(_field: string, filter: Record<string, unknown>) {
+      this.distinctCalls += 1;
+      return queryOf([
+        ...new Set(
+          favorites
+            .filter((f) => String(f.userId) === String(filter.userId))
+            .map((f) => f.themeId),
+        ),
+      ]);
+    },
+    find: () => chain([]),
+  };
+
   const historyModel = {
     docs: history,
-    distinct: (_field: string, filter: Record<string, unknown>) =>
-      queryOf([
+    /** Spy knob: total distinct() calls issued against this model. */
+    distinctCalls: 0,
+    distinct(_field: string, filter: Record<string, unknown>) {
+      this.distinctCalls += 1;
+      return queryOf([
         ...new Set(
           history
             .filter((h) => String(h.userId) === String(filter.userId))
             .map((h) => h.themeId),
         ),
-      ]),
+      ]);
+    },
     find: (filter: Record<string, unknown>) =>
       chain(history.filter((h) => String(h.userId) === String(filter.userId))),
   };
   const emptyDistinct = {
-    distinct: () => queryOf([]),
+    distinctCalls: 0,
+    distinct() {
+      this.distinctCalls += 1;
+      return queryOf([]);
+    },
     find: () => chain([]),
   };
 
@@ -226,13 +320,27 @@ function makeFakeModels() {
     themeModel as never,
     userModel as never,
     historyModel as never,
-    emptyDistinct as never,
-    emptyDistinct as never,
+    ratingsModel as never,
+    favoritesModel as never,
     rank as never,
     broadcaster as never,
   );
 
-  return { service, roomModel, themeModel, userModel, history, events, rank };
+  return {
+    service,
+    roomModel,
+    themeModel,
+    userModel,
+    history,
+    ratings,
+    favorites,
+    historyModel,
+    ratingsModel,
+    favoritesModel,
+    emptyDistinct,
+    events,
+    rank,
+  };
 }
 
 const partyCreate = {
@@ -898,6 +1006,321 @@ describe('QuizRoomsService — AniList pool (owner spec, 2026-11-10)', () => {
     const doc = roomDoc(m, roomId);
     const round = (doc.rounds as Record<string, unknown>[])[0];
     expect(round.themeId).toBe('theme-anilist');
+  });
+});
+
+describe('QuizRoomsService — room library cache (perf problem 6)', () => {
+  /**
+   * Same fixture shape as the eligibility suite: anime 100 has
+   * two themes (a1, a2), 200 and 300 one each. HOST knows a1+b1,
+   * GUEST knows a1+a2+c1 — shared themes = {a1} → count 1.
+   */
+  function seedCommon(m: ReturnType<typeof makeFakeModels>) {
+    m.themeModel.docs.push(
+      makeTheme('theme-a1', 'Alpha', { anilistId: 100 }),
+      makeTheme('theme-a2', 'Alpha', { anilistId: 100 }),
+      makeTheme('theme-b1', 'Beta', { anilistId: 200 }),
+      makeTheme('theme-c1', 'Gamma', { anilistId: 300 }),
+    );
+    m.history.push(
+      { userId: HOST, themeId: 'theme-a1' },
+      { userId: HOST, themeId: 'theme-b1' },
+      { userId: GUEST, themeId: 'theme-a1' },
+      { userId: GUEST, themeId: 'theme-a2' },
+      { userId: GUEST, themeId: 'theme-c1' },
+    );
+  }
+
+  it('computes each contribution once at join; emits and round starts issue zero library reads', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    const spy = withLibrarySpies(m);
+
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'common',
+    });
+    // Create's state read computed the host's contribution once
+    // (one whole-roster pass).
+    expect(spy.contributions()).toBe(1);
+    expect(create.room?.commonPoolCount).toBe(2);
+
+    const joined = await m.service.joinByCode(GUEST, create.roomCode!);
+    // The guest's join issued exactly ONE computation pass (the
+    // join-time computation); the join's own state read then
+    // recomputed the new line-up in one pass — no per-emit loop.
+    expect(spy.contributions()).toBe(3);
+    expect(joined.room?.commonPoolCount).toBe(1);
+
+    // Repeated state emits: pure cache hits, zero LIBRARY reads
+    // (users/distinct). The candidate derivation still reads
+    // the theme CATALOGUE per emit — that is not a library read
+    // and is out of this problem's scope.
+    const countsAfterJoins = { ...spy.counts, distinct: spy.distinct() };
+    for (let i = 0; i < 3; i++) {
+      const state = await m.service.getRoomStateForMember(HOST, create.roomId!);
+      expect(state.room?.commonPoolCount).toBe(1);
+    }
+    expect(spy.counts.usersFind).toBe(countsAfterJoins.usersFind);
+    expect(spy.distinct()).toBe(countsAfterJoins.distinct);
+
+    // Round 1: the eligibility gate + the theme pick both read
+    // the cache — still zero library reads.
+    await m.service.toggleReady(HOST, create.roomId!);
+    await m.service.toggleReady(GUEST, create.roomId!);
+    await m.service.startGame(HOST, create.roomId!);
+    expect(spy.counts.usersFind).toBe(countsAfterJoins.usersFind);
+    expect(spy.distinct()).toBe(countsAfterJoins.distinct);
+    const doc = roomDoc(m, create.roomId!);
+    const round1 = (doc.rounds as Record<string, unknown>[])[0];
+    expect(round1.themeId).toBe('theme-a1'); // the one shared theme
+  });
+
+  it('recomputes only on join, leave and pool-mode change', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    const spy = withLibrarySpies(m);
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'common',
+    });
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    await m.service.getRoomStateForMember(HOST, create.roomId!);
+    expect(spy.contributions()).toBe(3); // create pass + join pass + line-up pass
+
+    // A leave dirties the room: the leave's own state read
+    // recomputes the REMAINING roster (the host alone) in one
+    // pass.
+    await m.service.leaveRoom(GUEST, create.roomId!);
+    const afterLeave = await m.service.getRoomStateForMember(HOST, create.roomId!);
+    expect(afterLeave.room?.commonPoolCount).toBe(2); // host alone: a1 + b1
+    expect(spy.contributions()).toBe(4);
+    // …and then it is cached again.
+    await m.service.getRoomStateForMember(HOST, create.roomId!);
+    expect(spy.contributions()).toBe(4);
+
+    // A different pool mode changes the cache key — but an
+    // anilist waiting state never reads contributions (the
+    // count attaches to common pools only), so nothing
+    // recomputes until a round or a common read asks.
+    await m.service.updateSettings(HOST, create.roomId!, {
+      poolMode: 'anilist',
+    });
+    const anilistState = await m.service.getRoomStateForMember(HOST, create.roomId!);
+    expect(anilistState.room?.commonPoolCount).toBeUndefined();
+    expect(spy.contributions()).toBe(4);
+    // Back to common: the settings ack reads the count — but
+    // the switch back restores the exact key the room was
+    // cached under (host alone, common), so the cached profiles
+    // serve it with no recompute at all.
+    const back = await m.service.updateSettings(HOST, create.roomId!, {
+      poolMode: 'common',
+    });
+    expect(back.commonPoolCount).toBe(2);
+    expect(spy.contributions()).toBe(4);
+    await m.service.getRoomStateForMember(HOST, create.roomId!);
+    expect(spy.contributions()).toBe(4);
+  });
+
+  it('a membership change after a match ends forces a fresh computation at the next match', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    const spy = withLibrarySpies(m);
+    // A 3-player room: the next-match flow needs a leave from
+    // an in-progress/ended room, which keeps the room alive
+    // (an ended 2-player room's sole remaining player leaving
+    // ends the room for good — there is no rematch surface).
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'common',
+      roundCount: 1,
+    });
+    const roomId = create.roomId!;
+    // GUEST2 must share a1 BEFORE they join: contributions are
+    // computed at join time (the spec'd behaviour), so a history
+    // row added after the join would legitimately be invisible
+    // to this room's cache — the first match's gate passes only
+    // if a1 is shared by all three from the start.
+    m.history.push({ userId: GUEST2, themeId: 'theme-a1' });
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    await m.service.joinByCode(GUEST2, create.roomCode!);
+    await m.service.toggleReady(HOST, roomId);
+    await m.service.toggleReady(GUEST, roomId);
+    await m.service.toggleReady(GUEST2, roomId);
+    await m.service.startGame(HOST, roomId);
+    const afterFirstStart = spy.contributions();
+
+    // The match ends: the round clock is moved past the
+    // countdown, the host answers correctly and the
+    // all-but-one rule auto-locks the last player, ending the
+    // single-round game. (The auto-lock only triggers once a
+    // correct answer exists among the answered rows, so the
+    // guest answers first.)
+    const doc = roomDoc(m, roomId);
+    // Same clock trick as elsewhere in this file: answers open
+    // once startedAt passes; move it into the past.
+    ((doc.rounds as Record<string, unknown>[])[0] as Record<string, unknown>).startedAt =
+      new Date(Date.now() - 1000);
+    await m.service.submitAnswer(GUEST, roomId, 1, 'Alpha EN');
+    await m.service.submitAnswer(HOST, roomId, 1, 'Alpha EN');
+    expect(doc.status).toBe('ended');
+
+    // The guest then leaves (the room survives: players
+    // remain) and a NEW player joins: the line-up of the next
+    // match differs from the ended one, so its round 1 must
+    // compute from the new line-up — the spec's next-match
+    // rule. (joinByCode requires a 'waiting' room, so the
+    // rematch precondition — the room driver returning the
+    // room to 'waiting' between matches — is applied directly
+    // to the fixture, the same direct-mutation style this file
+    // uses for the round clock. The leave/join invalidation
+    // under test happens entirely through the service.)
+    await m.service.leaveRoom(GUEST, roomId);
+    doc.status = 'waiting';
+    // The room driver returning the room to 'waiting' between
+    // matches also resets the ready flags (the match consumed
+    // them: the startGame autoplay hold reads them) — same
+    // direct-fixture-mutation style as the status above.
+    for (const p of doc.players as Record<string, unknown>[]) {
+      p.ready = false;
+    }
+    const joined = await m.service.joinByCode(OUTSIDER, create.roomCode!);
+    // OUTSIDER has no library: the fresh line-up's shared count
+    // is honestly 0. The join itself dirtied the cache, so the
+    // waiting read already recomputed the new line-up.
+    expect(joined.room?.commonPoolCount).toBe(0);
+    const afterRejoin = spy.contributions();
+    expect(afterRejoin).toBeGreaterThan(afterFirstStart);
+
+    // Round 1 of the new match reads the NEW line-up's cache:
+    // the eligibility gate refuses (0 shared < 1 round) instead
+    // of dealing from the old line-up's stale {a1} — and the
+    // gate is served from the cache the join built, with zero
+    // further library reads.
+    await m.service.toggleReady(HOST, roomId);
+    await m.service.toggleReady(GUEST2, roomId);
+    await m.service.toggleReady(OUTSIDER, roomId);
+    await expect(m.service.startGame(HOST, roomId)).rejects.toThrow(
+      'Not enough common themes: you share 0 themes but this game needs 1 rounds.',
+    );
+    expect(spy.contributions()).toBe(afterRejoin); // no extra reads
+  });
+
+  it('a failed join-time computation counts the player as empty and never fails the join', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'common',
+    });
+    // The guest's history read explodes from here on.
+    const orig = m.historyModel.distinct.bind(m.historyModel);
+    (m.historyModel as Record<string, unknown>).distinct = (
+      field: string,
+      filter: Record<string, unknown>,
+    ) => {
+      if (String(filter.userId) === GUEST) {
+        return {
+          exec: async () => {
+            throw new Error('library read exploded');
+          },
+        };
+      }
+      return orig(field, filter);
+    };
+    const joined = await m.service.joinByCode(GUEST, create.roomCode!);
+    expect(joined.success).toBe(true);
+    // The guest counts as an empty library → the shared count
+    // honestly drops to 0, exactly as for an empty player.
+    expect(joined.room?.commonPoolCount).toBe(0);
+  });
+
+  it('a player with no library still zeroes the common count from the cache', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    const spy = withLibrarySpies(m);
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'common',
+    });
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    const joined = await m.service.joinByCode(GUEST2, create.roomCode!);
+    expect(joined.room?.commonPoolCount).toBe(0);
+    const before = { ...spy.counts, distinct: spy.distinct() };
+    const state = await m.service.getRoomStateForMember(HOST, create.roomId!);
+    expect(state.room?.commonPoolCount).toBe(0);
+    // Served from cache: zero library reads (the catalogue read
+    // behind the count derivation is not a library read).
+    expect(spy.counts.usersFind).toBe(before.usersFind);
+    expect(spy.distinct()).toBe(before.distinct);
+  });
+
+  it('AniList-pool rounds reuse the cached per-player AniList sets', async () => {
+    const m = makeFakeModels();
+    m.themeModel.docs.push(
+      makeTheme('theme-anilist', 'Listed', { anilistId: 100 }),
+    );
+    const host = m.userModel.docs.find((u) => u._id === HOST)!;
+    (host.anilist as { completedMediaIds: number[] }).completedMediaIds = [100];
+    const spy = withLibrarySpies(m);
+
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'anilist',
+      roundCount: 2,
+    });
+    const roomId = create.roomId!;
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    await m.service.toggleReady(HOST, roomId);
+    await m.service.toggleReady(GUEST, roomId);
+    await m.service.startGame(HOST, roomId);
+    // Round 1's union resolution read the cached contributions:
+    // exactly the join-time passes happened (the host's at the
+    // first state read + the guest's join-time pass).
+    expect(spy.contributions()).toBe(2);
+    const afterRound1 = { ...spy.counts, distinct: spy.distinct() };
+
+    const doc = roomDoc(m, roomId);
+    const round1 = (doc.rounds as Record<string, unknown>[])[0];
+    expect(round1.themeId).toBe('theme-anilist');
+
+    // Give the HOST a second AniList-listed anime BEFORE round
+    // 2. The cache serves join-time contributions, so the new
+    // set is NOT picked up mid-room — round 2 must still deal
+    // from {100}. (In production the exclusion of the used
+    // theme empties the one-theme pool and the generic
+    // fallback deals another theme; the fake catalogue's
+    // matches() cannot express that same-key $in+$nin
+    // exclusion — it evaluates $nin before $in — so the
+    // fallback deals the catalogue's first theme here. Either
+    // way the pick did NOT come from the AniList union: if the
+    // cache had been bypassed and {100, 400} re-read, the
+    // union filter would hold both themes and the pick would
+    // be theme-anilist2, the fake $sample's first match.)
+    m.themeModel.docs.push(
+      makeTheme('theme-anilist2', 'Listed Two', { anilistId: 400 }),
+    );
+    (host.anilist as { completedMediaIds: number[] }).completedMediaIds = [
+      100, 400,
+    ];
+
+    // The round ends by TIMER (the server-owned path: everyone
+    // unanswered is auto-locked and the round closes), then
+    // round 2 starts: still no per-round library reads (the
+    // round's own theme lookups read the catalogue, not the
+    // libraries).
+    await (m.service as unknown as {
+      endRoundByTimer: (id: string) => Promise<void>;
+    }).endRoundByTimer(roomId);
+    await m.service.nextRound(HOST, roomId, 1);
+    expect(spy.counts.usersFind).toBe(afterRound1.usersFind);
+    expect(spy.distinct()).toBe(afterRound1.distinct);
+    const round2 = (doc.rounds as Record<string, unknown>[])[1];
+    // Round 2 did NOT deal from the host's new uncached set:
+    // the pick is the fallback's first theme, never
+    // theme-anilist2 (proof above).
+    expect(round2.themeId).not.toBe('theme-anilist2');
+    expect(round2.themeId).toBe('theme-correct');
   });
 });
 

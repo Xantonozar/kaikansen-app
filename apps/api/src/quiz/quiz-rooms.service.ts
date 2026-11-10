@@ -85,6 +85,17 @@ interface LibraryProfile {
   exactThemeIdsByAnimeId: Map<number, Set<string>>;
 }
 
+/** One room's cached library contributions (perf problem 6). */
+interface RoomLibraryCache {
+  /** Key for the cached profiles; null = nothing cached yet. */
+  key: string | null;
+  profiles: LibraryProfile[] | null;
+  /** Player ids a join has already computed into the cache. */
+  joined: Set<string>;
+  /** Membership changed since the last match: recompute all. */
+  libraryDirty: boolean;
+}
+
 /** Cleanup thresholds — lib/quiz-room-cleanup.ts, verbatim. */
 const HEARTBEAT_THRESHOLD_MS = 45 * 1000;
 const EMPTY_ROOM_THRESHOLD_MS = 60 * 1000;
@@ -148,6 +159,12 @@ function intersectSets<T>(left: Set<T>, right: Set<T>): Set<T> {
  *   game starts only when the players' shared-theme count (the
  *   common candidate set's size) is at least the round count;
  *   waiting-room states carry that count as commonPoolCount.
+ * - Per-room library cache (perf problem 6, 2026-11-10): each
+ *   player's library contribution is computed once at join and
+ *   cached on the room's in-memory state; counts and round
+ *   starts derive from the cache — library queries happen on
+ *   join/leave/pool-change and at a dirty room's next match,
+ *   never per state emit or per round.
  * - Start: party needs ≥2 players, ALL ready; duel needs
  *   exactly 2, both ready. Duels also auto-start the moment the
  *   second player readies (the web's ready route). Only the
@@ -235,6 +252,44 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly roundTimers = new Map<string, NodeJS.Timeout>();
   private sweepTimer: NodeJS.Timeout | null = null;
+  /**
+   * Per-room library cache (perf problem 6, spec
+   * ROOM-LIBRARY-CACHE-2026-11-10): each player's library
+   * contribution (AniList id set + history/rating/favourite
+   * theme ids — exactly what computeCommonCandidates reads) is
+   * computed ONCE when the player joins the room and cached
+   * here, keyed by room id. Common-pool counts and round starts
+   * derive from these cached profiles — no library queries per
+   * state emit or per round. Entries are recomputed only when
+   * a player joins or leaves, or the pool mode changes; a
+   * membership change also marks the room libraryDirty, and the
+   * next match's round 1 recomputes every contribution of the
+   * (changed) line-up before dealing. Cache lives and dies
+   * with the room: entries are dropped when a room ends or is
+   * deleted. Nothing is persisted — no schema, no Redis.
+   */
+  private readonly libraryCache = new Map<string, RoomLibraryCache>();
+
+  /** Drops a room's cached library contributions (room death). */
+  private dropLibraryCache(roomId: string): void {
+    this.libraryCache.delete(roomId);
+  }
+
+  /**
+   * Discards cached contributions after a membership change and
+   * marks the room dirty: the next match must recompute every
+   * contribution of the new line-up before round 1 (owner
+   * clarification 2026-11-10 ~18:14). While the room is waiting
+   * the next state read recomputes lazily; the dirty flag is
+   * consumed by beginRound(1).
+   */
+  private markLibraryDirty(roomId: string): void {
+    const cache = this.libraryCache.get(roomId);
+    if (cache) {
+      cache.profiles = null;
+      cache.libraryDirty = true;
+    }
+  }
 
   constructor(
     @Optional()
@@ -405,7 +460,72 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     return {};
   }
 
-  /** The web's buildRoomPlayerLibraryProfiles. */
+  /**
+   * The web's buildRoomPlayerLibraryProfiles, per player:
+   * one player's library contribution — the AniList-listed
+   * anime ids (the stored merged Watching+Completed set) union
+   * the in-app data (history / ratings / favourites), resolved
+   * to anime ids plus the exact per-anime theme ids.
+   *
+   * Failure tolerance (perf problem 6): a failed computation
+   * yields an EMPTY contribution — today's behaviour for a
+   * player with no AniList and no history — never a failed
+   * join or a failed round start.
+   */
+  private async computePlayerProfile(
+    models: RoomModels,
+    user: (User & { _id: unknown }) | undefined,
+    userId: string,
+  ): Promise<LibraryProfile> {
+    try {
+      const syncedAnimeIds = new Set<number>(
+        (user?.anilist?.completedMediaIds ?? []).filter(
+          (id): id is number => typeof id === 'number',
+        ),
+      );
+
+      const [historyIds, ratedIds, favIds] = await Promise.all([
+        models.watchHistory.distinct('themeId', { userId }).exec(),
+        models.ratings.distinct('themeId', { userId }).exec(),
+        models.favorites.distinct('themeId', { userId }).exec(),
+      ]);
+      const localThemeIds = Array.from(
+        new Set(
+          [...historyIds, ...ratedIds, ...favIds].map((id) => String(id)),
+        ),
+      );
+      const localThemes =
+        localThemeIds.length > 0
+          ? ((await models.themes
+              .find({ _id: { $in: localThemeIds } })
+              .select('_id anilistId')
+              .lean()
+              .exec()) as { _id: unknown; anilistId: number | null }[])
+          : [];
+
+      const libraryAnimeIds = new Set<number>(syncedAnimeIds);
+      const exactThemeIdsByAnimeId = new Map<number, Set<string>>();
+      for (const theme of localThemes) {
+        if (!theme.anilistId) continue;
+        libraryAnimeIds.add(theme.anilistId);
+        const exactIds =
+          exactThemeIdsByAnimeId.get(theme.anilistId) ?? new Set<string>();
+        exactIds.add(String(theme._id));
+        exactThemeIdsByAnimeId.set(theme.anilistId, exactIds);
+      }
+
+      return { userId, syncedAnimeIds, libraryAnimeIds, exactThemeIdsByAnimeId };
+    } catch {
+      return {
+        userId,
+        syncedAnimeIds: new Set(),
+        libraryAnimeIds: new Set(),
+        exactThemeIdsByAnimeId: new Map(),
+      };
+    }
+  }
+
+  /** The web's buildRoomPlayerLibraryProfiles (whole roster). */
   private async buildLibraryProfiles(
     models: RoomModels,
     room: RoomDoc,
@@ -419,47 +539,93 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     const userById = new Map(users.map((u) => [String(u._id), u]));
 
     return Promise.all(
-      playerUserIds.map(async (userId) => {
-        const user = userById.get(userId);
-        const syncedAnimeIds = new Set<number>(
-          (user?.anilist?.completedMediaIds ?? []).filter(
-            (id): id is number => typeof id === 'number',
-          ),
-        );
-
-        const [historyIds, ratedIds, favIds] = await Promise.all([
-          models.watchHistory.distinct('themeId', { userId }).exec(),
-          models.ratings.distinct('themeId', { userId }).exec(),
-          models.favorites.distinct('themeId', { userId }).exec(),
-        ]);
-        const localThemeIds = Array.from(
-          new Set(
-            [...historyIds, ...ratedIds, ...favIds].map((id) => String(id)),
-          ),
-        );
-        const localThemes =
-          localThemeIds.length > 0
-            ? ((await models.themes
-                .find({ _id: { $in: localThemeIds } })
-                .select('_id anilistId')
-                .lean()
-                .exec()) as { _id: unknown; anilistId: number | null }[])
-            : [];
-
-        const libraryAnimeIds = new Set<number>(syncedAnimeIds);
-        const exactThemeIdsByAnimeId = new Map<number, Set<string>>();
-        for (const theme of localThemes) {
-          if (!theme.anilistId) continue;
-          libraryAnimeIds.add(theme.anilistId);
-          const exactIds =
-            exactThemeIdsByAnimeId.get(theme.anilistId) ?? new Set<string>();
-          exactIds.add(String(theme._id));
-          exactThemeIdsByAnimeId.set(theme.anilistId, exactIds);
-        }
-
-        return { userId, syncedAnimeIds, libraryAnimeIds, exactThemeIdsByAnimeId };
-      }),
+      playerUserIds.map((userId) =>
+        this.computePlayerProfile(models, userById.get(userId), userId),
+      ),
     );
+  }
+
+  /**
+   * Library profiles for a room state emit / round start,
+   * served from the per-room cache (perf problem 6). A read
+   * recomputes ONLY when the roster or pool mode changed
+   * since the last computation — the state emits and round
+   * starts themselves issue zero library queries.
+   *
+   * `forMatchStart` marks the round-1 read of a new match:
+   * the owner's next-match rule (2026-11-10 ~18:14) — when
+   * membership changed since the last match (libraryDirty),
+   * the match must NOT deal from contributions computed for
+   * the old line-up, so round 1 recomputes the whole (changed)
+   * line-up before the eligibility gate reads the count.
+   * Waiting-room reads keep serving the cache: the count line
+   * is allowed to be one membership behind, the match is not.
+   */
+  private async cachedLibraryProfiles(
+    models: RoomModels,
+    room: RoomDoc,
+    forMatchStart = false,
+  ): Promise<LibraryProfile[]> {
+    const roomId = String(room._id);
+    let cache = this.libraryCache.get(roomId);
+    if (!cache) {
+      cache = { key: null, profiles: null, joined: new Set(), libraryDirty: false };
+      this.libraryCache.set(roomId, cache);
+    }
+    const key = `${room.settings.poolMode}|${room.players
+      .map((p) => p.userId)
+      .join(',')}`;
+    const fresh =
+      cache.profiles &&
+      cache.key === key &&
+      !(cache.libraryDirty && forMatchStart);
+    if (fresh) {
+      return cache.profiles as LibraryProfile[];
+    }
+    const profiles = await this.buildLibraryProfiles(models, room);
+    cache.key = key;
+    cache.profiles = profiles;
+    cache.libraryDirty = false;
+    for (const p of room.players) cache.joined.add(p.userId);
+    return profiles;
+  }
+
+  /**
+   * Join-time computation (perf problem 6): when a player
+   * joins a common/AniList-pool room, their contribution is
+   * computed ONCE, immediately — not deferred to the next
+   * emit. Cheap-guarded: joins into rooms whose pool never
+   * reads libraries, repeat joins, and players already
+   * computed into this room's cache are no-ops.
+   */
+  private async notePlayerJoined(
+    models: RoomModels,
+    room: RoomDoc,
+    userId: string,
+  ): Promise<void> {
+    if (
+      room.settings.poolMode !== 'common' &&
+      room.settings.poolMode !== 'anilist'
+    ) {
+      return;
+    }
+    const roomId = String(room._id);
+    let cache = this.libraryCache.get(roomId);
+    if (!cache) {
+      cache = { key: null, profiles: null, joined: new Set(), libraryDirty: false };
+      this.libraryCache.set(roomId, cache);
+    }
+    if (cache.joined.has(userId)) return;
+    const users = (await models.users
+      .find({ _id: { $in: [userId] } })
+      .select('anilist.completedMediaIds')
+      .lean()
+      .exec()) as (User & { _id: unknown })[];
+    await this.computePlayerProfile(models, users[0], userId);
+    cache.joined.add(userId);
+    // The roster changed: derived sets recompute on next read.
+    cache.profiles = null;
+    cache.key = null;
   }
 
   /**
@@ -535,8 +701,13 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     models: RoomModels,
     room: RoomDoc,
     excludedThemeIds: string[] = [],
+    forMatchStart = false,
   ): Promise<RoomThemeDoc[]> {
-    const profiles = await this.buildLibraryProfiles(models, room);
+    const profiles = await this.cachedLibraryProfiles(
+      models,
+      room,
+      forMatchStart,
+    );
     const sharedAnimeIds =
       profiles.length > 0
         ? Array.from(profiles[0].libraryAnimeIds).filter((animeId) =>
@@ -574,8 +745,10 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
   private async countCommonPoolThemes(
     models: RoomModels,
     room: RoomDoc,
+    forMatchStart = false,
   ): Promise<number> {
-    return (await this.commonCandidates(models, room)).length;
+    return (await this.commonCandidates(models, room, [], forMatchStart))
+      .length;
   }
 
   /**
@@ -601,11 +774,13 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     models: RoomModels,
     room: RoomDoc,
     excludedThemeIds: string[],
+    forMatchStart = false,
   ): Promise<RoomThemeDoc | null> {
     const candidates = await this.commonCandidates(
       models,
       room,
       excludedThemeIds,
+      forMatchStart,
     );
     if (candidates.length === 0) return null;
     return candidates[Math.floor(Math.random() * candidates.length)];
@@ -627,26 +802,18 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
 
     // Common, Watched or AniList mode — all read the players' docs.
     const playerUserIds = room.players.map((p) => p.userId);
-    const users = (await models.users
-      .find({ _id: { $in: playerUserIds } })
-      .select('anilist.completedMediaIds')
-      .lean()
-      .exec()) as (User & { _id: unknown })[];
 
     if (room.settings.poolMode === 'anilist') {
       // Owner pool (spec 2026-11-10): the union over players of
       // the themes of their AniList-listed anime (the stored
-      // merged Watching+Completed set). Unlike 'watched' there
-      // is no create-time snapshot — the set resolves per round
-      // from the stored lists, as the common rule reads them.
+      // merged Watching+Completed set). Perf problem 6: the
+      // per-player AniList sets are the cached join-time
+      // contributions, not re-read per round. dynamicThemeFilter
+      // only runs at round starts, so a dirty room recomputes
+      // here too (the next-match rule).
+      const profiles = await this.cachedLibraryProfiles(models, room, true);
       const mediaIds = Array.from(
-        new Set(
-          users.flatMap((u) =>
-            (u.anilist?.completedMediaIds ?? []).filter(
-              (id): id is number => typeof id === 'number',
-            ),
-          ),
-        ),
+        new Set(profiles.flatMap((p) => Array.from(p.syncedAnimeIds))),
       );
       const anilistThemes =
         mediaIds.length > 0
@@ -663,6 +830,12 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         _id: { $in: anilistThemes.map((t) => String(t._id)) },
       };
     }
+
+    const users = (await models.users
+      .find({ _id: { $in: playerUserIds } })
+      .select('anilist.completedMediaIds')
+      .lean()
+      .exec()) as (User & { _id: unknown })[];
 
     let targetThemeIds: string[] = [];
     const isCommon = room.settings.poolMode === 'common';
@@ -717,12 +890,14 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     models: RoomModels,
     room: RoomDoc,
     excludedThemeIds: string[],
+    forMatchStart = false,
   ): Promise<RoomThemeDoc | null> {
     if (room.settings.poolMode === 'common') {
       const commonTheme = await this.selectCommonTheme(
         models,
         room,
         excludedThemeIds,
+        forMatchStart,
       );
       if (commonTheme) return commonTheme;
       // The web falls through to the generic filter selection.
@@ -949,6 +1124,10 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       }
       const room = cleaned;
 
+      // The roster BEFORE the cleanup above — it may have
+      // dropped stale players (perf problem 6).
+      const rosterBeforeCleanup = found.players.length;
+
       if (room.status !== 'waiting') {
         throw new RoomActionError('Room is no longer waiting for players');
       }
@@ -968,11 +1147,21 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
           joinedAt: new Date(),
           lastSeenAt: new Date(),
         } as RoomDoc['players'][number]);
+        // Perf problem 6: a join always changes the roster the
+        // next match plays with (and the cleanup just above may
+        // have dropped stale players too): derived sets
+        // recompute on next read, and the room is dirty for the
+        // next match.
+        void rosterBeforeCleanup;
+        this.markLibraryDirty(String(room._id));
         // If the room was empty (host gone), the joiner hosts.
         if (room.players.length === 1) {
           room.hostId = userId as unknown as RoomDoc['hostId'];
         }
         await room.save();
+        // Perf problem 6: the joiner's library contribution is
+        // computed once, at join.
+        await this.notePlayerJoined(models, room, userId);
 
         this.emit(room, 'room:player-joined', {
           userId,
@@ -1023,6 +1212,9 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
           .exec()) as RoomDoc;
         const alreadyIn = room.players.some((p) => p.userId === userId);
         if (!alreadyIn) {
+          // Perf problem 6: a join changes the roster the next
+          // match plays with — dirty the library cache.
+          this.markLibraryDirty(String(room._id));
           room.players.push({
             userId,
             username: user.username,
@@ -1036,6 +1228,9 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
             room.hostId = userId as unknown as RoomDoc['hostId'];
           }
           await room.save();
+          // Perf problem 6: the joiner's library contribution
+          // is computed once, at join.
+          await this.notePlayerJoined(models, room, userId);
 
           this.emit(room, 'room:player-joined', {
             userId,
@@ -1174,6 +1369,9 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       }
       const leaving = room.players[index];
       room.players.splice(index, 1);
+      // Perf problem 6: a leave changes the roster the next
+      // match plays with — dirty the library cache.
+      this.markLibraryDirty(roomId);
 
       if (room.hostId && String(room.hostId) === userId) {
         if (room.players.length > 0) {
@@ -1182,6 +1380,8 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         } else if (room.status !== 'waiting') {
           room.status = 'ended';
           this.disarmRoundTimer(roomId);
+          // Room death = cache death (perf problem 6).
+          this.dropLibraryCache(roomId);
         }
       }
       await room.save();
@@ -1408,7 +1608,11 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     // here, at the single funnel every round-1 path uses
     // (host start and the duel ready auto-start alike).
     if (roundNumber === 1 && room.settings.poolMode === 'common') {
-      const sharedCount = await this.countCommonPoolThemes(models, room);
+      const sharedCount = await this.countCommonPoolThemes(
+        models,
+        room,
+        true,
+      );
       if (sharedCount < room.settings.roundCount) {
         throw new RoomActionError(
           `Not enough common themes: you share ${sharedCount} theme${sharedCount === 1 ? '' : 's'} but this game needs ${room.settings.roundCount} rounds. Add more shared anime or pick fewer rounds.`,
@@ -1420,6 +1624,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       models,
       room,
       room.usedThemeIds ?? [],
+      roundNumber === 1,
     );
     if (!theme) {
       // Fallback if no themes found for the pool (the web routes).
@@ -1745,6 +1950,8 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
 
     if (room.status === 'ended') {
       this.rankService?.scheduleRPUpdate(String(room._id));
+      // Room death = cache death (perf problem 6).
+      this.dropLibraryCache(String(room._id));
     }
 
     this.emit(room, 'room:round-ended', {
@@ -1852,6 +2059,9 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
 
     if (changed) {
       room.players = activePlayers as RoomDoc['players'];
+      // Perf problem 6: cleanup dropped players — the roster
+      // changed, so dirty the library cache for the next match.
+      this.markLibraryDirty(String(room._id));
 
       const currentHostId = room.hostId ? String(room.hostId) : null;
       if (currentHostId && disconnectedPlayerIds.includes(currentHostId)) {
@@ -1861,6 +2071,8 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         } else if (room.status !== 'waiting') {
           room.status = 'ended';
           this.disarmRoundTimer(String(room._id));
+          // Room death = cache death (perf problem 6).
+          this.dropLibraryCache(String(room._id));
         }
       }
 
@@ -1884,6 +2096,8 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       ) {
         await models.rooms.findByIdAndDelete(room._id).exec();
         this.disarmRoundTimer(String(room._id));
+        // Room death = cache death (perf problem 6).
+        this.dropLibraryCache(String(room._id));
         this.emit(room, 'room:closed', { reason: 'inactivity' });
         return null;
       }
@@ -1913,6 +2127,8 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         EMPTY_ROOM_THRESHOLD_MS
       ) {
         await models.rooms.findByIdAndDelete(room._id).exec();
+        // Room death = cache death (perf problem 6).
+        this.dropLibraryCache(String(room._id));
         this.emit(room, 'room:closed', { reason: 'inactivity' });
       }
     }
