@@ -38,8 +38,10 @@ function seasonTitleCase(season: string): string {
  * Season browse (DESIGN.md §6.5) — Home's "View All". Rebuilt to
  * the Season design (season.html is the measurement truth): a
  * plain back arrow + the centred "<Season> <Year>" title + a
- * plain search icon (no tiles), the four season chips as equal
- * flex-1 pills, the "N themes this season" line, then ThemeRow's
+ * plain search icon (no tiles), the four season chips as
+ * content-width pills in a hidden-scrollbar horizontal scroll
+ * row (owner fix, 2026-11-10 — equal flex-1 shares wrapped the
+ * "Summer" label), the "N themes this season" line, then ThemeRow's
  * `season` cut of the rows. The pre-fidelity build's All/OP/ED
  * type filter is not in the design; the endpoint's type
  * parameter stays available server-side.
@@ -187,29 +189,38 @@ export default function SeasonScreen() {
           </Pressable>
         </View>
 
-        <View style={styles.chips}>
-          {SEASON_ORDER.map((value) => {
-            const active = selected === value;
-            return (
-              <Pressable
-                key={value}
-                onPress={() => setSelected(value)}
-                accessibilityRole="button"
-                accessibilityState={{ selected: active }}
-                accessibilityLabel={`Season: ${seasonTitleCase(value)}`}
-                style={({ pressed }) => [
-                  styles.chip,
-                  active && styles.chipActive,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Text style={[styles.chipText, active && styles.chipTextActive]}>
-                  {seasonTitleCase(value)}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.chipsScroll}
+        >
+          <View style={styles.chips}>
+            {SEASON_ORDER.map((value) => {
+              const active = selected === value;
+              return (
+                <Pressable
+                  key={value}
+                  onPress={() => setSelected(value)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={`Season: ${seasonTitleCase(value)}`}
+                  style={({ pressed }) => [
+                    styles.chip,
+                    active && styles.chipActive,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text
+                    numberOfLines={1}
+                    style={[styles.chipText, active && styles.chipTextActive]}
+                  >
+                    {seasonTitleCase(value)}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </ScrollView>
 
         {data && (
           <View style={styles.countWrap}>
@@ -314,18 +325,27 @@ const createStyles = (theme: Theme) =>
       letterSpacing: -0.5,
       color: theme.text,
     },
+    chipsScroll: {
+      // season.html: the chips row sits mt-3 under the title row.
+      // The row scrolls horizontally when the pills don't fit;
+      // the scrollbar is hidden (owner, 2026-11-10).
+      marginTop: spacing.md,
+    },
     chips: {
-      // season.html: mt-3, gap-2, a breath of vertical padding.
+      // season.html: gap-2, a breath of vertical padding.
       flexDirection: 'row',
       gap: spacing.sm,
-      marginTop: spacing.md,
       paddingVertical: 2,
     },
     chip: {
-      // season.html: flex-1 pills, py-1.5 px-3; the idle fill is
-      // the HTML's #EDE5EC — theme.raised is the closest measured
+      // Content-width pills (owner, 2026-11-10): the pre-fix
+      // flex-1 equal shares squeezed the widest label ("Summer",
+      // semibold when active) until it wrapped to two lines.
+      // Pills now size to their label, never shrink, and the row
+      // scrolls instead. py-1.5 px-3; the idle fill is the
+      // HTML's #EDE5EC — theme.raised is the closest measured
       // token (the Leaderboard slice's precedent for this tone).
-      flex: 1,
+      flexShrink: 0,
       alignItems: 'center',
       justifyContent: 'center',
       paddingHorizontal: spacing.md,
