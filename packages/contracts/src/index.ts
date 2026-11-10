@@ -18,6 +18,28 @@ export interface HealthResponse {
   db: 'ok' | 'down' | 'not-configured';
 }
 
+/**
+ * GET /app/version — the release facts the app's update prompt
+ * compares against (release readiness, 2026-11-11). Served from
+ * operator-edited env config with sane defaults; unauthenticated
+ * and additive — the website never reads it.
+ */
+export interface AppVersionResponse {
+  /** Latest release's marketing version, e.g. "1.0.0". */
+  latestVersion: string;
+  /** Latest release's Android versionCode — the number the app compares. */
+  latestVersionCode: number;
+  /** Direct download URL of the latest APK (the rolling release asset). */
+  apkUrl: string;
+  /** What's-new lines for the latest release (may be empty). */
+  notes: string[];
+  /**
+   * Installed builds with a versionCode below this are REQUIRED to
+   * update (the prompt's non-dismissible variant).
+   */
+  minSupportedVersionCode: number;
+}
+
 /** NestJS-style error body shape returned by the API on failures. */
 export interface ApiErrorResponse {
   statusCode: number;

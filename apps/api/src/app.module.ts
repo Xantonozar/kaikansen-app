@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { HealthController } from './health/health.controller';
+import { AppVersionController } from './app-version/app-version.controller';
 import { ThemesModule } from './themes/themes.module';
 import { AuthModule } from './auth/auth.module';
 import { LibraryModule } from './library/library.module';
@@ -42,6 +43,6 @@ const hasDatabase = typeof mongodbUri === 'string' && mongodbUri.length > 0;
     SyncModule.register(hasDatabase),
     SearchIndexesModule.register(hasDatabase),
   ],
-  controllers: [HealthController],
+  controllers: [HealthController, AppVersionController],
 })
 export class AppModule {}

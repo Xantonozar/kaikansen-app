@@ -3,6 +3,7 @@ import { Drawer } from 'expo-router/drawer';
 import { AppDrawerContent } from '../../src/components/AppDrawerContent';
 import { MiniPlayer } from '../../src/components/MiniPlayer';
 import { OfflineGate } from '../../src/components/OfflineGate';
+import { UpdatePromptGate } from '../../src/components/UpdatePromptGate';
 import { useTheme } from '../../src/theme-context';
 
 /**
@@ -79,6 +80,10 @@ export default function DrawerLayout() {
         options={{ drawerItemStyle: { display: 'none' } }}
       />
       <Drawer.Screen
+        name="about"
+        options={{ drawerItemStyle: { display: 'none' } }}
+      />
+      <Drawer.Screen
         name="edit-profile"
         options={{ drawerItemStyle: { display: 'none' } }}
       />
@@ -96,6 +101,7 @@ export default function DrawerLayout() {
       />
     </Drawer>
     <MiniPlayer placement="overlay" />
+    <UpdatePromptGate />
     <OfflineGate />
     </View>
   );

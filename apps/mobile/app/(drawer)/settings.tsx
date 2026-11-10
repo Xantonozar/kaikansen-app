@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Download,
   Headphones,
+  Info,
   LogOut,
   Moon,
   Play,
@@ -289,6 +290,14 @@ export default function SettingsScreen() {
               () => router.push('/downloads'),
               'Open Downloads',
               undefined,
+              false,
+            )}
+            {row(
+              Info,
+              'About',
+              () => router.push('/about'),
+              'About Kaikansen',
+              undefined,
               true,
             )}
           </View>
@@ -325,12 +334,23 @@ export default function SettingsScreen() {
           </View>
         )}
 
-        {/* The design's version footer. The version is the app's
-            REAL one from its config — the mock's '1.0.0' is
-            illustrative; app.json says what the build is. */}
-        <Text style={styles.versionFooter}>
-          Kaikansen · Version {Constants.expoConfig?.version ?? '0.1.0'}
-        </Text>
+        {/* The design's version footer — now the About entry
+            point (release readiness, 2026-11-11): tappable, it
+            opens the About screen. The version is the app's REAL
+            one from its config — the mock's '1.0.0' was
+            illustrative; app.json says what the build is. When
+            signed out this footer is the ONLY About entry (the
+            account card above is signed-in-only). */}
+        <Pressable
+          onPress={() => router.push('/about')}
+          accessibilityRole="button"
+          accessibilityLabel="About Kaikansen"
+          style={({ pressed }) => pressed && styles.pressed}
+        >
+          <Text style={styles.versionFooter}>
+            Kaikansen · Version {Constants.expoConfig?.version ?? '0.1.0'}
+          </Text>
+        </Pressable>
       </ScrollView>
     </SafeAreaView>
   );

@@ -23,6 +23,7 @@ import { JetBrainsMono_500Medium } from '@expo-google-fonts/jetbrains-mono';
 import { ThemeProvider, useTheme, useThemeMode } from '../src/theme-context';
 import { AuthProvider } from '../src/auth';
 import { PlaybackProvider } from '../src/playback-context';
+import { UpdateProvider, useUpdate } from '../src/appUpdateRuntime';
 import { ConnectivityProvider } from '../src/connectivity';
 
 /**
@@ -45,6 +46,12 @@ import { ConnectivityProvider } from '../src/connectivity';
  * stuck behind a dead network) is covered too. Session restore is
  * not gated on connectivity — the auth provider's own flow is
  * untouched.
+ *
+ * UpdateProvider (release readiness, 2026-11-11) owns the in-app
+ * update check: it wraps the Shell so the drawer shell's
+ * UpdatePromptGate and the About screen read one machine. The
+ * check itself fires from Shell's mount effect below — after
+ * first paint, never blocking, silent on failure.
  */
 export default function RootLayout() {
   const [fontsLoaded, fontError] = useFonts({
@@ -73,7 +80,9 @@ export default function RootLayout() {
       <AuthProvider>
         <PlaybackProvider>
           <ConnectivityProvider>
-            <Shell />
+            <UpdateProvider>
+              <Shell />
+            </UpdateProvider>
           </ConnectivityProvider>
         </PlaybackProvider>
       </AuthProvider>
@@ -84,6 +93,14 @@ export default function RootLayout() {
 function Shell() {
   const theme = useTheme();
   const { mode } = useThemeMode();
+  const { check } = useUpdate();
+
+  // The update check (release readiness): once per launch, after
+  // the shell has painted — the provider's check is a silent
+  // no-op on failure, so nothing here can disturb the start.
+  useEffect(() => {
+    check();
+  }, [check]);
 
   return (
     <GestureHandlerRootView

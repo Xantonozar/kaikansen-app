@@ -26,5 +26,14 @@ module.exports = {
     // through src/netInfo.ts by the connectivity provider. The
     // stub keeps an "unknown" posture in suites (offline screen).
     '^@react-native-community/netinfo$': '<rootDir>/jest.netinfo-stub.js',
+    // AsyncStorage / expo-constants / expo-intent-launcher are
+    // native modules reached by the update runtime
+    // (src/appUpdateRuntime.tsx). Pure-logic suites exercise
+    // appUpdate.ts with injected values instead; the stubs keep
+    // any transitive import native-free (release readiness).
+    '^@react-native-async-storage/async-storage$':
+      '<rootDir>/jest.updates-stub.js',
+    '^expo-constants$': '<rootDir>/jest.updates-stub.js',
+    '^expo-intent-launcher$': '<rootDir>/jest.updates-stub.js',
   },
 };
