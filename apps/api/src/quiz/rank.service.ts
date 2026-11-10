@@ -22,8 +22,10 @@ import { RoomBroadcaster } from './room-broadcaster';
  * maintain them with the web's exact arithmetic:
  *
  * - placement by totalScore desc, ties share the better placement;
- * - base RP from the placement table (duel win +20 / loss −15,
- *   party 1st +20 … 6th+ −15);
+ * - base RP from the placement table — the OWNER'S table (spec
+ *   2026-11-10) replaced the web's here: keyed by mode + actual
+ *   player count (duel +10/−10; party-4 +10/+5/−3/−7; party-3
+ *   +7/0/−5; party-2 +5/−5) — see getBaseRP in quiz-game.utils;
  * - win-streak bonus for the winner only (2→+5, 3→+10, 4→+15, 5+→+20);
  * - RP is clamped at the player's CURRENT tier floor (never below
  *   it), and the stored floor only moves UP on promotion;

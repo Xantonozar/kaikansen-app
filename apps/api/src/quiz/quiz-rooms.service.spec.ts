@@ -264,7 +264,7 @@ function roomDoc(models: ReturnType<typeof makeFakeModels>, roomId: string) {
 }
 
 describe('QuizRoomsService — lobby state machine', () => {
-  it('creates a party room with the web defaults; duels are capped at 2', async () => {
+  it('creates a party room with the defaults; duels are capped at 2', async () => {
     const m = makeFakeModels();
     const ack = await m.service.createRoom(HOST, partyCreate);
     expect(ack.success).toBe(true);
@@ -274,7 +274,7 @@ describe('QuizRoomsService — lobby state machine', () => {
       poolMode: 'random',
       guessType: 'anime',
       roundCount: 1,
-      maxPlayers: 6,
+      maxPlayers: 4, // owner cap (spec 2026-11-10); the web default was 6
       timeLimitSeconds: 30,
     });
     expect(ack.room?.players).toHaveLength(1);
@@ -579,7 +579,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     ]);
   });
 
-  it('party scoring: server-timed base + first-correct bonus, last player auto-locked, game ends with RP scheduled', async () => {
+  it('party scoring: owner formula — first correct × players pending, last player auto-locked, game ends with RP scheduled', async () => {
     const m = makeFakeModels();
     const { roomId } = await startedParty(m);
     const doc = roomDoc(m, roomId);
@@ -591,8 +591,8 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect(ack).toMatchObject({
       success: true,
       correct: true,
-      baseScore: 20,
-      bonusScore: 20, // first correct, party: 10 × 2 players
+      baseScore: 40, // 20s remaining × (1 player pending + 1)
+      bonusScore: 0, // no separate bonus under the owner's formula
       totalScoreGained: 40,
       secondsRemaining: 20,
     });
@@ -645,7 +645,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect(ack).toMatchObject({ success: true, correct: true });
   });
 
-  it('wrong answers score NEGATIVE seconds remaining (party of 3 keeps playing)', async () => {
+  it('wrong answers score 0 (party of 3 keeps playing); the next correct earns × pending+1', async () => {
     const m = makeFakeModels();
     const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
     const doc = roomDoc(m, roomId);
@@ -653,14 +653,14 @@ describe('QuizRoomsService — game flow + scoring', () => {
     round.startedAt = new Date(Date.now() - 25_000); // 5s remaining
 
     const wrong = await m.service.submitAnswer(HOST, roomId, 1, 'Distractor1 EN');
-    expect(wrong).toMatchObject({ correct: false, baseScore: -5, totalScoreGained: -5 });
+    expect(wrong).toMatchObject({ correct: false, baseScore: 0, totalScoreGained: 0 });
     // Round still live: only 1 of 3 answered.
     expect(round.endedAt == null).toBe(true);
     expect(doc.status).toBe('in_progress');
 
     const correct = await m.service.submitAnswer(GUEST, roomId, 1, 'Correct EN');
-    expect(correct.baseScore).toBe(5);
-    expect(correct.bonusScore).toBe(30); // 10 × 3 players
+    expect(correct.baseScore).toBe(10); // 5s remaining × (1 pending + 1)
+    expect(correct.bonusScore).toBe(0);
     // GUEST2 was the last remaining player → auto-locked, round over.
     const answers = round.answers as Record<string, unknown>[];
     expect(answers).toHaveLength(3);
@@ -693,6 +693,10 @@ describe('QuizRoomsService — game flow + scoring', () => {
     const steal = await m.service.submitAnswer(GUEST, roomId, 1, 'Correct EN');
     expect(steal.correct).toBe(true);
     expect(steal.bonusScore).toBe(0); // duels have no first-correct bonus
+    // The LAST answerer's multiplier is exactly ×1 (the owner's +1):
+    // base = secondsRemaining × 1.
+    expect(steal.baseScore).toBe(steal.secondsRemaining);
+    expect(steal.totalScoreGained).toBe(steal.secondsRemaining);
     expect(doc.status).toBe('ended');
     expect(m.rank.scheduled).toEqual([roomId]);
   });
@@ -804,6 +808,219 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect((doc.players as unknown[])).toHaveLength(1);
     const left = m.events.find((e) => e.event === 'room:player-left');
     expect(left?.payload).toMatchObject({ userId: GUEST, reason: 'disconnect' });
+  });
+});
+
+describe('QuizRoomsService — party cap 4 (owner spec, 2026-11-10)', () => {
+  it('clamps create sizes into 2–4 and defaults unset to 4', async () => {
+    const m = makeFakeModels();
+    const big = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      maxPlayers: 8,
+    });
+    expect(big.room?.settings.maxPlayers).toBe(4);
+    const three = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      maxPlayers: 3,
+    });
+    expect(three.room?.settings.maxPlayers).toBe(3);
+    const pub = await m.service.publicMatchmaking(HOST, {
+      roomType: 'party',
+      poolMode: 'random',
+      guessType: 'anime',
+      maxPlayers: 8,
+    });
+    expect(pub.room?.settings.maxPlayers).toBe(4);
+  });
+
+  it('clamps settings updates to the cap; duels stay pinned at 2', async () => {
+    const m = makeFakeModels();
+    const create = await m.service.createRoom(HOST, partyCreate);
+    const updated = await m.service.updateSettings(HOST, create.roomId!, {
+      maxPlayers: 8,
+    });
+    expect(updated.settings?.maxPlayers).toBe(4);
+
+    const duel = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      roomType: 'duel',
+    });
+    const duelUpdated = await m.service.updateSettings(HOST, duel.roomId!, {
+      maxPlayers: 4,
+    });
+    expect(duelUpdated.settings?.maxPlayers).toBe(2);
+  });
+
+  it('refuses a join into a full 4-player room', async () => {
+    const m = makeFakeModels();
+    m.userModel.docs.push({
+      _id: '507f1f77bcf86cd7994390a5',
+      username: 'guest3',
+      displayName: 'Guest Three',
+      avatarUrl: null,
+      anilist: { completedMediaIds: [] },
+    });
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      maxPlayers: 4,
+    });
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    await m.service.joinByCode(GUEST2, create.roomCode!);
+    await m.service.joinByCode(OUTSIDER, create.roomCode!);
+    await expect(
+      m.service.joinByCode('507f1f77bcf86cd7994390a5', create.roomCode!),
+    ).rejects.toThrow('Room is full');
+  });
+});
+
+describe('QuizRoomsService — AniList pool (owner spec, 2026-11-10)', () => {
+  it('resolves round themes from the union of players’ AniList-listed anime', async () => {
+    const m = makeFakeModels();
+    // One theme belongs to an anime on the HOST's AniList lists;
+    // no fixture theme does (theirs sit on anilistId 777, listed
+    // by nobody).
+    m.themeModel.docs.push(
+      makeTheme('theme-anilist', 'Listed', { anilistId: 100 }),
+    );
+    const host = m.userModel.docs.find((u) => u._id === HOST)!;
+    (host.anilist as { completedMediaIds: number[] }).completedMediaIds = [100];
+
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'anilist',
+    });
+    const roomId = create.roomId!;
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    await m.service.toggleReady(HOST, roomId);
+    await m.service.toggleReady(GUEST, roomId);
+    await m.service.startGame(HOST, roomId);
+
+    const doc = roomDoc(m, roomId);
+    const round = (doc.rounds as Record<string, unknown>[])[0];
+    expect(round.themeId).toBe('theme-anilist');
+  });
+});
+
+describe('QuizRoomsService — common pool eligibility (owner spec, 2026-11-10)', () => {
+  /**
+   * Anime 100 has two themes (a1, a2), 200 and 300 one each.
+   * HOST knows a1 + b1 (in-app history); GUEST knows a1 + a2 +
+   * c1. Shared anime = {100}; shared themes = {a1} (the host's
+   * exact set caps the intersection) → the count is 1.
+   */
+  function seedCommon(m: ReturnType<typeof makeFakeModels>) {
+    m.themeModel.docs.push(
+      makeTheme('theme-a1', 'Alpha', { anilistId: 100 }),
+      makeTheme('theme-a2', 'Alpha', { anilistId: 100 }),
+      makeTheme('theme-b1', 'Beta', { anilistId: 200 }),
+      makeTheme('theme-c1', 'Gamma', { anilistId: 300 }),
+    );
+    m.history.push(
+      { userId: HOST, themeId: 'theme-a1' },
+      { userId: HOST, themeId: 'theme-b1' },
+      { userId: GUEST, themeId: 'theme-a1' },
+      { userId: GUEST, themeId: 'theme-a2' },
+      { userId: GUEST, themeId: 'theme-c1' },
+    );
+  }
+
+  it('serves the shared count on waiting states as the roster changes', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'common',
+    });
+    // Host alone shares with themselves: a1 + b1.
+    expect(create.room?.commonPoolCount).toBe(2);
+
+    const joined = await m.service.joinByCode(GUEST, create.roomCode!);
+    expect(joined.room?.commonPoolCount).toBe(1);
+
+    const state = await m.service.getRoomStateForMember(HOST, create.roomId!);
+    expect(state.room?.commonPoolCount).toBe(1);
+  });
+
+  it('an AniList-synced player contributes all themes of a shared anime', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    // GUEST2 has no in-app data but lists anime 100 on AniList:
+    // their eligible set for it is BOTH its themes, so the
+    // intersection with the host's {a1} stays {a1}.
+    const guest2 = m.userModel.docs.find((u) => u._id === GUEST2)!;
+    (guest2.anilist as { completedMediaIds: number[] }).completedMediaIds = [100];
+
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'common',
+    });
+    await m.service.joinByCode(GUEST2, create.roomCode!);
+    const state = await m.service.getRoomStateForMember(HOST, create.roomId!);
+    expect(state.room?.commonPoolCount).toBe(1);
+  });
+
+  it('a player with neither AniList nor history zeroes the count', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'common',
+    });
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    const joined = await m.service.joinByCode(GUEST2, create.roomCode!);
+    expect(joined.room?.commonPoolCount).toBe(0);
+  });
+
+  it('starts when shared >= rounds and deals the shared theme', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'common',
+      roundCount: 1,
+    });
+    const roomId = create.roomId!;
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    await m.service.toggleReady(HOST, roomId);
+    await m.service.toggleReady(GUEST, roomId);
+    const started = await m.service.startGame(HOST, roomId);
+    expect(started.success).toBe(true);
+    const doc = roomDoc(m, roomId);
+    const round = (doc.rounds as Record<string, unknown>[])[0];
+    expect(round.themeId).toBe('theme-a1'); // the one shared theme
+  });
+
+  it('refuses to start when shared < rounds, with the count in the message', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    const create = await m.service.createRoom(HOST, {
+      ...partyCreate,
+      poolMode: 'common',
+      roundCount: 5,
+    });
+    const roomId = create.roomId!;
+    await m.service.joinByCode(GUEST, create.roomCode!);
+    await m.service.toggleReady(HOST, roomId);
+    await m.service.toggleReady(GUEST, roomId);
+    await expect(m.service.startGame(HOST, roomId)).rejects.toThrow(
+      'Not enough common themes: you share 1 theme but this game needs 5 rounds.',
+    );
+    const doc = roomDoc(m, roomId);
+    expect(doc.status).toBe('waiting'); // nothing started
+    expect((doc.rounds as unknown[])).toHaveLength(0);
+  });
+
+  it('switching settings to common reports the fresh count', async () => {
+    const m = makeFakeModels();
+    seedCommon(m);
+    const create = await m.service.createRoom(HOST, partyCreate);
+    const updated = await m.service.updateSettings(HOST, create.roomId!, {
+      poolMode: 'common',
+    });
+    expect(updated.settings?.poolMode).toBe('common');
+    expect(updated.commonPoolCount).toBe(2); // host alone: a1 + b1
+    const event = m.events.find((e) => e.event === 'room:settings-updated');
+    expect(event?.payload.commonPoolCount).toBe(2);
   });
 });
 

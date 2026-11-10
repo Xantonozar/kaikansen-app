@@ -141,7 +141,10 @@ export default function SoloQuizScreen() {
     params.quizType === 'title' || params.quizType === 'artist'
       ? params.quizType
       : 'anime';
-  const source: QuizSource = params.source === 'library' ? 'library' : 'random';
+  const source: QuizSource =
+    params.source === 'anilist' || params.source === 'listened'
+      ? params.source
+      : 'random';
 
   const [phase, setPhase] = useState<Phase>('creating');
   const [runId, setRunId] = useState(0);

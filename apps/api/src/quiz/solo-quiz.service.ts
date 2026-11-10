@@ -14,6 +14,7 @@ import {
   type QuizGuessType,
   type QuizLeaderboardEntry,
   type QuizLeaderboardResponse,
+  type QuizSource,
   type SoloAnswerResponse,
   type SoloGameState,
   type SoloPlaybackStartedResponse,
@@ -40,8 +41,12 @@ import {
   type QuizThemeLike,
 } from './quiz-game.utils';
 
-/** The web's library-mode minimum (question route: totalInLibrary < 10). */
-const LIBRARY_MIN_THEMES = 10;
+/**
+ * The named pools' minimum (the web question route's library
+ * gate: totalInLibrary < 10 refuses the game). Both owner pools
+ * keep the same ≥10 eligibility rule.
+ */
+const POOL_MIN_THEMES = 10;
 
 /** Idle solo games are dropped after this long (in-process sessions). */
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -65,8 +70,8 @@ type ThemeDoc = ThemeCache &
 interface SoloSession {
   userId: string;
   quizType: QuizGuessType;
-  source: 'random' | 'library';
-  /** The library $or pool, resolved once at game creation. */
+  source: QuizSource;
+  /** The named pool's $or clauses, resolved once at game creation. */
   poolOr: Record<string, unknown>[] | null;
   usedThemeIds: string[];
   answeredCount: number;
@@ -122,10 +127,16 @@ interface SoloModels {
  * - Pools (question route): themes need a playable videoUrl;
  *   'artist'/'title' questions additionally require the guessed
  *   field to be non-empty/non-'Unknown'. 'random' draws from
- *   isPopular themes; 'library' draws from the union of the
- *   player's WatchHistory themes and their AniList-completed
- *   anime (stored completedMediaIds), and requires at least 10
- *   eligible themes — the web's two 400 messages are verbatim.
+ *   isPopular themes. The two NAMED pools are the owner's Solo
+ *   Run picker (spec 2026-11-10), splitting what the web's
+ *   single 'library' source unioned: 'anilist' draws from the
+ *   themes of the anime on the player's AniList Watching +
+ *   Completed lists (the stored merged completedMediaIds — the
+ *   same set the Library AniList segment serves), and 'listened'
+ *   draws from the player's in-app listening history
+ *   (WatchHistory). Both keep the web library branch's ≥10
+ *   eligible-themes gate, with pool-specific empty/thin
+ *   messages.
  * - Options: the correct value + exactly 3 distractors sampled
  *   from the popular pool (the solo route's derivation, without
  *   the room generator's dedup), shuffled.
@@ -146,13 +157,13 @@ interface SoloModels {
  * 2. Themes are not repeated within a game (the session samples
  *    with the question route's own excludeIds mechanism, which
  *    the web client simply never uses).
- * 3. The library pool does NOT live-refresh the player's
- *    AniList completed list from the AniList GraphQL API when
- *    the stored list is stale (the web refreshes after 6h and
- *    writes completedMediaIds/syncedAt back). That sync stays
+ * 3. The AniList pool does NOT live-refresh the player's
+ *    AniList lists from the AniList GraphQL API when the stored
+ *    list is stale (the web refreshes after 6h and writes
+ *    completedMediaIds/syncedAt back). That sync stays
  *    web-owned — this API reads the stored list rather than
  *    becoming a second writer of it.
- * 4. Games require auth (the attempts and library pool are
+ * 4. Games require auth (the attempts and the named pools are
  *    per-user; the web's anonymous attempts — userId null —
  *    remain possible only from the web).
  * 5. The answer window opens at PLAYBACK start, not at the draw
@@ -226,39 +237,56 @@ export class SoloQuizService {
   }
 
   /**
-   * The web's library branch: WatchHistory theme ids OR AniList
-   * completed media ids, with the ≥10 eligibility gate and the
-   * web's exact error messages. Returns the $or clauses for the
-   * session's pool.
+   * One named pool of the owner's Solo Run picker (spec
+   * 2026-11-10), resolved to the $or clauses the draw samples
+   * from:
+   * - 'listened': the themes in the player's in-app listening
+   *   history (WatchHistory theme ids);
+   * - 'anilist': the themes of the anime on the player's
+   *   AniList Watching + Completed lists — the stored
+   *   completedMediaIds, which in this API hold the merged
+   *   CURRENT + COMPLETED set (the same union the Library
+   *   AniList segment serves).
+   * Both keep the web library branch's ≥10 eligibility gate:
+   * an empty pool and a thin pool each refuse with a clear,
+   * pool-specific message — the game never silently falls back
+   * to another pool.
    */
-  private async buildLibraryPool(
+  private async buildNamedPool(
     models: SoloModels,
     userId: string,
     quizType: QuizGuessType,
+    source: 'anilist' | 'listened',
   ): Promise<Record<string, unknown>[]> {
     const user = await models.users.findById(userId).exec();
     if (!user) {
       throw new NotFoundException('User not found');
     }
 
-    const localThemeIds = (await models.watchHistory
-      .distinct('themeId', { userId })
-      .exec()) as unknown[];
-    const anilistMediaIds: number[] = Array.isArray(user.anilist?.completedMediaIds)
-      ? user.anilist.completedMediaIds
-      : [];
-
-    const orClauses: Record<string, unknown>[] = [];
-    if (localThemeIds.length > 0) {
-      orClauses.push({ _id: { $in: localThemeIds } });
-    }
-    if (anilistMediaIds.length > 0) {
-      orClauses.push({ anilistId: { $in: anilistMediaIds } });
+    let orClauses: Record<string, unknown>[] = [];
+    if (source === 'listened') {
+      const listenedThemeIds = (await models.watchHistory
+        .distinct('themeId', { userId })
+        .exec()) as unknown[];
+      if (listenedThemeIds.length > 0) {
+        orClauses = [{ _id: { $in: listenedThemeIds } }];
+      }
+    } else {
+      const anilistMediaIds: number[] = Array.isArray(
+        user.anilist?.completedMediaIds,
+      )
+        ? user.anilist.completedMediaIds
+        : [];
+      if (anilistMediaIds.length > 0) {
+        orClauses = [{ anilistId: { $in: anilistMediaIds } }];
+      }
     }
 
     if (orClauses.length === 0) {
       throw new BadRequestException(
-        'Your library is empty. Add themes or connect AniList to play in Watched mode.',
+        source === 'listened'
+          ? 'Your listening history is empty. Play some themes first, or pick another pool.'
+          : 'No AniList anime found. Connect AniList and sync your lists, or pick another pool.',
       );
     }
 
@@ -266,12 +294,12 @@ export class SoloQuizService {
       ...this.basePoolFilter(quizType),
       $or: orClauses,
     };
-    const totalInLibrary = await models.themes
-      .countDocuments(countFilter)
-      .exec();
-    if (totalInLibrary < LIBRARY_MIN_THEMES) {
+    const totalInPool = await models.themes.countDocuments(countFilter).exec();
+    if (totalInPool < POOL_MIN_THEMES) {
       throw new BadRequestException(
-        `You need at least 10 songs to use this mode. (Current: ${totalInLibrary})`,
+        source === 'listened'
+          ? `You need at least 10 listened songs to use this pool. (Current: ${totalInPool})`
+          : `You need at least 10 songs from your AniList anime to use this pool. (Current: ${totalInPool})`,
       );
     }
 
@@ -308,7 +336,7 @@ export class SoloQuizService {
 
     const correctTheme = await this.sampleOne(models, filter);
     if (!correctTheme) {
-      throw new NotFoundException('No themes found matching your library');
+      throw new NotFoundException('No themes found matching your pool');
     }
 
     // Distractors: always from the popular pool (the web route).
@@ -382,7 +410,7 @@ export class SoloQuizService {
       throw new BadRequestException('Invalid quiz type');
     }
     const source = dto?.source ?? 'random';
-    if (source !== 'random' && source !== 'library') {
+    if (source !== 'random' && source !== 'anilist' && source !== 'listened') {
       throw new BadRequestException('Invalid quiz source');
     }
 
@@ -391,9 +419,9 @@ export class SoloQuizService {
       quizType,
       source,
       poolOr:
-        source === 'library'
-          ? await this.buildLibraryPool(models, userId, quizType)
-          : null,
+        source === 'random'
+          ? null
+          : await this.buildNamedPool(models, userId, quizType, source),
       usedThemeIds: [],
       answeredCount: 0,
       correctCount: 0,

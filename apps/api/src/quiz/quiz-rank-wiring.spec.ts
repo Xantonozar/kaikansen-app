@@ -336,13 +336,13 @@ describe('QuizModule wiring — multiplayer rank application (Bug 2)', () => {
 
     const hostRank = rankDocs.get(HOST);
     expect(hostRank).toBeDefined();
-    expect(hostRank!.rp).toBe(20); // duel win
+    expect(hostRank!.rp).toBe(10); // duel win (owner table)
     expect(hostRank!.stats.totalGames).toBe(1);
     expect(hostRank!.stats.wins).toBe(1);
 
     const guestRank = rankDocs.get(GUEST);
     expect(guestRank).toBeDefined();
-    expect(guestRank!.rp).toBe(0); // −15 clamped at the academy floor
+    expect(guestRank!.rp).toBe(0); // −10 clamped at the academy floor
     expect(guestRank!.stats.totalGames).toBe(1);
     expect(guestRank!.stats.losses).toBe(1);
 

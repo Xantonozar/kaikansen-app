@@ -17,6 +17,7 @@ import {
 } from 'lucide-react-native';
 import type {
   QuizGuessType,
+  QuizSource,
   RankLeaderboardEntry,
   UserRankProfile,
 } from '@kaikansen/contracts';
@@ -45,6 +46,13 @@ const TYPE_OPTIONS: { key: QuizGuessType; label: string }[] = [
   { key: 'artist', label: 'Artist' },
 ];
 
+/** The Solo Run pool picker (owner spec, 2026-11-10). */
+const POOL_OPTIONS: { key: QuizSource; label: string }[] = [
+  { key: 'random', label: 'Random' },
+  { key: 'anilist', label: 'AniList' },
+  { key: 'listened', label: 'Listened' },
+];
+
 /** The Solo card's body line — the mock's sentence, per guess type. */
 const SOLO_BODY: Record<QuizGuessType, string> = {
   anime: 'Guess the anime from the song. 10 questions, 20 seconds each.',
@@ -59,15 +67,21 @@ const SOLO_BODY: Record<QuizGuessType, string> = {
  * mock card for card: the rank card on top (with the design's
  * loading skeleton while /rank/me is in flight, instead of
  * vanishing), the "Solo Run" card (guess-type text chips and a
- * "Start Solo" button — the mock draws no Pool selector, so the
- * solo route's library source is no longer offered here; solo
- * games start from the random pool), the "Play with Friends"
- * card (exactly the mock's two buttons: Create Room filled,
- * Join with Code lavender — public-room browsing lives on the
- * lobby screen itself), and the RP leaderboard preview
+ * "Start Solo" button), the "Play with Friends" card (exactly
+ * the mock's two buttons: Create Room filled, Join with Code
+ * lavender — public-room browsing lives on the lobby screen
+ * itself), and the RP leaderboard preview
  * (GET /rank/leaderboard, "View all" → the leaderboard route).
  * The mock draws NO top-attempts card, so that card is gone;
  * the solo-attempts endpoint itself is untouched.
+ *
+ * Owner addition (spec 2026-11-10): the Solo Run card ALSO
+ * carries the pool picker — Random / AniList / Listened chips
+ * under the guess types. The mock predates the picker; the
+ * chips reuse the card's own chip language, and the choice
+ * rides the solo route's `source` param to the API's named
+ * pools (a thin pool refuses with the server's message on the
+ * solo screen, never a silent fallback).
  *
  * Honest states: signed-out gets a log-in prompt in place of the
  * play cards (the quiz API requires auth — solo games are per-user
@@ -82,6 +96,7 @@ export default function QuizScreen() {
   const { status } = useAuth();
 
   const [quizType, setQuizType] = useState<QuizGuessType>('anime');
+  const [source, setSource] = useState<QuizSource>('random');
   const [myRank, setMyRank] = useState<UserRankProfile | null>(null);
   const [rankLoading, setRankLoading] = useState(false);
   const [rankBoard, setRankBoard] = useState<RankLeaderboardEntry[] | null>(
@@ -215,11 +230,17 @@ export default function QuizScreen() {
                   ),
                 )}
               </View>
+              <Text style={styles.poolLabel}>Question pool</Text>
+              <View style={styles.chipRow}>
+                {POOL_OPTIONS.map((o) =>
+                  chip(source === o.key, o.label, () => setSource(o.key)),
+                )}
+              </View>
               <Pressable
                 onPress={() =>
                   router.push({
                     pathname: '/quiz/solo',
-                    params: { quizType },
+                    params: { quizType, source },
                   })
                 }
                 disabled={!canPlay}
@@ -243,7 +264,7 @@ export default function QuizScreen() {
                 <Users size={20} color={theme.muted} strokeWidth={2} />
               </View>
               <Text style={styles.cardBody}>
-                Party for 3 to 8 players, or a 1v1 Duel.
+                Party for up to 4 players, or a 1v1 Duel.
               </Text>
               <View style={styles.mpRow}>
                 <Pressable
@@ -436,6 +457,13 @@ const createStyles = (theme: Theme) =>
     },
     chipTextActive: {
       color: theme.onAccent,
+    },
+    poolLabel: {
+      ...typeStyles.caption,
+      color: theme.muted,
+      textTransform: 'uppercase',
+      letterSpacing: 0.8,
+      marginBottom: -spacing.xs,
     },
     // Quiz button text (owner's design pass): the hub mock's
     // labels measure ≈17px cap height @2x ≈ 12–13pt on ≈38–40pt

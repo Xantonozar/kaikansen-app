@@ -301,7 +301,7 @@ export default function QuizLobbyScreen() {
                 <View style={styles.createMain}>
                   <Text style={styles.cardTitle}>Create a room</Text>
                   <Text style={styles.cardBody}>
-                    Host a Party of 3 to 8 players, or a 1v1 Duel
+                    Host a Party of 3 to 4 players, or a 1v1 Duel
                   </Text>
                 </View>
                 <Pressable

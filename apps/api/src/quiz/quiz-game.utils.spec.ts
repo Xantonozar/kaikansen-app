@@ -158,46 +158,74 @@ describe('solo playback-start credit (owner timing fix, 2026-11-10)', () => {
   });
 });
 
-describe('multiplayer scoring (web answer route)', () => {
-  it('correct answers earn +secondsRemaining, wrong answers lose it', () => {
+describe('multiplayer scoring (owner formula, spec 2026-11-10)', () => {
+  it('correct = secondsRemaining × (players not yet answered + 1)', () => {
+    // First answerer in a 4-player room: nobody has answered, so
+    // 3 others are pending → multiplier 4.
+    expect(
+      multiplayerScoreFor({
+        correct: true,
+        secondsRemaining: 12,
+        playerCount: 4,
+        answeredCount: 0,
+      }),
+    ).toEqual({ baseScore: 48, bonusScore: 0, totalScoreGained: 48 });
+    // Second answerer: 2 pending → multiplier 3.
+    expect(
+      multiplayerScoreFor({
+        correct: true,
+        secondsRemaining: 9,
+        playerCount: 4,
+        answeredCount: 1,
+      }),
+    ).toEqual({ baseScore: 27, bonusScore: 0, totalScoreGained: 27 });
+    // Duel, first answer: 1 pending → multiplier 2.
     expect(
       multiplayerScoreFor({
         correct: true,
         secondsRemaining: 17,
-        roomType: 'duel',
         playerCount: 2,
-        isFirstCorrect: true,
+        answeredCount: 0,
       }),
-    ).toEqual({ baseScore: 17, bonusScore: 0, totalScoreGained: 17 });
+    ).toEqual({ baseScore: 34, bonusScore: 0, totalScoreGained: 34 });
+  });
+
+  it('the LAST correct answerer still earns remaining time × 1 (the +1)', () => {
+    expect(
+      multiplayerScoreFor({
+        correct: true,
+        secondsRemaining: 6,
+        playerCount: 4,
+        answeredCount: 3,
+      }),
+    ).toEqual({ baseScore: 6, bonusScore: 0, totalScoreGained: 6 });
+    expect(
+      multiplayerScoreFor({
+        correct: true,
+        secondsRemaining: 6,
+        playerCount: 2,
+        answeredCount: 1,
+      }),
+    ).toEqual({ baseScore: 6, bonusScore: 0, totalScoreGained: 6 });
+  });
+
+  it('wrong answers earn 0 (no negative scoring, no bonus)', () => {
     expect(
       multiplayerScoreFor({
         correct: false,
         secondsRemaining: 17,
-        roomType: 'party',
         playerCount: 4,
-        isFirstCorrect: false,
+        answeredCount: 0,
       }),
-    ).toEqual({ baseScore: -17, bonusScore: 0, totalScoreGained: -17 });
-  });
-
-  it('party first-correct earns 10 × playerCount, later corrects do not', () => {
+    ).toEqual({ baseScore: 0, bonusScore: 0, totalScoreGained: 0 });
+    // A correct answer at 0 seconds remaining also earns 0.
     expect(
       multiplayerScoreFor({
         correct: true,
-        secondsRemaining: 10,
-        roomType: 'party',
+        secondsRemaining: 0,
         playerCount: 4,
-        isFirstCorrect: true,
-      }),
-    ).toEqual({ baseScore: 10, bonusScore: 40, totalScoreGained: 50 });
-    expect(
-      multiplayerScoreFor({
-        correct: true,
-        secondsRemaining: 10,
-        roomType: 'party',
-        playerCount: 4,
-        isFirstCorrect: false,
-      }).bonusScore,
+        answeredCount: 0,
+      }).totalScoreGained,
     ).toBe(0);
   });
 });
@@ -285,16 +313,26 @@ describe('rank math (web lib/rank-utils.ts)', () => {
     expect(getTierFromRP(99999).tier).toBe('kage');
   });
 
-  it('placement RP tables for duel and party', () => {
-    expect(getBaseRP(1, 2, 'duel')).toBe(20);
-    expect(getBaseRP(2, 2, 'duel')).toBe(-15);
-    expect(getBaseRP(1, 6, 'party')).toBe(20);
-    expect(getBaseRP(2, 6, 'party')).toBe(10);
-    expect(getBaseRP(3, 6, 'party')).toBe(0);
-    expect(getBaseRP(4, 6, 'party')).toBe(-5);
-    expect(getBaseRP(5, 6, 'party')).toBe(-10);
-    expect(getBaseRP(6, 6, 'party')).toBe(-15);
-    expect(getBaseRP(9, 9, 'party')).toBe(-15);
+  it('placement RP tables — owner spec 2026-11-10, by mode + player count', () => {
+    // Duel.
+    expect(getBaseRP(1, 2, 'duel')).toBe(10);
+    expect(getBaseRP(2, 2, 'duel')).toBe(-10);
+    // Party of 4.
+    expect(getBaseRP(1, 4, 'party')).toBe(10);
+    expect(getBaseRP(2, 4, 'party')).toBe(5);
+    expect(getBaseRP(3, 4, 'party')).toBe(-3);
+    expect(getBaseRP(4, 4, 'party')).toBe(-7);
+    // Party of 3 (2nd place is the 0 → draw row).
+    expect(getBaseRP(1, 3, 'party')).toBe(7);
+    expect(getBaseRP(2, 3, 'party')).toBe(0);
+    expect(getBaseRP(3, 3, 'party')).toBe(-5);
+    // Party of 2.
+    expect(getBaseRP(1, 2, 'party')).toBe(5);
+    expect(getBaseRP(2, 2, 'party')).toBe(-5);
+    // Legacy oversized room (pre-cap): reads the 4-player table,
+    // placements past 4th take the last row's value.
+    expect(getBaseRP(1, 6, 'party')).toBe(10);
+    expect(getBaseRP(6, 6, 'party')).toBe(-7);
   });
 
   it('win streak bonuses step at 2/3/4/5+', () => {

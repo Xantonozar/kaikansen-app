@@ -464,8 +464,10 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     });
     expect(answerAck.success).toBe(true);
     expect(answerAck.correct).toBe(true);
-    expect(answerAck.bonusScore).toBe(20); // first correct, 10 × 2 players
-    expect(answerAck.baseScore as number).toBeGreaterThanOrEqual(28);
+    expect(answerAck.bonusScore).toBe(0); // owner formula: no separate bonus
+    // ~30s remaining × (1 player pending + 1) — the first answer
+    // in a 2-player room doubles the remaining time.
+    expect(answerAck.baseScore as number).toBeGreaterThanOrEqual(56);
 
     const ended = (await guestEnded) as unknown as Record<string, unknown>;
     expect(ended.gameOver).toBe(true);
@@ -473,11 +475,13 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     const answers = ended.answers as Record<string, unknown>[];
     expect(answers.find((a) => a.userId === HOST)).toMatchObject({ autoLocked: true });
 
-    // Rank maintenance ran and broadcast per player.
+    // Rank maintenance ran and broadcast per player (owner RP
+    // table: a party of 2 pays +5 / −5, the −5 clamped at the
+    // academy floor 0).
     const guestRankPayload = (await guestRank) as unknown as Record<string, unknown>;
-    expect(guestRankPayload).toMatchObject({ userId: GUEST, rpAfter: 20, rpChange: 20 });
+    expect(guestRankPayload).toMatchObject({ userId: GUEST, rpAfter: 5, rpChange: 5 });
     const hostRankPayload = (await hostRank) as unknown as Record<string, unknown>;
-    expect(hostRankPayload).toMatchObject({ userId: HOST, rpAfter: 10 }); // party 2nd place
+    expect(hostRankPayload).toMatchObject({ userId: HOST, rpAfter: 0, rpChange: 0 });
     expect(models.historyRows).toHaveLength(2);
   }, 30000);
 
@@ -516,6 +520,37 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     expect(answers).toHaveLength(2);
     expect(answers.every((a) => a.autoLocked === true)).toBe(true);
   }, 30000);
+  it('common pool (owner spec, 2026-11-10): the create ack carries the shared count and start refuses when it is below the rounds', async () => {
+    const host = await connect(tokenFor(HOST, 'host'));
+    const guest = await connect(tokenFor(GUEST, 'guest'));
+
+    // Neither e2e user has AniList lists or in-app data, so the
+    // shared count is honestly 0.
+    const created = await emitAck(host, 'room:create', {
+      roomType: 'party',
+      poolMode: 'common',
+      guessType: 'anime',
+      roundCount: 5,
+      matchmaking: 'invite',
+    });
+    expect(created.success).toBe(true);
+    expect((created.room as Record<string, unknown>).commonPoolCount).toBe(0);
+    // The owner cap rides the same ack: unset party size → 4.
+    expect(
+      (created.room as Record<string, unknown>).settings,
+    ).toMatchObject({ maxPlayers: 4 });
+    const roomId = created.roomId as string;
+
+    await emitAck(guest, 'room:join', { roomCode: created.roomCode });
+    await emitAck(host, 'room:ready', { roomId });
+    await emitAck(guest, 'room:ready', { roomId });
+
+    const started = await emitAck(host, 'room:start', { roomId });
+    expect(started.success).toBe(false);
+    expect(started.error).toContain(
+      'Not enough common themes: you share 0 themes but this game needs 5 rounds.',
+    );
+  }, 15000);
   it('room:list-public serves the lobby discovery list (Slice 5)', async () => {
     const host = await connect(tokenFor(HOST, 'host'));
     const guest = await connect(tokenFor(GUEST, 'guest'));

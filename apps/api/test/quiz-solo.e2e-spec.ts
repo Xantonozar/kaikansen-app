@@ -308,6 +308,33 @@ process.env.JWT_SECRET = E2E_SECRET;
     expect(res.body.message).toBe('Invalid quiz type');
   });
 
+  it('owner pools (spec 2026-11-10): empty listened / anilist pools 400 honestly; the retired library source is invalid', async () => {
+    const listened = await request(app.getHttpServer())
+      .post('/quiz/solo/games')
+      .set(auth())
+      .send({ quizType: 'anime', source: 'listened' })
+      .expect(400);
+    expect(listened.body.message).toBe(
+      'Your listening history is empty. Play some themes first, or pick another pool.',
+    );
+
+    const anilist = await request(app.getHttpServer())
+      .post('/quiz/solo/games')
+      .set(auth())
+      .send({ quizType: 'anime', source: 'anilist' })
+      .expect(400);
+    expect(anilist.body.message).toBe(
+      'No AniList anime found. Connect AniList and sync your lists, or pick another pool.',
+    );
+
+    const legacy = await request(app.getHttpServer())
+      .post('/quiz/solo/games')
+      .set(auth())
+      .send({ quizType: 'anime', source: 'library' })
+      .expect(400);
+    expect(legacy.body.message).toBe('Invalid quiz source');
+  });
+
   it('404s unknown games', async () => {
     await request(app.getHttpServer())
       .get('/quiz/solo/games/nope')

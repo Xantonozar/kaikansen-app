@@ -421,37 +421,94 @@ describe('SoloQuizService — playback-start timing (owner fix, 2026-11-10)', ()
   });
 });
 
-describe('SoloQuizService — library pool (web question route)', () => {
-  it('rejects an empty library with the web’s message', async () => {
+describe('SoloQuizService — listened pool (owner picker, spec 2026-11-10)', () => {
+  it('rejects an empty listening history with a clear message', async () => {
     const { service } = makeService();
     await expect(
-      service.createGame(USER_1, { quizType: 'anime', source: 'library' }),
+      service.createGame(USER_1, { quizType: 'anime', source: 'listened' }),
     ).rejects.toThrow(
-      'Your library is empty. Add themes or connect AniList to play in Watched mode.',
+      'Your listening history is empty. Play some themes first, or pick another pool.',
     );
   });
 
-  it('rejects a library under 10 themes with the web’s counted message', async () => {
+  it('rejects a thin listened pool with the counted message', async () => {
     const { service, models } = makeService();
     for (const t of models.themes.slice(0, 3)) {
       models.history.push({ userId: USER_1, themeId: t._id });
     }
     await expect(
-      service.createGame(USER_1, { quizType: 'anime', source: 'library' }),
-    ).rejects.toThrow('You need at least 10 songs to use this mode. (Current: 3)');
+      service.createGame(USER_1, { quizType: 'anime', source: 'listened' }),
+    ).rejects.toThrow(
+      'You need at least 10 listened songs to use this pool. (Current: 3)',
+    );
   });
 
-  it('draws library questions from the player’s watched themes', async () => {
+  it('draws listened questions from the player’s history themes', async () => {
     const { service, models } = makeService();
     for (const t of models.themes.slice(0, 12)) {
       models.history.push({ userId: USER_1, themeId: t._id });
     }
     const state = await service.createGame(USER_1, {
       quizType: 'anime',
-      source: 'library',
+      source: 'listened',
     });
-    expect(state.source).toBe('library');
+    expect(state.source).toBe('listened');
     expect(state.question?.theme.slug).toBe('anime-1-op1-1001');
+  });
+});
+
+describe('SoloQuizService — anilist pool (owner picker, spec 2026-11-10)', () => {
+  /** USER_1's stored AniList id set (the merged Watching+Completed). */
+  function setAnilistIds(models: ReturnType<typeof makeFakeModels>, ids: number[]) {
+    const user = models.users.find((u) => u._id === USER_1)!;
+    (user.anilist as { completedMediaIds: number[] }).completedMediaIds = ids;
+  }
+
+  it('rejects a user with no AniList anime with a clear message', async () => {
+    const { service } = makeService();
+    await expect(
+      service.createGame(USER_1, { quizType: 'anime', source: 'anilist' }),
+    ).rejects.toThrow(
+      'No AniList anime found. Connect AniList and sync your lists, or pick another pool.',
+    );
+  });
+
+  it('rejects a thin anilist pool with the counted message', async () => {
+    const { service, models } = makeService();
+    setAnilistIds(models, [1001]); // one anime → its single theme
+    await expect(
+      service.createGame(USER_1, { quizType: 'anime', source: 'anilist' }),
+    ).rejects.toThrow(
+      'You need at least 10 songs from your AniList anime to use this pool. (Current: 1)',
+    );
+  });
+
+  it('draws anilist questions from the listed anime’s themes (no history needed)', async () => {
+    const { service, models } = makeService();
+    setAnilistIds(models, Array.from({ length: 12 }, (_, i) => 1001 + i));
+    const state = await service.createGame(USER_1, {
+      quizType: 'anime',
+      source: 'anilist',
+    });
+    expect(state.source).toBe('anilist');
+    expect(state.question?.theme.slug).toBe('anime-1-op1-1001');
+  });
+
+  it('the pools are separate: a big history does not rescue a thin anilist pool', async () => {
+    const { service, models } = makeService();
+    for (const t of models.themes.slice(0, 12)) {
+      models.history.push({ userId: USER_1, themeId: t._id });
+    }
+    setAnilistIds(models, [1013, 1014]); // only 2 themes on the lists
+    await expect(
+      service.createGame(USER_1, { quizType: 'anime', source: 'anilist' }),
+    ).rejects.toThrow('(Current: 2)');
+    // …while the listened pool plays fine off the same account.
+    const state = await service.createGame(USER_1, {
+      quizType: 'anime',
+      source: 'listened',
+    });
+    expect(state.source).toBe('listened');
   });
 });
 

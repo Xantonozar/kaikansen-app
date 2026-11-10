@@ -91,6 +91,23 @@ const EMPTY_ROOM_THRESHOLD_MS = 60 * 1000;
 /** How often the in-process sweeper runs the web's lazy cleanup. */
 const SWEEP_INTERVAL_MS = 15 * 1000;
 
+/**
+ * Party room cap (owner spec, 2026-11-10): a party seats at
+ * most 4 players (the web hard-coded 6 and offered no choice).
+ * Requested sizes clamp into 2–4 — a room must hold at least
+ * the 2 players a start requires — and an unset size defaults
+ * to the cap. Duels never read this: create forces 2 for them.
+ */
+const PARTY_MAX_PLAYERS_CAP = 4;
+
+function partyMaxPlayers(requested?: number): number {
+  const n =
+    typeof requested === 'number' && Number.isFinite(requested)
+      ? Math.floor(requested)
+      : PARTY_MAX_PLAYERS_CAP;
+  return Math.min(PARTY_MAX_PLAYERS_CAP, Math.max(2, n));
+}
+
 function iso(value: Date | string | null | undefined): string {
   if (value == null) return '';
   return value instanceof Date ? value.toISOString() : String(value);
@@ -116,12 +133,21 @@ function intersectSets<T>(left: Set<T>, right: Set<T>): Set<T> {
  * keep the web's Pusher event names and payload shapes.
  *
  * Game rules as ported (all from the web sources named):
- * - Rooms: type party/duel; poolMode random/watched/common;
+ * - Rooms: type party/duel; poolMode random/watched/common —
+ *   plus the owner's 'anilist' pool (spec 2026-11-10): the
+ *   union of the themes of every player's AniList-listed anime
+ *   (their stored merged Watching+Completed sets), resolved
+ *   per round like the common rule reads them;
  *   guessType anime/song/artist; 6-char A–Z0–9 codes, joined
  *   case-insensitively; duel rooms are capped at 2 players
- *   (create forces it), party defaults to 6; time limit 30s;
+ *   (create forces it), party rooms cap at 4 and default to 4
+ *   (owner spec 2026-11-10; the web hard-coded 6); time limit 30s;
  *   public matchmaking creates with roundCount 10 and — for
  *   duels — a null host.
+ * - Common-pool eligibility (owner spec, 2026-11-10): a common
+ *   game starts only when the players' shared-theme count (the
+ *   common candidate set's size) is at least the round count;
+ *   waiting-room states carry that count as commonPoolCount.
  * - Start: party needs ≥2 players, ALL ready; duel needs
  *   exactly 2, both ready. Duels also auto-start the moment the
  *   second player readies (the web's ready route). Only the
@@ -133,9 +159,11 @@ function intersectSets<T>(left: Set<T>, right: Set<T>): Set<T> {
  *   state lives on the room document exactly as the web stores
  *   it, reveal metadata included.
  * - Scoring (answer route): secondsRemaining is measured
- *   SERVER-side from the round's startedAt; correct →
- *   +secondsRemaining, wrong → −secondsRemaining; the first
- *   correct answer in a party round earns +10 × playerCount.
+ *   SERVER-side from the round's startedAt; the points are the
+ *   OWNER'S formula (spec 2026-11-10): correct → secondsRemaining
+ *   × (players who haven't answered yet + 1); wrong → 0. (The
+ *   web's +secondsRemaining / −secondsRemaining and its party
+ *   first-correct bonus are replaced, not ported.)
  * - Pre-round countdown (owner design, 2026-11-10): every round
  *   opens with a ROUND_COUNTDOWN_SECONDS (5) countdown while
  *   the clients preload the round's audio; at 0 the audio and
@@ -435,16 +463,21 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * The web's selectCommonModeThemeCandidate: intersect every
-   * player's library at the ANIME level, then at the exact-theme
-   * level (a player's synced anime contributes all its themes; a
-   * locally-known anime contributes only its known themes), and
-   * pick uniformly from the shared candidates.
+   * The web's selectCommonModeThemeCandidate, as a SET: intersect
+   * every player's library at the ANIME level, then at the
+   * exact-theme level (a player's synced anime contributes all
+   * its themes; a locally-known anime contributes only its known
+   * themes). Each player's library is the union of their AniList
+   * data (the stored merged Watching+Completed id set) and their
+   * in-app data (history / ratings / favourites) — see
+   * buildLibraryProfiles. The round picker takes one candidate;
+   * the owner's common-pool eligibility count (spec 2026-11-10)
+   * is this set's size, so both read the same computation.
    */
-  private selectCommonCandidate(
+  private computeCommonCandidates(
     profiles: LibraryProfile[],
     animeThemes: RoomThemeDoc[],
-  ): RoomThemeDoc | null {
+  ): RoomThemeDoc[] {
     const groupedThemes = new Map<number, RoomThemeDoc[]>();
     for (const theme of animeThemes) {
       if (!theme.anilistId || !theme.videoUrl) continue;
@@ -452,7 +485,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       existing.push(theme);
       groupedThemes.set(theme.anilistId, existing);
     }
-    if (groupedThemes.size === 0 || profiles.length === 0) return null;
+    if (groupedThemes.size === 0 || profiles.length === 0) return [];
 
     let sharedAnimeIds = new Set(profiles[0].libraryAnimeIds);
     for (const profile of profiles.slice(1)) {
@@ -489,18 +522,20 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    if (sharedValidThemes.length === 0) return null;
-    return sharedValidThemes[
-      Math.floor(Math.random() * sharedValidThemes.length)
-    ];
+    return sharedValidThemes;
   }
 
-  /** The web's selectThemeForCommonMode (returns null → generic fallback). */
-  private async selectCommonTheme(
+  /**
+   * Every theme the room's players currently share under the
+   * common rule (optionally minus already-used themes): the
+   * web's selectThemeForCommonMode query feeding
+   * computeCommonCandidates.
+   */
+  private async commonCandidates(
     models: RoomModels,
     room: RoomDoc,
-    excludedThemeIds: string[],
-  ): Promise<RoomThemeDoc | null> {
+    excludedThemeIds: string[] = [],
+  ): Promise<RoomThemeDoc[]> {
     const profiles = await this.buildLibraryProfiles(models, room);
     const sharedAnimeIds =
       profiles.length > 0
@@ -508,7 +543,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
             profiles.every((p) => p.libraryAnimeIds.has(animeId)),
           )
         : [];
-    if (sharedAnimeIds.length === 0) return null;
+    if (sharedAnimeIds.length === 0) return [];
 
     const filter: Record<string, unknown> = {
       anilistId: { $in: sharedAnimeIds },
@@ -527,7 +562,53 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       .lean()
       .exec()) as RoomThemeDoc[];
 
-    return this.selectCommonCandidate(profiles, animeThemes);
+    return this.computeCommonCandidates(profiles, animeThemes);
+  }
+
+  /**
+   * The shared-theme count behind common-pool eligibility
+   * (owner spec, 2026-11-10): how many themes ALL current
+   * players share. A player with neither AniList lists nor
+   * in-app data has an empty library, so the count is 0.
+   */
+  private async countCommonPoolThemes(
+    models: RoomModels,
+    room: RoomDoc,
+  ): Promise<number> {
+    return (await this.commonCandidates(models, room)).length;
+  }
+
+  /**
+   * Room state for a WAITING room, with commonPoolCount attached
+   * when the pool is 'common' (the waiting room shows the count
+   * and blocks its own Start while it is below the round count;
+   * the server re-checks at start regardless). Non-waiting or
+   * non-common states pass through untouched.
+   */
+  private async stateWithCommonCount(
+    models: RoomModels,
+    room: RoomDoc,
+  ): Promise<QuizRoomState> {
+    const state = this.toRoomState(room);
+    if (room.status === 'waiting' && room.settings.poolMode === 'common') {
+      state.commonPoolCount = await this.countCommonPoolThemes(models, room);
+    }
+    return state;
+  }
+
+  /** The web's selectThemeForCommonMode (returns null → generic fallback). */
+  private async selectCommonTheme(
+    models: RoomModels,
+    room: RoomDoc,
+    excludedThemeIds: string[],
+  ): Promise<RoomThemeDoc | null> {
+    const candidates = await this.commonCandidates(
+      models,
+      room,
+      excludedThemeIds,
+    );
+    if (candidates.length === 0) return null;
+    return candidates[Math.floor(Math.random() * candidates.length)];
   }
 
   /** The web's getDynamicThemeFilter. */
@@ -544,13 +625,44 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       return baseFilter;
     }
 
-    // Common or Watched mode
+    // Common, Watched or AniList mode — all read the players' docs.
     const playerUserIds = room.players.map((p) => p.userId);
     const users = (await models.users
       .find({ _id: { $in: playerUserIds } })
       .select('anilist.completedMediaIds')
       .lean()
       .exec()) as (User & { _id: unknown })[];
+
+    if (room.settings.poolMode === 'anilist') {
+      // Owner pool (spec 2026-11-10): the union over players of
+      // the themes of their AniList-listed anime (the stored
+      // merged Watching+Completed set). Unlike 'watched' there
+      // is no create-time snapshot — the set resolves per round
+      // from the stored lists, as the common rule reads them.
+      const mediaIds = Array.from(
+        new Set(
+          users.flatMap((u) =>
+            (u.anilist?.completedMediaIds ?? []).filter(
+              (id): id is number => typeof id === 'number',
+            ),
+          ),
+        ),
+      );
+      const anilistThemes =
+        mediaIds.length > 0
+          ? ((await models.themes
+              .find({ anilistId: { $in: mediaIds } })
+              .select('_id')
+              .lean()
+              .exec()) as { _id: unknown }[])
+          : [];
+      // An empty pool forces a no-match so the caller's fallback
+      // kicks in — the web's empty-pool behaviour, as below.
+      return {
+        ...baseFilter,
+        _id: { $in: anilistThemes.map((t) => String(t._id)) },
+      };
+    }
 
     let targetThemeIds: string[] = [];
     const isCommon = room.settings.poolMode === 'common';
@@ -794,7 +906,8 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         watchedPoolAnimeIds,
         guessType: dto.guessType,
         roundCount: dto.roundCount,
-        maxPlayers: dto.roomType === 'duel' ? 2 : (dto.maxPlayers ?? 6),
+        maxPlayers:
+          dto.roomType === 'duel' ? 2 : partyMaxPlayers(dto.maxPlayers),
         timeLimitSeconds: 30,
       },
       status: 'waiting',
@@ -816,7 +929,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       success: true,
       roomId: String(room._id),
       roomCode: room.roomCode,
-      room: this.toRoomState(room),
+      room: await this.stateWithCommonCount(models, room),
     };
   }
 
@@ -874,7 +987,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         success: true,
         roomId: String(room._id),
         roomCode: room.roomCode,
-        room: this.toRoomState(room),
+        room: await this.stateWithCommonCount(models, room),
       };
     });
   }
@@ -936,7 +1049,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
           success: true,
           roomId: String(room._id),
           roomCode: room.roomCode,
-          room: this.toRoomState(room),
+          room: await this.stateWithCommonCount(models, room),
         };
       });
     }
@@ -961,7 +1074,8 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         watchedPoolAnimeIds,
         guessType: dto.guessType,
         roundCount: 10, // Default for public (the web's constant).
-        maxPlayers: dto.roomType === 'duel' ? 2 : (dto.maxPlayers ?? 6),
+        maxPlayers:
+          dto.roomType === 'duel' ? 2 : partyMaxPlayers(dto.maxPlayers),
         timeLimitSeconds: 30,
       },
       status: 'waiting',
@@ -983,7 +1097,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       success: true,
       roomId: String(room._id),
       roomCode: room.roomCode,
-      room: this.toRoomState(room),
+      room: await this.stateWithCommonCount(models, room),
     };
   }
 
@@ -1041,7 +1155,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     const models = this.requireModels();
     const room = await this.loadRoom(models, roomId);
     this.requirePlayer(room, userId);
-    return { success: true, room: this.toRoomState(room) };
+    return { success: true, room: await this.stateWithCommonCount(models, room) };
   }
 
   /* ---------------------------------------------------------------- */
@@ -1078,7 +1192,10 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         newHostId: room.hostId ? String(room.hostId) : null,
         roomStatus: room.status,
       });
-      return { success: true, room: this.toRoomState(room) };
+      return {
+        success: true,
+        room: await this.stateWithCommonCount(models, room),
+      };
     });
   }
 
@@ -1113,7 +1230,10 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         return { success: true, gameStarted: true, room: this.toRoomState(room) };
       }
 
-      return { success: true, room: this.toRoomState(room) };
+      return {
+        success: true,
+        room: await this.stateWithCommonCount(models, room),
+      };
     });
   }
 
@@ -1156,15 +1276,29 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         Number(next.roundCount) || (current.roundCount as number);
       merged.timeLimitSeconds =
         Number(next.timeLimitSeconds) || (current.timeLimitSeconds as number);
+      // Party sizes clamp to the owner's cap (spec 2026-11-10);
+      // duels stay pinned at 2 whatever the payload carries.
       merged.maxPlayers =
-        Number(next.maxPlayers) || (current.maxPlayers as number);
+        room.roomType === 'duel'
+          ? 2
+          : partyMaxPlayers(
+              Number(next.maxPlayers) || (current.maxPlayers as number),
+            );
       room.settings = merged as unknown as RoomDoc['settings'];
       await room.save();
 
+      const state = await this.stateWithCommonCount(models, room);
       this.emit(room, 'room:settings-updated', {
-        settings: this.toRoomState(room).settings,
+        settings: state.settings,
+        // The fresh shared-theme count rides along for
+        // common-pool rooms (undefined for other pools).
+        commonPoolCount: state.commonPoolCount,
       });
-      return { success: true, settings: this.toRoomState(room).settings };
+      return {
+        success: true,
+        settings: state.settings,
+        commonPoolCount: state.commonPoolCount,
+      };
     });
   }
 
@@ -1266,6 +1400,22 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     room: RoomDoc,
     roundNumber: number,
   ): Promise<void> {
+    // Common-pool eligibility (owner spec, 2026-11-10): a
+    // common game may only START when the players share at
+    // least as many themes as the game has rounds — otherwise
+    // the pool runs dry mid-game and the generic fallback
+    // below would silently deal off-pool themes. Enforced
+    // here, at the single funnel every round-1 path uses
+    // (host start and the duel ready auto-start alike).
+    if (roundNumber === 1 && room.settings.poolMode === 'common') {
+      const sharedCount = await this.countCommonPoolThemes(models, room);
+      if (sharedCount < room.settings.roundCount) {
+        throw new RoomActionError(
+          `Not enough common themes: you share ${sharedCount} theme${sharedCount === 1 ? '' : 's'} but this game needs ${room.settings.roundCount} rounds. Add more shared anime or pick fewer rounds.`,
+        );
+      }
+    }
+
     let theme = await this.selectThemeForRoom(
       models,
       room,
@@ -1479,11 +1629,10 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       const { baseScore, bonusScore, totalScoreGained } = multiplayerScoreFor({
         correct: isCorrect,
         secondsRemaining,
-        roomType: room.roomType,
         playerCount,
-        isFirstCorrect: isCorrect && round.firstCorrectUserId == null,
+        answeredCount: round.answers.length,
       });
-      if (isCorrect && room.roomType === 'party' && round.firstCorrectUserId == null) {
+      if (isCorrect && round.firstCorrectUserId == null) {
         round.firstCorrectUserId = userId;
       }
 

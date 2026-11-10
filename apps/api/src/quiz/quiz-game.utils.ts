@@ -201,27 +201,37 @@ export function effectiveQuestionStart(
 }
 
 /* ------------------------------------------------------------------ */
-/* Multiplayer scoring — app/api/quiz/room/answer/route.ts:            */
-/* correct → base = +secondsRemaining; wrong → base =                  */
-/* −secondsRemaining (negative scoring is real); party-only first-     */
-/* correct bonus = 10 × playerCount.                                   */
+/* Multiplayer scoring — OWNER FORMULA (spec 2026-11-10, replacing   */
+/* the web answer route's arithmetic): a correct answer earns the    */
+/* seconds remaining × the number of players who had not answered    */
+/* yet, PLUS ONE — the +1 is the owner's explicit pick so the LAST   */
+/* correct answerer still earns the remaining time × 1 instead of    */
+/* × 0. A wrong answer earns 0 (the web's negative scoring is gone). */
+/* Solving for the multiplier at answer time: the players who have   */
+/* not answered yet, excluding the answerer, are                     */
+/* playerCount − answeredCount − 1, so the multiplier is             */
+/* playerCount − answeredCount. `answeredCount` is the number of     */
+/* answers already recorded in the round BEFORE this one.            */
 /* ------------------------------------------------------------------ */
 
 export function multiplayerScoreFor(input: {
   correct: boolean;
   secondsRemaining: number;
-  roomType: string;
   playerCount: number;
-  isFirstCorrect: boolean;
+  answeredCount: number;
 }): { baseScore: number; bonusScore: number; totalScoreGained: number } {
-  const baseScore = input.correct
-    ? input.secondsRemaining
-    : -input.secondsRemaining;
-  let bonusScore = 0;
-  if (input.correct && input.roomType === 'party' && input.isFirstCorrect) {
-    bonusScore = 10 * input.playerCount;
+  if (!input.correct) {
+    return { baseScore: 0, bonusScore: 0, totalScoreGained: 0 };
   }
-  return { baseScore, bonusScore, totalScoreGained: baseScore + bonusScore };
+  const notYetAnsweredPlusOne = Math.max(
+    1,
+    input.playerCount - input.answeredCount,
+  );
+  const baseScore = input.secondsRemaining * notYetAnsweredPlusOne;
+  // No separate bonus under the owner's formula — being first is
+  // already what the multiplier rewards. bonusScore stays in the
+  // answer shape at 0 (the rows and payloads carry the field).
+  return { baseScore, bonusScore: 0, totalScoreGained: baseScore };
 }
 
 /**
@@ -260,8 +270,12 @@ export function generateRoomCode(random: () => number = Math.random): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* Rank math — lib/rank-utils.ts, verbatim: tiers, placement RP,       */
-/* streak bonuses. The stateful application lives in RankService.      */
+/* Rank math — lib/rank-utils.ts tiers verbatim; the PLACEMENT RP    */
+/* table is the OWNER'S (spec 2026-11-10), replacing the web's: it   */
+/* is keyed by mode and the ACTUAL player count at game end. Party   */
+/* rooms cap at 4 players, so the 4-row is the largest table; a      */
+/* legacy oversized room (created before the cap) reads the 4-row    */
+/* table with placements past 4th taking the last row's value.       */
 /* ------------------------------------------------------------------ */
 
 export type RankTier = 'academy' | 'genin' | 'chunin' | 'jonin' | 'anbu' | 'kage';
@@ -300,26 +314,30 @@ export function getTierFromRP(rp: number): {
   return { tier: t.tier, division, newFloor: t.floor };
 }
 
+/** Owner RP tables (spec 2026-11-10), indexed by placement − 1. */
+const PARTY_RP_BY_PLAYER_COUNT: Record<number, number[]> = {
+  2: [5, -5],
+  3: [7, 0, -5],
+  4: [10, 5, -3, -7],
+};
+
 export function getBaseRP(
   placement: number,
   totalPlayers: number,
   roomType: 'party' | 'duel',
 ): number {
   if (roomType === 'duel') {
-    if (placement === 1) return 20; // WIN
-    if (placement === 2 && totalPlayers === 2) return -15; // LOSS
-    return 5; // DRAW fallback
+    if (placement === 1) return 10; // WIN
+    if (placement === 2 && totalPlayers === 2) return -10; // LOSS
+    return 5; // DRAW fallback (degenerate duel shape)
   }
 
-  // Party mode
-  if (placement === 1) return 20;
-  if (placement === 2) return 10;
-  if (placement === 3) return 0;
-  if (placement === 4) return -5;
-  if (placement === 5) return -10;
-  if (placement >= 6) return -15;
-
-  return -15;
+  // Party mode — the table for the game's actual player count.
+  const table =
+    PARTY_RP_BY_PLAYER_COUNT[totalPlayers] ?? PARTY_RP_BY_PLAYER_COUNT[4];
+  if (placement < 1) return table[table.length - 1];
+  if (placement > table.length) return table[table.length - 1];
+  return table[placement - 1];
 }
 
 export function getStreakBonus(winStreak: number): number {

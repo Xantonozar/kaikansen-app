@@ -749,8 +749,16 @@ export type QuizGuessType = 'anime' | 'title' | 'artist';
 /** Room guess type, in the web QuizRoom settings vocabulary. */
 export type RoomGuessType = 'anime' | 'song' | 'artist';
 
-/** Solo question pool: the web's `source` parameter. */
-export type QuizSource = 'random' | 'library';
+/**
+ * Solo question pool (owner spec, 2026-11-10): the Solo Run
+ * picker offers Random / AniList / Listened. 'anilist' draws from
+ * the themes of the anime on the player's AniList Watching +
+ * Completed lists (the stored merged media-id set the Library
+ * AniList segment uses); 'listened' draws from the themes in the
+ * player's in-app listening (watch) history. This replaces the
+ * web's single 'library' source, which was the union of the two.
+ */
+export type QuizSource = 'random' | 'anilist' | 'listened';
 
 /** Solo game length — the web client plays exactly 10 questions. */
 export const SOLO_QUESTION_COUNT = 10;
@@ -887,7 +895,7 @@ export interface QuizLeaderboardResponse {
 /* ------------------------- Multiplayer rooms ---------------------- */
 
 export type QuizRoomType = 'party' | 'duel';
-export type QuizPoolMode = 'random' | 'watched' | 'common';
+export type QuizPoolMode = 'random' | 'watched' | 'common' | 'anilist';
 export type QuizRoomStatus = 'waiting' | 'in_progress' | 'ended';
 export type QuizMatchmaking = 'invite' | 'public';
 
@@ -970,6 +978,16 @@ export interface QuizRoomState {
   currentRound: number;
   players: QuizRoomPlayer[];
   rounds: QuizRoundState[];
+  /**
+   * Common-pool eligibility (owner spec, 2026-11-10): the number
+   * of themes ALL current players share (AniList lists + in-app
+   * data, unioned per player). Present only while a common-pool
+   * room is waiting and the server could compute it; null/absent
+   * otherwise. A common room may not start while this count is
+   * below settings.roundCount — the server enforces it at start
+   * regardless of what the client shows.
+   */
+  commonPoolCount?: number | null;
 }
 
 /**
@@ -1015,6 +1033,8 @@ export interface QuizRoomAck {
   totalScoreGained?: number;
   secondsRemaining?: number;
   settings?: QuizRoomSettings;
+  /** `room:update-settings` result on a common-pool room: the fresh shared-theme count (see QuizRoomState.commonPoolCount). */
+  commonPoolCount?: number | null;
 }
 
 /** Client → server `room:create` payload (the web create body). */

@@ -89,16 +89,17 @@ describe('RankService.calculateAndApplyRP (web rank-utils)', () => {
     await service.calculateAndApplyRP('room-1');
 
     const alice = ranks.get('alice')!;
-    expect(alice.rp).toBe(20); // 1st place base RP, streak 1 → no bonus yet
+    expect(alice.rp).toBe(7); // party-of-3 1st place base RP (owner table), streak 1 → no bonus yet
     expect(alice.currentWinStreak).toBe(1);
     expect(alice.stats).toMatchObject({ totalGames: 1, wins: 1, winRate: 1 });
-    expect(alice.season.seasonRP).toBe(20);
+    expect(alice.season.seasonRP).toBe(7);
     expect(alice.season.seasonWins).toBe(1);
 
-    // Tied 2nd place: both get placement 2 → +10, counted as draws.
+    // Tied 2nd place: both get placement 2 → 0 RP in a party of 3,
+    // counted as draws (baseRP >= 0).
     for (const id of ['bob', 'carol']) {
       const doc = ranks.get(id)!;
-      expect(doc.rp).toBe(10);
+      expect(doc.rp).toBe(0);
       expect(doc.stats).toMatchObject({ totalGames: 1, wins: 0, draws: 1, losses: 0 });
       expect(doc.currentWinStreak).toBe(0);
     }
@@ -110,8 +111,8 @@ describe('RankService.calculateAndApplyRP (web rank-utils)', () => {
       placement: 1,
       totalPlayers: 3,
       rpBefore: 0,
-      rpAfter: 20,
-      rpChange: 20,
+      rpAfter: 7,
+      rpChange: 7,
       streakBonus: 0,
       winStreakAtTime: 1,
       tierBefore: 'academy',
@@ -121,6 +122,58 @@ describe('RankService.calculateAndApplyRP (web rank-utils)', () => {
 
     const rankEvents = events.filter((e) => e.event === 'room:rank-updated');
     expect(rankEvents).toHaveLength(3);
+  });
+
+  it('applies every row of the owner party-of-4 table, floor clamp included', async () => {
+    const room = {
+      _id: 'room-p4',
+      roomType: 'party',
+      players: [
+        player('p1', 40),
+        player('p2', 30),
+        player('p3', 20),
+        player('p4', 10),
+      ],
+    };
+    const { service, ranks, history } = makeFakes(room);
+    // p4 sits 5 RP above the genin floor: the −7 row must clamp.
+    ranks.set(
+      'p4',
+      makeRankDoc('p4', { rp: 405, tier: 'genin', division: 3, tierFloor: 400 }),
+    );
+    ranks.set('p3', makeRankDoc('p3', { rp: 100 }));
+
+    await service.calculateAndApplyRP('room-p4');
+
+    expect(ranks.get('p1')!.rp).toBe(10); // +10
+    expect(ranks.get('p1')!.stats.wins).toBe(1);
+    expect(ranks.get('p2')!.rp).toBe(5); // +5, a draw by the stats rule
+    expect(ranks.get('p2')!.stats.draws).toBe(1);
+    expect(ranks.get('p3')!.rp).toBe(97); // −3
+    expect(ranks.get('p3')!.stats.losses).toBe(1);
+    expect(ranks.get('p4')!.rp).toBe(400); // −7 clamped at the genin floor
+    expect(ranks.get('p4')!.stats.losses).toBe(1);
+    expect(history.find((h) => h.userId === 'p4')).toMatchObject({
+      placement: 4,
+      totalPlayers: 4,
+      rpChange: -5, // actual applied change after the clamp
+    });
+  });
+
+  it('applies the owner party-of-2 table (+5 / −5)', async () => {
+    const room = {
+      _id: 'room-p2',
+      roomType: 'party',
+      players: [player('alice', 30), player('bob', 10)],
+    };
+    const { service, ranks } = makeFakes(room);
+    ranks.set('bob', makeRankDoc('bob', { rp: 50 }));
+
+    await service.calculateAndApplyRP('room-p2');
+
+    expect(ranks.get('alice')!.rp).toBe(5);
+    expect(ranks.get('bob')!.rp).toBe(45);
+    expect(ranks.get('bob')!.stats.losses).toBe(1);
   });
 
   it('adds the win-streak bonus and tracks the longest streak', async () => {
@@ -135,16 +188,16 @@ describe('RankService.calculateAndApplyRP (web rank-utils)', () => {
     await service.calculateAndApplyRP('room-2');
 
     const alice = ranks.get('alice')!;
-    expect(alice.rp).toBe(125); // 100 + 20 base + 5 streak bonus (streak 2)
+    expect(alice.rp).toBe(115); // 100 + 10 duel-win base + 5 streak bonus (streak 2)
     expect(alice.currentWinStreak).toBe(2);
     expect(alice.longestWinStreak).toBe(2);
     expect(history.find((h) => h.userId === 'alice')).toMatchObject({
       streakBonus: 5,
-      rpChange: 25,
+      rpChange: 15,
     });
 
     const bob = ranks.get('bob')!;
-    expect(bob.rp).toBe(0); // −15 clamped at the academy floor 0
+    expect(bob.rp).toBe(0); // −10 clamped at the academy floor 0
     expect(bob.stats.losses).toBe(1);
     expect(bob.season.seasonRP).toBe(0); // season RP never decreases
   });
@@ -179,7 +232,7 @@ describe('RankService.calculateAndApplyRP (web rank-utils)', () => {
     await service.calculateAndApplyRP('room-3');
 
     const alice = ranks.get('alice')!;
-    expect(alice.rp).toBe(400); // 405 − 15 = 390 → clamped to floor 400
+    expect(alice.rp).toBe(400); // 405 − 10 = 395 → clamped to floor 400
     expect(alice.tier).toBe('genin'); // 400 is still genin
     expect(alice.tierFloor).toBe(400);
     expect(history.find((h) => h.userId === 'alice')).toMatchObject({
@@ -189,7 +242,7 @@ describe('RankService.calculateAndApplyRP (web rank-utils)', () => {
 
     const gina = ranks.get('gina')!;
     expect(gina.currentWinStreak).toBe(3);
-    expect(gina.rp).toBe(405 + 20 + 10); // base 20 + streak-3 bonus 10
+    expect(gina.rp).toBe(405 + 10 + 10); // duel-win base 10 + streak-3 bonus 10
   });
 
   it('promotes across a tier boundary and raises the floor', async () => {
@@ -204,8 +257,8 @@ describe('RankService.calculateAndApplyRP (web rank-utils)', () => {
     await service.calculateAndApplyRP('room-4');
 
     const alice = ranks.get('alice')!;
-    // 390 + 20 + streak-5 bonus 20 = 430 → genin, floor raised to 400.
-    expect(alice.rp).toBe(430);
+    // 390 + 10 duel-win base + streak-5 bonus 20 = 420 → genin, floor raised to 400.
+    expect(alice.rp).toBe(420);
     expect(alice.tier).toBe('genin');
     expect(alice.tierFloor).toBe(400);
     expect(alice.stats.peakTier).toBe('genin');

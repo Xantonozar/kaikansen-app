@@ -87,6 +87,7 @@ const POOL_LABEL: Record<QuizPoolMode, string> = {
   random: 'Random pool',
   watched: 'Watched pool',
   common: 'Common pool',
+  anilist: 'AniList pool',
 };
 /** Waiting-lobby summary chips use the design's title case
  * ("Guess the Anime"); GUESS_LABEL above keeps the in-game
@@ -327,8 +328,21 @@ export default function QuizRoomScreen() {
         ),
         onRoomEvent(
           'room:settings-updated',
-          (p: { settings: QuizRoomSettings }) => {
-            setRoom((r) => (r ? { ...r, settings: p.settings } : r));
+          (p: {
+            settings: QuizRoomSettings;
+            commonPoolCount?: number | null;
+          }) => {
+            setRoom((r) =>
+              r
+                ? {
+                    ...r,
+                    settings: p.settings,
+                    ...(typeof p.commonPoolCount === 'number'
+                      ? { commonPoolCount: p.commonPoolCount }
+                      : {}),
+                  }
+                : r,
+            );
           },
         ),
         onRoomEvent('room:round-started', (p: RoundStartedEvent) => {
@@ -604,6 +618,16 @@ export default function QuizRoomScreen() {
 
   const startHint = (() => {
     if (!room || phase !== 'waiting') return null;
+    // Common-pool eligibility (owner spec, 2026-11-10): the
+    // shared-theme count must cover the rounds; the server
+    // refuses the start too — this hint is the honest preview.
+    if (
+      room.settings.poolMode === 'common' &&
+      typeof room.commonPoolCount === 'number' &&
+      room.commonPoolCount < room.settings.roundCount
+    ) {
+      return `Not enough common themes: you share ${room.commonPoolCount} theme${room.commonPoolCount === 1 ? '' : 's'} for ${room.settings.roundCount} rounds. Players with no AniList lists or listening history share nothing — add overlapping anime or pick fewer rounds.`;
+    }
     if (room.roomType === 'duel') {
       if (room.players.length !== 2) return 'Waiting for an opponent…';
       if (!room.players.every((p) => p.ready)) return 'Both players must ready up.';
@@ -1021,6 +1045,18 @@ export default function QuizRoomScreen() {
                   </View>
                 ))}
               </View>
+              {/* Common-pool count (owner spec, 2026-11-10):
+                  the server-computed number of themes every
+                  player here shares; below the round count the
+                  game cannot start (see the footer hint). */}
+              {room.settings.poolMode === 'common' &&
+                typeof room.commonPoolCount === 'number' && (
+                  <Text style={styles.commonPoolLine}>
+                    {room.commonPoolCount >= room.settings.roundCount
+                      ? `Common pool: ${room.commonPoolCount} shared themes — enough for ${room.settings.roundCount} rounds.`
+                      : `Common pool: ${room.commonPoolCount} shared themes for ${room.settings.roundCount} rounds.`}
+                  </Text>
+                )}
               <View style={styles.playersHead}>
                 <Text style={styles.playersTitle}>
                   Players ({room.players.length}/{room.settings.maxPlayers})
@@ -1051,7 +1087,7 @@ export default function QuizRoomScreen() {
                   Avatar + answered badge + name per player, with
                   the waiting caption inside the card. The strip
                   scrolls sideways when the roster outgrows the
-                  card (a party seats up to 8); at the mock's
+                  card (a party seats up to 4); at the mock's
                   four players it spreads across the card. */}
               <View style={styles.stripCard}>
                 <ScrollView
@@ -2166,6 +2202,13 @@ const createStyles = (theme: Theme) =>
       fontFamily: fontFamilies.caption,
       fontSize: 11,
       color: theme.accent,
+    },
+    commonPoolLine: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 11,
+      color: theme.muted,
+      textAlign: 'center',
+      paddingHorizontal: spacing.md,
     },
     playersHead: {
       flexDirection: 'row',

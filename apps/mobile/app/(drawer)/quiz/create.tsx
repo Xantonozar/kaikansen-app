@@ -43,19 +43,21 @@ const POOL_OPTIONS: { key: QuizPoolMode; label: string }[] = [
   { key: 'random', label: 'Random' },
   { key: 'watched', label: 'Watched' },
   { key: 'common', label: 'Common' },
+  { key: 'anilist', label: 'AniList' },
 ];
 
 const ROUND_OPTIONS = [5, 10, 15];
 const TIME_OPTIONS = [10, 20, 30];
 
-/* Party size bounds — the lobby card's own copy ("Host a Party of
-   3 to 8 players, or a 1v1 Duel"). The web/API impose no party
-   floor (the web hard-codes 6 and never offers the choice), so the
-   design's stated range is the rule here. Duels are 1v1: the
-   server forces maxPlayers 2 for duel creates regardless of the
-   payload (quiz-rooms.service, mirroring the web create route). */
+/* Party size bounds — the lobby card's own copy ("Host a Party
+   of 3 to 4 players, or a 1v1 Duel"). The max is the owner's cap
+   (spec 2026-11-10): party rooms seat at most 4, and the server
+   clamps the same way, so the stepper's top IS the rule. The
+   floor follows the design's stated range. Duels are 1v1: the
+   server forces maxPlayers 2 for duel creates regardless of
+   the payload (quiz-rooms.service). */
 const PARTY_MIN_PLAYERS = 3;
-const PARTY_MAX_PLAYERS = 8;
+const PARTY_MAX_PLAYERS = 4;
 const DUEL_PLAYERS = 2;
 
 /**
@@ -117,7 +119,7 @@ export default function CreateRoomScreen() {
   const [guessType, setGuessType] = useState<RoomGuessType>('anime');
   const [poolMode, setPoolMode] = useState<QuizPoolMode>('random');
   const [roundCount, setRoundCount] = useState(10);
-  const [maxPlayers, setMaxPlayers] = useState(8);
+  const [maxPlayers, setMaxPlayers] = useState(4);
   const [timeLimit, setTimeLimit] = useState(20);
   const [matchmaking, setMatchmaking] = useState<QuizMatchmaking>('public');
 
