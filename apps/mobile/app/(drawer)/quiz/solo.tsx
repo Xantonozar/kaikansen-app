@@ -589,6 +589,25 @@ export default function SoloQuizScreen() {
           )}
           mediaKey={`${gameId ?? 'game'}:${question.index}`}
           onStateChange={handleAudioState}
+          /* Playback plan (2026-11-10): the NEXT question's .ogg
+             preloads while this one plays (the answer response
+             already carries nextQuestion), so the advance starts
+             it near-instantly. The clock still starts at actual
+             playback — a preloaded clip simply reaches 'playing'
+             sooner, through the same phase signal. */
+          nextCandidates={
+            feedback?.nextQuestion
+              ? [
+                  feedback.nextQuestion.theme.audioUrl,
+                  feedback.nextQuestion.theme.videoUrl,
+                ]
+              : undefined
+          }
+          nextMediaKey={
+            feedback?.nextQuestion
+              ? `${gameId ?? 'game'}:${feedback.nextQuestion.index}`
+              : undefined
+          }
         />
         <ScrollView
           contentContainerStyle={styles.gameContent}

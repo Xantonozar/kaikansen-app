@@ -81,6 +81,7 @@ import {
   usePlaybackSession,
   type QueueItem,
 } from '../../../src/playback-context';
+import { useOpenThemesAs } from '../../../src/playbackSettings';
 import {
   downloadId,
   downloadsSupported,
@@ -242,6 +243,15 @@ export default function ThemeDetailScreen() {
      the hero then becomes the player (the shared session, see
      src/playback-context.tsx). */
   const [playMode, setPlayMode] = useState<PlaybackMode | null>(null);
+  /* Playback plan (2026-11-10): the page OPENS on the saved
+     "Open themes as" side (Settings → Playback; default Listen).
+     The toggle shows that side selected from the first paint,
+     and the engine preloads that mode's media in the background
+     (preload only — NO autoplay) so the eventual tap starts
+     near-instantly. The toggle's selected side is therefore
+     `playMode ?? openMode` everywhere below. */
+  const { mode: openMode } = useOpenThemesAs();
+  const shownMode: PlaybackMode = playMode ?? openMode;
   const [barWidth, setBarWidth] = useState(0);
   const videoRef = useRef<VideoView>(null);
 
@@ -346,6 +356,35 @@ export default function ThemeDetailScreen() {
   const selectedEntry = detail
     ? (detail.entries[selectedEntryIndex] ?? null)
     : null;
+  /* While this screen's PASSIVE claim is live (inactive, this
+     slug), switching versions retargets the preload at the new
+     entry — the same direct claim the passive effect made, with
+     the new entry's key + chain. While PLAYING, the version
+     tiles' existing updateSession path owns the switch. */
+  const retargetPreload = (entryIndex: number) => {
+    if (!detail) return;
+    const entry = detail.entries[entryIndex];
+    if (!entry) return;
+    if (session.active || session.slug !== detail.slug) return;
+    startSession(
+      {
+        slug: detail.slug,
+        detail,
+        entry,
+        entryIdOverride: null,
+        mode: shownMode,
+        active: false,
+        watchAudioFallback: true,
+        preloadKey: `${detail.slug}:${entry.atEntryId}:${shownMode}`,
+      },
+      {
+        items: [
+          { ...queueItemFromSummary(detail), atEntryId: entry.atEntryId },
+        ],
+        index: 0,
+      },
+    );
+  };
   const listenAvailable =
     detail !== null &&
     selectedEntry !== null &&
@@ -399,10 +438,58 @@ export default function ThemeDetailScreen() {
         // hero below renders the artwork + audio-only note off
         // playback.audioFallback instead of a dead black frame.
         watchAudioFallback: true,
+        // Playback plan: the claim key matches the passive
+        // preload's key (below), so activating adopts the
+        // preloaded source instead of loading it again.
+        preloadKey: `${detail.slug}:${entry.atEntryId}:${mode}`,
       },
       { items: [currentItem, ...related], index: 0 },
     );
   };
+
+  /* Passive preload claim (playback plan, 2026-11-10): when the
+     detail lands and NO live session is playing another slug,
+     claim the session INACTIVE in the open mode — the provider
+     turns that into the mode-matched preload (Listen: the whole
+     .ogg through expo-audio; Watch: the video through
+     expo-video), with no autoplay. The Watch/Listen tap then
+     activates through startPlayback above and adopts the
+     preload. Leaving for another slug ends the session as
+     before (the detail effect's endSession), which drops the
+     preload with it. A passive claim never disturbs a live
+     session for THIS slug (it is already playing) and never
+     claims while the screen is still loading. */
+  useEffect(() => {
+    if (state !== 'ready' || !detail || !selectedEntry) return;
+    if (session.active) return;
+    if (session.slug !== null && session.slug !== detail.slug) return;
+    startSession(
+      {
+        slug: detail.slug,
+        detail,
+        entry: selectedEntry,
+        entryIdOverride: null,
+        mode: shownMode,
+        active: false,
+        watchAudioFallback: true,
+        preloadKey: `${detail.slug}:${selectedEntry.atEntryId}:${shownMode}`,
+      },
+      {
+        items: [
+          {
+            ...queueItemFromSummary(detail),
+            atEntryId: selectedEntry.atEntryId,
+          },
+        ],
+        index: 0,
+      },
+    );
+    // shownMode is read live on purpose: the effect re-fires on
+    // the inputs that change WHAT should preload (detail, entry);
+    // a mode flip is handled by the toggle arms below, which
+    // re-claim directly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, detail, selectedEntry, session.active, session.slug]);
 
   /* Re-attach on focus: if the shared session is live for THIS
      theme (started here, or on the player route), the hero shows
@@ -434,6 +521,45 @@ export default function ThemeDetailScreen() {
       playMode,
     ]),
   );
+
+  /* The hero FAB / mode toggle's inactive arm (playback plan):
+     while nothing is playing, tapping the mode that is NOT shown
+     just flips the shown side and retargets the preload — no
+     playback starts (preload follows the mode). Tapping the
+     shown side activates it through startPlayback. While
+     playing, both arms keep today's behaviour (startPlayback in
+     that mode — the mid-page switch loads the other file). */
+  const onModeArm = (mode: PlaybackMode) => {
+    if (playMode !== null || (session.active && session.slug === slug)) {
+      startPlayback(mode);
+      return;
+    }
+    if (mode !== shownMode && detail && selectedEntry) {
+      startSession(
+        {
+          slug: detail.slug,
+          detail,
+          entry: selectedEntry,
+          entryIdOverride: null,
+          mode,
+          active: false,
+          watchAudioFallback: true,
+          preloadKey: `${detail.slug}:${selectedEntry.atEntryId}:${mode}`,
+        },
+        {
+          items: [
+            {
+              ...queueItemFromSummary(detail),
+              atEntryId: selectedEntry.atEntryId,
+            },
+          ],
+          index: 0,
+        },
+      );
+      return;
+    }
+    startPlayback(mode);
+  };
 
   /** Rounded-square back button — now only the error/missing
       state's; the ready screen's back lives in the header row
@@ -780,7 +906,7 @@ export default function ThemeDetailScreen() {
                      working: play/pause and seek drive the audio. */
                   <View style={styles.heroPlayer}>
                     <VideoView
-                      player={playback.player}
+                      player={playback.surfacePlayer}
                       style={styles.hiddenSurface}
                       nativeControls={false}
                     />
@@ -809,7 +935,7 @@ export default function ThemeDetailScreen() {
                         view and reliably shows the frames. */}
                     <VideoView
                       ref={videoRef}
-                      player={playback.player}
+                      player={playback.surfacePlayer}
                       style={styles.heroVideo}
                       contentFit="contain"
                       nativeControls={false}
@@ -835,7 +961,7 @@ export default function ThemeDetailScreen() {
                    invisible, as before. */
                 <View style={styles.listenCard}>
                   <VideoView
-                    player={playback.player}
+                    player={playback.surfacePlayer}
                     style={styles.hiddenSurface}
                     nativeControls={false}
                   />
@@ -954,7 +1080,7 @@ export default function ThemeDetailScreen() {
                     </Text>
                   </View>
                   <Pressable
-                    onPress={() => startPlayback('watch')}
+                    onPress={() => onModeArm(shownMode)}
                     accessibilityRole="button"
                     accessibilityLabel="Play"
                     style={({ pressed }) => [
@@ -974,26 +1100,26 @@ export default function ThemeDetailScreen() {
                   block → action row → rating card). */}
               <View style={styles.modeToggle}>
                 <Pressable
-                  onPress={() => startPlayback('watch')}
+                  onPress={() => onModeArm('watch')}
                   accessibilityRole="button"
                   accessibilityLabel="Watch"
-                  accessibilityState={{ selected: playMode !== 'listen' }}
+                  accessibilityState={{ selected: shownMode !== 'listen' }}
                   style={({ pressed }) => [
                     styles.modeSegment,
-                    playMode !== 'listen' && styles.modeSegmentActive,
+                    playMode === 'watch' || (playMode === null && shownMode === 'watch') ? styles.modeSegmentActive : undefined,
                     pressed && styles.pressed,
                   ]}
                 >
                   <Play
                     size={15}
                     color={
-                      playMode !== 'listen' ? theme.onAccent : theme.secondary
+                      shownMode !== 'listen' ? theme.onAccent : theme.secondary
                     }
                     strokeWidth={2}
                   />
                   <Text
                     style={
-                      playMode !== 'listen'
+                      shownMode !== 'listen'
                         ? styles.modeSegmentTextActive
                         : styles.modeSegmentText
                     }
@@ -1002,17 +1128,17 @@ export default function ThemeDetailScreen() {
                   </Text>
                 </Pressable>
                 <Pressable
-                  onPress={() => startPlayback('listen')}
+                  onPress={() => onModeArm('listen')}
                   disabled={!listenAvailable}
                   accessibilityRole="button"
                   accessibilityLabel="Listen"
                   accessibilityState={{
                     disabled: !listenAvailable,
-                    selected: playMode === 'listen',
+                    selected: shownMode === 'listen',
                   }}
                   style={({ pressed }) => [
                     styles.modeSegment,
-                    playMode === 'listen' && styles.modeSegmentActive,
+                    playMode === 'listen' || (playMode === null && shownMode === 'listen') ? styles.modeSegmentActive : undefined,
                     !listenAvailable && styles.modeSegmentDisabled,
                     pressed && styles.pressed,
                   ]}
@@ -1252,6 +1378,14 @@ export default function ThemeDetailScreen() {
                             updateSession({
                               entry: detail.entries[i] ?? null,
                             });
+                          } else if (
+                            !session.active &&
+                            session.slug === detail.slug
+                          ) {
+                            /* The passive preload claim is live:
+                               retarget its preload at the new
+                               version (playback plan). */
+                            retargetPreload(i);
                           }
                         }}
                         accessibilityRole="button"

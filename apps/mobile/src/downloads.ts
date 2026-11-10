@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { Platform } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 import {
@@ -11,6 +11,7 @@ import type {
   ThemeEntry,
 } from '@kaikansen/contracts';
 import { fixtureMode } from './api';
+import { progressValueChanged } from './mediaEngine';
 import { isPlausibleUrl, resolvePlaybackUrl } from './playback';
 import { plainStorage } from './storage';
 
@@ -209,6 +210,11 @@ function getSnapshot(): DownloadsState {
 }
 
 function setProgress(id: string, value: number | null): void {
+  // Problem 8 (perf audit, 2026-11-10): progress writes are the
+  // store's fast channel — a write carrying the value already
+  // held must not emit at all, or every percent tick rebuilds
+  // every downloads consumer for no visible change.
+  if (!progressValueChanged(state.progress.get(id), value)) return;
   const progress = new Map(state.progress);
   progress.set(id, value);
   emit({ progress });
@@ -575,21 +581,29 @@ export function useDownloads(): UseDownloads {
     void ensureDownloadsHydrated();
   }, []);
 
-  return {
-    hydrated: snap.hydrated,
-    records: snap.records,
-    downloading: [...snap.pending.values()],
-    totalBytes: snap.records.reduce(
-      (sum, r) => sum + (r.fileMissing ? 0 : r.size),
-      0,
-    ),
-    isDownloading: (id) => snap.progress.has(id),
-    progressFor: (id) => snap.progress.get(id),
-    errorFor: (id) => snap.errors.get(id) ?? null,
-    find: (slug, atEntryId, mode) =>
-      findDownload(snap.records, slug, atEntryId, mode),
-    start: startDownload,
-    remove: removeDownload,
-    cancel: cancelDownload,
-  };
+  // Memoised on the snapshot (problem 8): the returned object —
+  // and its derived arrays — keep their identity between store
+  // emissions that did not change the underlying state, so a
+  // progress tick on one download no longer invalidates every
+  // consumer's memo on every render.
+  return useMemo<UseDownloads>(
+    () => ({
+      hydrated: snap.hydrated,
+      records: snap.records,
+      downloading: [...snap.pending.values()],
+      totalBytes: snap.records.reduce(
+        (sum, r) => sum + (r.fileMissing ? 0 : r.size),
+        0,
+      ),
+      isDownloading: (id) => snap.progress.has(id),
+      progressFor: (id) => snap.progress.get(id),
+      errorFor: (id) => snap.errors.get(id) ?? null,
+      find: (slug, atEntryId, mode) =>
+        findDownload(snap.records, slug, atEntryId, mode),
+      start: startDownload,
+      remove: removeDownload,
+      cancel: cancelDownload,
+    }),
+    [snap],
+  );
 }

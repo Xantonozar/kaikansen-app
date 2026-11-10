@@ -1,0 +1,248 @@
+import { describe, expect, it } from '@jest/globals';
+import {
+  PLAYBACK_STALL_WATCHDOG_MS,
+  createPreloadTicket,
+  firstCandidateIsVideo,
+  mediaKindForUrl,
+  pickPreloadCandidate,
+  preloadMatches,
+  progressFraction,
+  progressValueChanged,
+  quantizeProgress,
+  queuePreloadKey,
+  shouldPreloadNext,
+  stabilizeProgress,
+  tagCandidates,
+  watchdogPollActive,
+  watchdogShouldTrip,
+  type WatchdogSnapshot,
+} from './mediaEngine';
+
+/**
+ * Media engine routing + stall watchdog (src/mediaEngine.ts) —
+ * the playback plan's pure decisions: file-type routing within
+ * the chain, preload ticket matching, the watchdog trip rule
+ * (incl. the multiplayer countdown-hold guard) and the
+ * problem-8 progress stabilization.
+ */
+
+const VIDEO = 'https://v.animethemes.moe/FateZero-OP1.webm';
+const OGG = 'https://a.animethemes.moe/FateZero-OP1.ogg';
+const STORED_MP3 = 'https://cdn.example.com/fate-zero-op1.mp3';
+const LOCAL_OGG = 'file:///data/downloads/fate--1--listen.ogg';
+const LOCAL_WEBM = 'file:///data/downloads/fate--1--watch.webm';
+
+describe('mediaKindForUrl', () => {
+  it('routes audio extensions to the audio engine', () => {
+    expect(mediaKindForUrl(OGG)).toBe('audio');
+    expect(mediaKindForUrl(STORED_MP3)).toBe('audio');
+    expect(mediaKindForUrl(LOCAL_OGG)).toBe('audio');
+    expect(mediaKindForUrl('https://x.example/a.m4a?sig=1')).toBe('audio');
+  });
+
+  it('routes video files (and anything else) to the video engine', () => {
+    expect(mediaKindForUrl(VIDEO)).toBe('video');
+    expect(mediaKindForUrl(LOCAL_WEBM)).toBe('video');
+    expect(mediaKindForUrl('https://x.example/stream')).toBe('video');
+  });
+});
+
+describe('tagCandidates', () => {
+  it('listen chain: audio candidates, then the video as hidden-video', () => {
+    const tagged = tagCandidates([OGG, VIDEO], 'listen');
+    expect(tagged).toEqual([
+      { url: OGG, kind: 'audio', role: 'primary' },
+      { url: VIDEO, kind: 'video', role: 'hidden-video' },
+    ]);
+  });
+
+  it('watch chain: video candidates stay plain video, no hidden role', () => {
+    const tagged = tagCandidates([VIDEO, VIDEO], 'watch');
+    expect(tagged[0]).toEqual({ url: VIDEO, kind: 'video', role: 'primary' });
+    expect(tagged[1].role).toBe('audio-fallback');
+  });
+
+  it('degradation chain: first audio is the fallback target, video stays hidden', () => {
+    const tagged = tagCandidates([OGG, VIDEO], 'chain');
+    expect(tagged[0].role).toBe('primary');
+    expect(tagged[1]).toEqual({
+      url: VIDEO,
+      kind: 'video',
+      role: 'hidden-video',
+    });
+  });
+});
+
+describe('preload tickets', () => {
+  it('matches only the same key AND url', () => {
+    const ticket = createPreloadTicket('entry:1', OGG);
+    expect(ticket).toEqual({ key: 'entry:1', url: OGG, kind: 'audio', ready: false });
+    expect(preloadMatches(ticket, 'entry:1', OGG)).toBe(true);
+    expect(preloadMatches(ticket, 'entry:2', OGG)).toBe(false);
+    expect(preloadMatches(ticket, 'entry:1', VIDEO)).toBe(false);
+    expect(preloadMatches(null, 'entry:1', OGG)).toBe(false);
+  });
+
+  it('picks the first audio candidate; video-first chains keep the video hold', () => {
+    const listen = tagCandidates([OGG, VIDEO], 'listen');
+    expect(pickPreloadCandidate(listen)?.url).toBe(OGG);
+    expect(firstCandidateIsVideo(listen)).toBe(false);
+    const videoFirst = tagCandidates([VIDEO], 'listen');
+    expect(pickPreloadCandidate(videoFirst)).toBeNull();
+    expect(firstCandidateIsVideo(videoFirst)).toBe(true);
+  });
+});
+
+describe('watchdogShouldTrip', () => {
+  const base: WatchdogSnapshot = {
+    now: 10_000,
+    loadingSince: 10_000 - PLAYBACK_STALL_WATCHDOG_MS - 1,
+    armedFrom: 0,
+    hasSource: true,
+    failed: false,
+    disabled: false,
+  };
+
+  it('trips once loading outlasts the budget', () => {
+    expect(watchdogShouldTrip(base)).toBe(true);
+    expect(
+      watchdogShouldTrip({
+        ...base,
+        loadingSince: 10_000 - PLAYBACK_STALL_WATCHDOG_MS,
+      }),
+    ).toBe(true);
+    expect(
+      watchdogShouldTrip({
+        ...base,
+        loadingSince: 10_000 - PLAYBACK_STALL_WATCHDOG_MS + 1,
+      }),
+    ).toBe(false);
+  });
+
+  it('never trips while not loading, failed, source-less or disabled', () => {
+    expect(watchdogShouldTrip({ ...base, loadingSince: null })).toBe(false);
+    expect(watchdogShouldTrip({ ...base, failed: true })).toBe(false);
+    expect(watchdogShouldTrip({ ...base, hasSource: false })).toBe(false);
+    expect(watchdogShouldTrip({ ...base, disabled: true })).toBe(false);
+  });
+
+  it('the countdown hold: time before the intended start never counts', () => {
+    // Held since t=0 for a t=5000 start; at t=4999 the source has
+    // "loaded" for 5s of wall time but the watchdog is not armed.
+    expect(
+      watchdogShouldTrip({
+        now: 4_999,
+        loadingSince: 0,
+        armedFrom: 5_000,
+        hasSource: true,
+        failed: false,
+        disabled: false,
+      }),
+    ).toBe(false);
+    // Still loading a full budget AFTER the start moment: trips.
+    expect(
+      watchdogShouldTrip({
+        now: 5_000 + PLAYBACK_STALL_WATCHDOG_MS,
+        loadingSince: 0,
+        armedFrom: 5_000,
+        hasSource: true,
+        failed: false,
+        disabled: false,
+      }),
+    ).toBe(true);
+  });
+
+  it('the poll only runs for a live, unfailed source', () => {
+    expect(
+      watchdogPollActive({ active: true, hasSource: true, failed: false }),
+    ).toBe(true);
+    expect(
+      watchdogPollActive({ active: false, hasSource: true, failed: false }),
+    ).toBe(false);
+    expect(
+      watchdogPollActive({ active: true, hasSource: false, failed: false }),
+    ).toBe(false);
+    expect(
+      watchdogPollActive({ active: true, hasSource: true, failed: true }),
+    ).toBe(false);
+  });
+
+  it('resets when loading clears (a fresh load restarts the clock)', () => {
+    // The hook feeds loadingSince=null the moment status leaves
+    // 'loading', and a new source's load stamps a new since —
+    // a source that recovered inside the budget never trips.
+    expect(
+      watchdogShouldTrip({
+        now: 20_000,
+        loadingSince: 19_500,
+        armedFrom: 0,
+        hasSource: true,
+        failed: false,
+        disabled: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('progress stabilization (problem 8)', () => {
+  it('quantizes to whole seconds', () => {
+    expect(quantizeProgress({ current: 12.9, duration: 90.4 })).toEqual({
+      current: 12,
+      duration: 90,
+    });
+    expect(quantizeProgress({ current: -3, duration: Number.NaN })).toEqual({
+      current: 0,
+      duration: 0,
+    });
+  });
+
+  it('keeps the previous reference for same-second ticks', () => {
+    const prev = { current: 12, duration: 90 };
+    const same = stabilizeProgress(prev, { current: 12.4, duration: 90.9 });
+    expect(same).toBe(prev);
+    const next = stabilizeProgress(prev, { current: 13.1, duration: 90 });
+    expect(next).toEqual({ current: 13, duration: 90 });
+    expect(next).not.toBe(prev);
+  });
+
+  it('fraction is clamped and 0 while the duration is unknown', () => {
+    expect(progressFraction({ current: 45, duration: 90 })).toBe(0.5);
+    expect(progressFraction({ current: 120, duration: 90 })).toBe(1);
+    expect(progressFraction({ current: 5, duration: 0 })).toBe(0);
+  });
+
+  it('downloads fractions only count as changed on a real change', () => {
+    expect(progressValueChanged(0.42, 0.42)).toBe(false);
+    expect(progressValueChanged(0.42, 0.43)).toBe(true);
+    expect(progressValueChanged(undefined, null)).toBe(true);
+    expect(progressValueChanged(null, null)).toBe(false);
+  });
+});
+
+describe('problem 3 — next-track preload gate', () => {
+  const next = { slug: 'next-theme', atEntryId: 42 };
+  const base = { isPlaying: true, buffering: false, next, nextOffline: false };
+
+  it('preloads only once the current track is stably playing', () => {
+    expect(shouldPreloadNext(base)).toBe(true);
+    // Still buffering: the preload must never compete.
+    expect(shouldPreloadNext({ ...base, buffering: true })).toBe(false);
+    // Not playing yet (or paused): nothing to gate on.
+    expect(shouldPreloadNext({ ...base, isPlaying: false })).toBe(false);
+  });
+
+  it('no preload without a next item, or when it is offline', () => {
+    expect(shouldPreloadNext({ ...base, next: null })).toBe(false);
+    expect(shouldPreloadNext({ ...base, nextOffline: true })).toBe(false);
+  });
+
+  it('ticket keys re-key on skip or version switch', () => {
+    expect(queuePreloadKey(next)).toBe('queue:next-theme:42');
+    expect(queuePreloadKey({ slug: 'next-theme', atEntryId: null })).toBe(
+      'queue:next-theme:first',
+    );
+    expect(queuePreloadKey(next)).not.toBe(
+      queuePreloadKey({ slug: 'next-theme', atEntryId: 7 }),
+    );
+  });
+});

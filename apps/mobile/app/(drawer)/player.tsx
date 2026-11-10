@@ -203,7 +203,7 @@ export default function PlayerScreen() {
   const entry = session.entry ?? detail?.entries[0] ?? null;
   const mode = session.mode;
   const {
-    player,
+    surfacePlayer: player,
     localUsable,
     unavailable,
     buffering,

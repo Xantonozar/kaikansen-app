@@ -15,7 +15,16 @@ import type {
   ThemeSummary,
 } from '@kaikansen/contracts';
 import { fetchThemeBySlug } from './api';
-import { usePlayback } from './usePlayback';
+import {
+  resolveListenCandidates,
+  resolveWatchCandidates,
+} from './playback';
+import { queuePreloadKey } from './mediaEngine';
+import {
+  usePlayback,
+  type NextTrackPreload,
+  type PlaybackPreloadRequest,
+} from './usePlayback';
 
 /**
  * Shared playback session (layout-fidelity redesign, Slice 1) — the
@@ -120,6 +129,13 @@ export interface PlaybackSession {
       player route leave it off. Preserved across queue advances
       so a claim's degradation survives walking its queue. */
   watchAudioFallback?: boolean;
+  /** Playback plan (2026-11-10): while this claim is INACTIVE the
+      engine preloads the claim mode's media (theme detail claims
+      it from its open mode: Listen preloads the whole .ogg,
+      Watch the video — preload only, no autoplay), so the tap
+      starts near-instantly. The claim key is slug+entry+mode and
+      must match the key the engine derives for adoption. */
+  preloadKey?: string | null;
 }
 
 const IDLE_SESSION: PlaybackSession = {
@@ -273,6 +289,81 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     null,
   );
 
+  /* Playback-plan wiring (2026-11-10): the engine's two preload
+     inputs, derived from the live session + queue.
+     - `enginePreload`: an INACTIVE claim carrying a preloadKey
+       (theme detail's open mode) preloads its mode's chain —
+       Listen resolves the listen chain, Watch the watch chain —
+       under the claim key, so the activating tap adopts it.
+     - `engineNextPreload` (problem 3): the NEXT queue item,
+       resolved through the same fetch + entry resolution queue
+       advances use, feeds its listen chain to the engine; the
+       engine preloads its .ogg only once the current track is
+       stably playing, under the queue item's key, and the
+       advance's claim adopts it when it lands on that item. The
+       next item's detail resolution is kicked when the CURRENT
+       item's resolution settles (never competing with the
+       current track's own load beyond a catalogue read); an
+       offline next item (a usable download for listen) passes
+       `offline` and needs no preload. */
+  const enginePreload = useMemo<PlaybackPreloadRequest | null>(() => {
+    if (session.active || !session.preloadKey || !session.detail) {
+      return null;
+    }
+    const entry = session.entry ?? session.detail.entries[0] ?? null;
+    if (!entry) return null;
+    const candidates =
+      session.mode === 'watch'
+        ? resolveWatchCandidates(session.detail, entry)
+        : resolveListenCandidates(session.detail, entry);
+    if (candidates.length === 0) return null;
+    return { key: session.preloadKey, mode: session.mode, candidates };
+  }, [session]);
+
+  const [nextDetail, setNextDetail] = useState<{
+    slug: string;
+    detail: ThemeDetail;
+  } | null>(null);
+  const rawNextItem =
+    queue && queue.index < queue.items.length - 1
+      ? queue.items[queue.index + 1]
+      : null;
+  useEffect(() => {
+    if (!rawNextItem || !session.active) {
+      setNextDetail(null);
+      return;
+    }
+    let live = true;
+    fetchThemeBySlug(rawNextItem.slug)
+      .then((data) => {
+        if (live && data) setNextDetail({ slug: rawNextItem.slug, detail: data });
+      })
+      .catch(() => {
+        // A failed next resolution simply means no preload.
+      });
+    return () => {
+      live = false;
+    };
+  }, [rawNextItem?.slug, session.active]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const engineNextPreload = useMemo<NextTrackPreload | null>(() => {
+    if (!rawNextItem || !nextDetail || nextDetail.slug !== rawNextItem.slug) {
+      return null;
+    }
+    const entry =
+      nextDetail.detail.entries.find(
+        (e) => e.atEntryId === rawNextItem.atEntryId,
+      ) ??
+      nextDetail.detail.entries[0] ??
+      null;
+    if (!entry) return null;
+    return {
+      key: queuePreloadKey(rawNextItem),
+      candidates: resolveListenCandidates(nextDetail.detail, entry),
+      offline: false,
+    };
+  }, [rawNextItem, nextDetail]);
+
   const playback = usePlayback({
     slug: session.slug,
     detail: session.detail,
@@ -281,6 +372,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     mode: session.mode,
     active: session.active,
     watchAudioFallback: session.watchAudioFallback ?? false,
+    preload: enginePreload,
+    nextPreload: engineNextPreload,
+    claimPreloadKey: session.preloadKey ?? null,
   });
 
   /** Point the session at a queue item, detail unresolved — the
@@ -295,6 +389,11 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         entryIdOverride: item.atEntryId,
         mode,
         active: true,
+        // Problem 3 (2026-11-10): the item's queue key rides the
+        // claim, so an engine-side .ogg preload for this item
+        // (made while the previous track played) is adopted on
+        // activation instead of loading fresh.
+        preloadKey: queuePreloadKey(item),
       });
     },
     [],
@@ -479,6 +578,10 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
         mode: prevSession.mode,
         active: true,
         watchAudioFallback: prevSession.watchAudioFallback,
+        // Problem 3: the advanced-to item's queue key rides the
+        // claim, so its engine-side .ogg preload (if the gate
+        // passed on the previous track) is adopted on activation.
+        preloadKey: queuePreloadKey(item),
       }));
     },
     [],

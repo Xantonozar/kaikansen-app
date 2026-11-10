@@ -14,8 +14,10 @@ import {
   ArrowLeft,
   ChevronRight,
   Download,
+  Headphones,
   LogOut,
   Moon,
+  Play,
   RefreshCw,
   Sun,
   User,
@@ -28,6 +30,8 @@ import {
   type Theme,
 } from '../../src/theme';
 import { useTheme, useThemeMode, type ThemeMode } from '../../src/theme-context';
+import { useOpenThemesAs } from '../../src/playbackSettings';
+import type { PlaybackMode } from '@kaikansen/contracts';
 import { useAuth } from '../../src/auth';
 import { useAnilistLink } from '../../src/hooks/useAnilistLink';
 import { CONTENT_MAX_WIDTH } from '../../src/layout';
@@ -57,6 +61,9 @@ export default function SettingsScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const { mode, setMode } = useThemeMode();
+  /* Playback plan (2026-11-10): the Theme Detail open mode —
+     device-local, persisted like the theme mode. */
+  const { mode: openMode, setMode: setOpenMode } = useOpenThemesAs();
   const { status, demoMode, logout } = useAuth();
   // The link action itself (busy state, note/error wording, the
   // fixture-mode placeholder) is shared with the drawer — see
@@ -78,6 +85,39 @@ export default function SettingsScreen() {
   };
 
   const signedIn = status === 'signedIn';
+
+  const openModeSegment = (value: PlaybackMode, label: string) => {
+    const active = openMode === value;
+    const Icon = value === 'watch' ? Play : Headphones;
+    return (
+      <Pressable
+        key={value}
+        onPress={() => setOpenMode(value)}
+        accessibilityRole="button"
+        accessibilityState={{ selected: active }}
+        accessibilityLabel={`Open themes as ${label}`}
+        style={({ pressed }) => [
+          styles.segment,
+          active && styles.segmentActive,
+          pressed && styles.pressed,
+        ]}
+      >
+        <Icon
+          size={16}
+          color={active ? theme.onAccent : theme.secondary}
+          strokeWidth={2}
+        />
+        <Text
+          style={[
+            styles.segmentText,
+            active && styles.segmentTextActive,
+          ]}
+        >
+          {label}
+        </Text>
+      </Pressable>
+    );
+  };
 
   const themeSegment = (value: ThemeMode, label: string) => {
     const active = mode === value;
@@ -193,6 +233,21 @@ export default function SettingsScreen() {
           </View>
           <Text style={styles.caption}>
             Lavender Dusk is the light theme.
+          </Text>
+        </View>
+
+        {/* Playback (playback plan, 2026-11-10): which side a
+            theme page opens on — device-local, default Listen.
+            The chosen side is also the side the page preloads. */}
+        <View style={styles.card}>
+          <Text style={styles.cardLabel}>Playback</Text>
+          <View style={styles.segmented}>
+            {openModeSegment('listen', 'Listen')}
+            {openModeSegment('watch', 'Watch')}
+          </View>
+          <Text style={styles.caption}>
+            Open themes as: {openMode === 'watch' ? 'Watch' : 'Listen'}.
+            Theme pages preload that side so it starts right away.
           </Text>
         </View>
 
