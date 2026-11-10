@@ -1184,6 +1184,11 @@ export interface UserActivityResponse {
  *   ONLY on 'playlist_add' rows, null on the other kinds. It is
  *   the name as it stood when the add happened (the record
  *   snapshots it; a later rename does not rewrite history).
+ * - `anime`: the theme's anime title (ThemeCache's animeTitle),
+ *   null when the theme left the catalogue. Added 2026-11-10 on
+ *   the owner's order: the activity rows on Social and Home draw
+ *   the Social mock's "{anime} • {time}" second line, which the
+ *   artist alone could not fill.
  *
  * 'playlist_add' is an API-side event kind with no web equivalent:
  * the web records nothing when a theme joins a playlist (its
@@ -1204,6 +1209,7 @@ export interface FriendsActivityItem {
     title: string;
     slug: string;
     artist: string | null;
+    anime: string | null;
     cover: string | null;
     score: number | null;
     playlistName: string | null;

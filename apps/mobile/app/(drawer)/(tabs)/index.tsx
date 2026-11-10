@@ -9,7 +9,7 @@ import {
   View,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { AudioLines, Headphones, ListMusic, Play, Shuffle, Star, Users } from 'lucide-react-native';
+import { Play, Shuffle, Users } from 'lucide-react-native';
 import type {
   FriendsActivityItem,
   HomeResponse,
@@ -31,7 +31,7 @@ import { fetchFriendsActivity, fetchUserNetwork } from '../../../src/socialApi';
 import { Avatar } from '../../../src/components/Avatar';
 import { PopularCard } from '../../../src/components/PopularCard';
 import { PosterCard } from '../../../src/components/PosterCard';
-import { relativeTime } from '../../../src/time';
+import { compactRelativeTime } from '../../../src/time';
 import {
   fontFamilies,
   radii,
@@ -80,7 +80,9 @@ function firstNameOf(displayName: string, username: string): string {
  * Surprise composites the rolled theme's anime cover on the right
  * under a translucent shuffle disc (Lavender Dusk Home mock), Friends
  * Activity is the owner's Variant 3 "Rich Social Feed" card (active-
- * friends strip + detailed rows in one card), and Popular rows are the
+ * friends strip + activity rows in one card — the rows themselves
+ * follow the Social mock's activity row, per the owner's
+ * 2026-11-10 order), and Popular rows are the
  * web's rounded accent-container cards with play + heart
  * (ThemeListRow). Content sits in a centred, width-capped column, and
  * the type filter is a segmented All/OP/ED control in the Popular
@@ -580,10 +582,14 @@ export default function HomeScreen() {
 
         {/* Friends Activity — Variant 3 "Rich Social Feed" (owner's
             pick): one card holding the active-friends strip over the
-            detailed activity rows. The strip's green dot means the
-            friend has real feed activity inside 24h — derived from
-            the feed's timestamps; there is no presence system, so it
-            never claims "online". */}
+            activity rows. The strip's green dot means the friend has
+            real feed activity inside 24h — derived from the feed's
+            timestamps; there is no presence system, so it never
+            claims "online". The rows follow the Social mock's
+            activity row (owner order, 2026-11-10): real avatar,
+            one sentence line with the rating inside it, an
+            "{anime} • {time}" second line — no @handle, no badges
+            or chip pills. */}
         <View style={[styles.sectionHeader, styles.feedHeader]}>
           <Text style={styles.heading}>Friends Activity</Text>
           <Pressable
@@ -645,90 +651,49 @@ export default function HomeScreen() {
                       coverBySlug.get(activity.item.slug);
                     const listening = activity.type === 'listening';
                     const playlistAdd = activity.type === 'playlist_add';
+                    // The Social mock's second line: "{anime} • {time}"
+                    // in the compact format ("Tokyo Ghoul • 2h"); the
+                    // time alone when the theme left the catalogue.
+                    const when = compactRelativeTime(activity.timestamp);
+                    const sub = activity.item.anime
+                      ? `${activity.item.anime} • ${when}`
+                      : when;
                     return (
                       <View key={activity.id}>
                         <View style={styles.feedRow}>
-                          <View style={styles.feedAvatarWrap}>
-                            <Pressable
-                              onPress={() =>
-                                openProfile(activity.user.username)
-                              }
-                              accessibilityRole="button"
-                              accessibilityLabel={`${activity.user.displayName}'s profile`}
-                            >
-                              <Avatar
-                                url={activity.user.avatar}
-                                name={activity.user.displayName}
-                                seed={activity.user.username}
-                                size={44}
-                              />
-                            </Pressable>
-                            <View
-                              style={[
-                                styles.feedBadge,
-                                {
-                                  backgroundColor: listening
-                                    ? theme.accent
-                                    : playlistAdd
-                                      ? theme.success
-                                      : theme.secondary,
-                                },
-                              ]}
-                            >
-                              {listening ? (
-                                <Headphones
-                                  size={11}
-                                  color={theme.onAccent}
-                                  strokeWidth={2}
-                                />
-                              ) : playlistAdd ? (
-                                <ListMusic
-                                  size={11}
-                                  color={theme.onAccent}
-                                  strokeWidth={2}
-                                />
-                              ) : (
-                                <Star
-                                  size={11}
-                                  color={theme.onAccent}
-                                  fill={theme.onAccent}
-                                  strokeWidth={2}
-                                />
-                              )}
-                            </View>
-                          </View>
+                          <Pressable
+                            onPress={() =>
+                              openProfile(activity.user.username)
+                            }
+                            accessibilityRole="button"
+                            accessibilityLabel={`${activity.user.displayName}'s profile`}
+                            hitSlop={4}
+                          >
+                            <Avatar
+                              url={activity.user.avatar}
+                              name={activity.user.displayName}
+                              seed={activity.user.username}
+                              size={40}
+                            />
+                          </Pressable>
                           <View style={styles.feedMain}>
-                            <View style={styles.feedNameRow}>
-                              <Text
-                                style={styles.feedNameLine}
-                                numberOfLines={1}
-                              >
-                                <Text
-                                  style={styles.feedName}
-                                  onPress={() =>
-                                    openProfile(activity.user.username)
-                                  }
-                                >
-                                  {activity.user.displayName}
-                                </Text>
-                                <Text style={styles.feedHandle}>
-                                  {' '}
-                                  @{activity.user.username}
-                                </Text>
-                              </Text>
-                              <Text style={styles.feedTime}>
-                                {relativeTime(activity.timestamp)}
-                              </Text>
-                            </View>
                             <Text
-                              style={styles.feedAction}
+                              style={styles.feedSentence}
                               numberOfLines={2}
                             >
+                              <Text
+                                style={styles.feedName}
+                                onPress={() =>
+                                  openProfile(activity.user.username)
+                                }
+                              >
+                                {activity.user.displayName}
+                              </Text>
                               {listening
-                                ? 'listened to '
+                                ? ' listened to '
                                 : playlistAdd
-                                  ? 'added '
-                                  : 'rated '}
+                                  ? ' added '
+                                  : ' rated '}
                               <Text
                                 style={styles.feedThemeInline}
                                 onPress={() =>
@@ -739,68 +704,58 @@ export default function HomeScreen() {
                               </Text>
                               {playlistAdd
                                 ? ` to ${activity.item.playlistName ?? 'a playlist'}`
-                                : activity.item.artist
-                                  ? ` · ${activity.item.artist}`
+                                : !listening && activity.item.score !== null
+                                  ? ` a ${activity.item.score}`
                                   : ''}
                             </Text>
-                            {listening && (
-                              <View style={styles.feedChip}>
-                                <AudioLines
-                                  size={11}
-                                  color={theme.onAccentContainer}
-                                  strokeWidth={2}
-                                />
-                                <Text style={styles.feedChipText}>
-                                  listening
-                                </Text>
-                              </View>
-                            )}
-                            {!listening &&
-                              !playlistAdd &&
-                              activity.item.score !== null && (
-                                <View style={styles.feedChip}>
-                                  <Star
-                                    size={11}
-                                    color={theme.onAccentContainer}
-                                    fill={theme.onAccentContainer}
-                                    strokeWidth={2}
-                                  />
-                                  <Text style={styles.feedChipText}>
-                                    {activity.item.score}/10
-                                  </Text>
-                                </View>
-                              )}
+                            <Text
+                              style={styles.feedSub}
+                              numberOfLines={1}
+                            >
+                              {sub}
+                            </Text>
                           </View>
-                          <Pressable
-                            onPress={() => openTheme(activity.item.slug)}
-                            accessibilityRole="button"
-                            accessibilityLabel={`Open ${activity.item.title}`}
-                            style={styles.feedThumbWrap}
-                          >
-                            {cover ? (
-                              <>
+                          <View style={styles.feedTrail}>
+                            <Pressable
+                              onPress={() => openTheme(activity.item.slug)}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Open ${activity.item.title}`}
+                              style={({ pressed }) =>
+                                pressed && styles.pressed
+                              }
+                            >
+                              {cover ? (
                                 <Image
                                   source={{ uri: cover }}
                                   style={styles.feedThumb}
                                 />
-                                <View style={styles.feedThumbPlay}>
-                                  <Play
-                                    size={10}
-                                    color="#FFFFFF"
-                                    fill="#FFFFFF"
-                                    strokeWidth={2}
-                                  />
-                                </View>
-                              </>
-                            ) : (
-                              <View
-                                style={[
-                                  styles.feedThumb,
-                                  styles.feedThumbPlaceholder,
-                                ]}
+                              ) : (
+                                <View
+                                  style={[
+                                    styles.feedThumb,
+                                    styles.feedThumbPlaceholder,
+                                  ]}
+                                />
+                              )}
+                            </Pressable>
+                            <Pressable
+                              onPress={() => openTheme(activity.item.slug)}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Play ${activity.item.title}`}
+                              style={({ pressed }) => [
+                                styles.feedPlayDisc,
+                                pressed && styles.pressed,
+                              ]}
+                            >
+                              <Play
+                                size={15}
+                                color={theme.accent}
+                                fill={theme.accent}
+                                strokeWidth={2}
+                                style={styles.feedPlayIcon}
                               />
-                            )}
-                          </Pressable>
+                            </Pressable>
+                          </View>
                         </View>
                         {index < rows.length - 1 && (
                           <View style={styles.feedRowDivider} />
@@ -1243,96 +1198,59 @@ const createStyles = (theme: Theme) =>
     alignItems: 'center',
     gap: spacing.md,
   },
-  feedAvatarWrap: {
-    position: 'relative',
-  },
-  feedBadge: {
-    position: 'absolute',
-    right: -2,
-    bottom: -2,
-    width: 18,
-    height: 18,
-    borderRadius: radii.pill,
-    borderWidth: 2,
-    borderColor: theme.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   feedMain: {
     flex: 1,
   },
-  feedNameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-  },
-  feedNameLine: {
-    ...typeStyles.body,
-    flex: 1,
-    color: theme.muted,
+  feedSentence: {
+    // The Social mock's activity sentence (its HTML): 13px,
+    // leading-snug — bold name, plain verb, theme title in
+    // mauve, the rating inside the sentence.
+    fontFamily: fontFamilies.body,
+    fontSize: 13,
+    lineHeight: 18,
+    color: theme.text,
   },
   feedName: {
     fontFamily: fontFamilies.bodyStrong,
     color: theme.text,
   },
-  feedHandle: {
-    fontFamily: fontFamilies.body,
-    color: theme.muted,
-  },
-  feedAction: {
-    ...typeStyles.body,
-    color: theme.muted,
-    marginTop: 1,
-  },
   feedThemeInline: {
-    fontFamily: fontFamilies.bodyStrong,
-    color: theme.text,
+    // Mock: font-medium (Inter 500) in mauveDeep (#7B5368).
+    fontFamily: fontFamilies.caption,
+    color: theme.accent,
   },
-  feedChip: {
+  feedSub: {
+    // Mock: 11px muted, "{anime} • {time}", mt-0.5.
+    ...typeStyles.caption,
+    color: theme.muted,
+    marginTop: 2,
+  },
+  feedTrail: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
-    alignSelf: 'flex-start',
-    backgroundColor: theme.accentContainer,
-    borderRadius: radii.pill,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    marginTop: spacing.xs,
-  },
-  feedChipText: {
-    ...typeStyles.caption,
-    color: theme.onAccentContainer,
-  },
-  feedThumbWrap: {
-    position: 'relative',
-    width: 52,
-    height: 52,
+    gap: spacing.sm,
   },
   feedThumb: {
-    width: 52,
-    height: 52,
+    width: 40,
+    height: 40,
     borderRadius: radii.base,
     backgroundColor: theme.surface,
   },
   feedThumbPlaceholder: {
     backgroundColor: theme.raised,
   },
-  feedThumbPlay: {
-    position: 'absolute',
-    right: 4,
-    bottom: 4,
-    width: 18,
-    height: 18,
+  feedPlayDisc: {
+    width: 32,
+    height: 32,
     borderRadius: radii.pill,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: theme.accentContainer,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  feedTime: {
-    ...typeStyles.caption,
-    color: theme.muted,
-    flexShrink: 0,
+  feedPlayIcon: {
+    // Optical centre for a play triangle (the mock's
+    // translate-x-0.5).
+    marginLeft: 1,
   },
   emptyText: {
     ...typeStyles.body,

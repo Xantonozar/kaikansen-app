@@ -831,10 +831,12 @@ export class SocialService {
      * The enriched item shape (see the method doc): title/slug
      * fall back to the row's stored slug + 'Unknown Title' when
      * the theme is gone, exactly like the web's two fields did;
-     * artist/cover resolve from the theme document when it
+     * artist/anime/cover resolve from the theme document when it
      * exists (cover = animeCoverImage ?? animeCoverImageSmall,
-     * the Home rails' rule); score and playlistName are each set
-     * by exactly one event kind and null on the others.
+     * the Home rails' rule; anime = the theme's animeTitle, for
+     * the activity rows' "{anime} • {time}" line); score and
+     * playlistName are each set by exactly one event kind and
+     * null on the others.
      */
     const mapItem = (
       themeId: unknown,
@@ -846,6 +848,7 @@ export class SocialService {
         title: t?.songTitle || 'Unknown Title',
         slug: t?.slug || storedSlug,
         artist: t?.artistName ?? null,
+        anime: t?.animeTitle ?? null,
         cover: t
           ? (t.animeCoverImage ?? t.animeCoverImageSmall ?? null)
           : null,

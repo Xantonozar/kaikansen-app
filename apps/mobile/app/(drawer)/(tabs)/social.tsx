@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { AudioLines, Play, Search, Star, UserPlus, X } from 'lucide-react-native';
+import { Play, Search, UserPlus, X } from 'lucide-react-native';
 import type {
   FriendsActivityItem,
   NetworkUser,
@@ -24,7 +24,7 @@ import {
   fetchUserNetwork,
   searchUsers,
 } from '../../../src/socialApi';
-import { relativeTime } from '../../../src/time';
+import { compactRelativeTime } from '../../../src/time';
 import {
   fontFamilies,
   radii,
@@ -47,18 +47,23 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
  *   with usernames, each routing to that user's profile. It
  *   renders only when the caller actually follows someone; a
  *   failed fetch just hides it — the feed below is unaffected.
- * - The friends-activity feed (design pass — the Social mock's
- *   individual white cards): watches ('listening'), ratings
- *   ('liked') and playlist adds ('playlist_add') by people the
- *   caller follows, rendered in the Home rich-feed card's language
- *   (name row with the time, action line with the artist byline,
- *   listening chip / ★ score pill from the enriched payload) with
- *   the mock's cover thumb + play disc trailing. The mock's
- *   "{anime} • {time}" second line cannot be drawn: the feed
- *   payload carries the artist, not the anime title. The feed is
- *   follow-based, so signed-out gets a log-in prompt as the body
- *   state and fixture/demo mode gets a labelled demo note — the
- *   demo world has no people and none are fabricated.
+ * - The friends-activity feed (the Social mock's individual
+ *   white cards): watches ('listening'), ratings ('liked') and
+ *   playlist adds ('playlist_add') by people the caller follows.
+ *   Rows follow the mock exactly (owner order, 2026-11-10): the
+ *   actor's real avatar at the left (shared Avatar — photo when
+ *   usable, else their deterministic chibi), ONE sentence line —
+ *   bold display name, the verb, the theme title in mauve, a
+ *   rating carried inside the sentence ("rated X a 9") — and a
+ *   "{anime} • {time}" second line in the mock's compact format
+ *   ("Tokyo Ghoul • 2h"), with the mock's cover thumb + pale play
+ *   disc trailing. No @handle anywhere and no badge/chip pills:
+ *   the owner struck both. The feed payload carries the anime
+ *   title additively (contracts, FriendsActivityItem) precisely
+ *   so that second line can be drawn. The feed is follow-based,
+ *   so signed-out gets a log-in prompt as the body state and
+ *   fixture/demo mode gets a labelled demo note — the demo
+ *   world has no people and none are fabricated.
  *
  * The feed refetches on focus, so follows made on a profile show up
  * here on return. Rows route by target: the row opens the theme,
@@ -184,6 +189,11 @@ export default function SocialScreen() {
     const listening = item.type === 'listening';
     const playlistAdd = item.type === 'playlist_add';
     const openTheme = () => router.push(`/theme/${item.item.slug}`);
+    // The mock's second line: "{anime} • {time}" in the compact
+    // format ("Tokyo Ghoul • 2h"). When the theme has left the
+    // catalogue the anime is null and the line is the time alone.
+    const when = compactRelativeTime(item.timestamp);
+    const sub = item.item.anime ? `${item.item.anime} • ${when}` : when;
     return (
       <View key={item.id} style={styles.feedCard}>
         <Pressable
@@ -196,7 +206,7 @@ export default function SocialScreen() {
             url={item.user.avatar}
             name={item.user.displayName || item.user.username}
             seed={item.user.username}
-            size={44}
+            size={40}
           />
         </Pressable>
         <Pressable
@@ -208,82 +218,60 @@ export default function SocialScreen() {
             pressed && styles.pressed,
           ]}
         >
-          <View style={styles.feedNameRow}>
-            <Text style={styles.feedNameLine} numberOfLines={1}>
-              <Text style={styles.feedName}>
-                {item.user.displayName || item.user.username}
-              </Text>
-              <Text style={styles.feedHandle}>
-                {' '}
-                @{item.user.username}
-              </Text>
+          <Text style={styles.feedSentence} numberOfLines={2}>
+            <Text style={styles.feedName}>
+              {item.user.displayName || item.user.username}
             </Text>
-            <Text style={styles.feedTime}>
-              {relativeTime(item.timestamp)}
-            </Text>
-          </View>
-          <Text style={styles.feedAction} numberOfLines={2}>
-            {listening ? 'listened to ' : playlistAdd ? 'added ' : 'rated '}
+            {listening
+              ? ' listened to '
+              : playlistAdd
+                ? ' added '
+                : ' rated '}
             <Text style={styles.feedThemeInline}>{item.item.title}</Text>
             {playlistAdd
               ? ` to ${item.item.playlistName ?? 'a playlist'}`
-              : item.item.artist
-                ? ` · ${item.item.artist}`
+              : !listening && item.item.score !== null
+                ? ` a ${item.item.score}`
                 : ''}
           </Text>
-          {listening && (
-            <View style={styles.feedChip}>
-              <AudioLines
-                size={11}
-                color={theme.onAccentContainer}
-                strokeWidth={2}
-              />
-              <Text style={styles.feedChipText}>listening</Text>
-            </View>
-          )}
-          {!listening && !playlistAdd && item.item.score !== null && (
-            <View style={styles.feedChip}>
-              <Star
-                size={11}
-                color={theme.onAccentContainer}
-                fill={theme.onAccentContainer}
-                strokeWidth={2}
-              />
-              <Text style={styles.feedChipText}>{item.item.score}/10</Text>
-            </View>
-          )}
+          <Text style={styles.feedSub} numberOfLines={1}>
+            {sub}
+          </Text>
         </Pressable>
-        <Pressable
-          onPress={openTheme}
-          accessibilityRole="button"
-          accessibilityLabel={`Open ${item.item.title}`}
-          style={({ pressed }) => pressed && styles.pressed}
-        >
-          {item.item.cover ? (
-            <Image
-              source={{ uri: item.item.cover }}
-              style={styles.feedThumb}
+        <View style={styles.feedTrail}>
+          <Pressable
+            onPress={openTheme}
+            accessibilityRole="button"
+            accessibilityLabel={`Open ${item.item.title}`}
+            style={({ pressed }) => pressed && styles.pressed}
+          >
+            {item.item.cover ? (
+              <Image
+                source={{ uri: item.item.cover }}
+                style={styles.feedThumb}
+              />
+            ) : (
+              <View style={[styles.feedThumb, styles.feedThumbPlaceholder]} />
+            )}
+          </Pressable>
+          <Pressable
+            onPress={openTheme}
+            accessibilityRole="button"
+            accessibilityLabel={`Play ${item.item.title}`}
+            style={({ pressed }) => [
+              styles.feedPlayDisc,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Play
+              size={15}
+              color={theme.accent}
+              fill={theme.accent}
+              strokeWidth={2}
+              style={styles.feedPlayIcon}
             />
-          ) : (
-            <View style={[styles.feedThumb, styles.feedThumbPlaceholder]} />
-          )}
-        </Pressable>
-        <Pressable
-          onPress={openTheme}
-          accessibilityRole="button"
-          accessibilityLabel={`Play ${item.item.title}`}
-          style={({ pressed }) => [
-            styles.feedPlayDisc,
-            pressed && styles.pressed,
-          ]}
-        >
-          <Play
-            size={17}
-            color={theme.accent}
-            fill={theme.accent}
-            strokeWidth={2}
-          />
-        </Pressable>
+          </Pressable>
+        </View>
       </View>
     );
   };
@@ -529,74 +517,57 @@ const createStyles = (theme: Theme) =>
       textAlign: 'center',
     },
     feedCard: {
-      // The Social mock's activity cards (measured from
-      // kaikansen-social-realimg.png): individual white cards,
-      // radius ≈24, avatar ≈44, cover thumb ≈44, play disc ≈44.
+      // The Social mock's activity cards, measured from its HTML
+      // (social.html): white card, radius 16 (rounded-2xl),
+      // padding 12 (p-3), avatar 40, cover thumb 40, play disc
+      // 32, and an 8px gap between cards (the section's gap-2).
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
       backgroundColor: theme.surface,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.border,
-      borderRadius: radii.card,
-      paddingHorizontal: spacing.md,
-      paddingVertical: spacing.sm,
-      marginBottom: spacing.md,
+      borderRadius: radii.md,
+      padding: spacing.md,
+      marginBottom: spacing.sm,
     },
     feedMain: {
       flex: 1,
+      // Mock gap-2.5 (10) after the avatar, gap-3 (12) before
+      // the trailing thumb + disc cluster.
+      marginLeft: 10,
+      marginRight: spacing.md,
     },
-    feedNameRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: spacing.sm,
-    },
-    feedNameLine: {
-      ...typeStyles.body,
-      flex: 1,
-      color: theme.muted,
+    feedSentence: {
+      // Mock: 13px, leading-snug. Bold name, plain verb, the
+      // theme title in mauve, the rating inside the sentence.
+      fontFamily: fontFamilies.body,
+      fontSize: 13,
+      lineHeight: 18,
+      color: theme.text,
     },
     feedName: {
       fontFamily: fontFamilies.bodyStrong,
       color: theme.text,
     },
-    feedHandle: {
-      fontFamily: fontFamilies.body,
-      color: theme.muted,
-    },
-    feedTime: {
-      ...typeStyles.caption,
-      color: theme.muted,
-      flexShrink: 0,
-    },
-    feedAction: {
-      ...typeStyles.body,
-      color: theme.muted,
-      marginTop: 1,
-    },
     feedThemeInline: {
-      fontFamily: fontFamilies.bodyStrong,
+      // Mock: font-medium (Inter 500) in mauveDeep (#7B5368).
+      fontFamily: fontFamilies.caption,
       color: theme.accent,
     },
-    feedChip: {
+    feedSub: {
+      // Mock: 11px muted, "{anime} • {time}", mt-0.5.
+      ...typeStyles.caption,
+      color: theme.muted,
+      marginTop: 2,
+    },
+    feedTrail: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.xs,
-      alignSelf: 'flex-start',
-      backgroundColor: theme.accentContainer,
-      borderRadius: radii.pill,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 2,
-      marginTop: spacing.xs,
-    },
-    feedChipText: {
-      ...typeStyles.caption,
-      color: theme.onAccentContainer,
+      gap: spacing.sm,
     },
     feedThumb: {
-      width: 44,
-      height: 44,
+      width: 40,
+      height: 40,
       borderRadius: radii.base,
       backgroundColor: theme.surface,
     },
@@ -604,12 +575,17 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.raised,
     },
     feedPlayDisc: {
-      width: 44,
-      height: 44,
+      width: 32,
+      height: 32,
       borderRadius: radii.pill,
       backgroundColor: theme.accentContainer,
       alignItems: 'center',
       justifyContent: 'center',
+    },
+    feedPlayIcon: {
+      // The mock's glyph sits a hair right of centre
+      // (translate-x-0.5) — optical centre for a play triangle.
+      marginLeft: 1,
     },
     promptCard: {
       alignItems: 'flex-start',

@@ -939,17 +939,19 @@ describe('SocialService — friends-activity feed', () => {
       title: 'Unknown Title',
       slug: 'gone-op1-1',
       artist: null,
+      anime: null,
       cover: null,
       score: 3,
       playlistName: null,
     });
-    // A catalogue theme enriches fully: artist + cover resolved,
-    // and a watch carries no score (Carol's 'liked' row below
-    // carries her stored 8).
+    // A catalogue theme enriches fully: artist + anime + cover
+    // resolved, and a watch carries no score (Carol's 'liked' row
+    // below carries her stored 8).
     expect(feed.activities[0].item).toEqual({
       title: 'Song A',
       slug: 'anime_a-op1-1',
       artist: 'Artist A',
+      anime: 'Anime A',
       cover: 'https://example.com/a.jpg',
       score: null,
       playlistName: null,
@@ -1062,6 +1064,7 @@ describe('SocialService — friends-activity feed', () => {
       title: 'Song B',
       slug: 'anime_b-ed1-2',
       artist: 'Artist A',
+      anime: 'Anime A',
       cover: 'https://example.com/a.jpg',
       score: null,
       playlistName: 'Bob Mix',
@@ -1073,6 +1076,7 @@ describe('SocialService — friends-activity feed', () => {
       title: 'Unknown Title',
       slug: 'gone-op1-1',
       artist: null,
+      anime: null,
       cover: null,
       score: null,
       playlistName: 'Oldies',
