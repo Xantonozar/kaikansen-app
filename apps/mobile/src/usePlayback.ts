@@ -139,6 +139,11 @@ import {
  *   affordances for consumers: `surfacePlayer` (always the video
  *   player — the only player a VideoView can bind) and
  *   `surfaceKind` (which engine the current candidate plays on).
+ * - PROBLEM 12 (theme detail split): the return also carries the
+ *   slow object itself as `slow` (see the PlaybackSlow type), so
+ *   the provider can hand page bodies a channel whose identity
+ *   never changes on a progress tick, while the tick pair rides
+ *   its own channel (usePlaybackProgress in playback-context).
  *
  * Perf problem 7 (watch quality, 2026-11-10):
  *
@@ -1463,7 +1468,15 @@ export function usePlayback(args: {
   );
 
   return useMemo(
-    () => ({ ...slow, progress, fraction }),
+    () => ({ ...slow, progress, fraction, slow }),
     [slow, progress, fraction],
   );
 }
+
+/** The engine's SLOW channel alone (perf problem 12): every field
+    except progress/fraction, memoised on the slow inputs only —
+    its identity is stable across progress ticks, which is what
+    lets a consumer (Theme Detail's page body, via the provider's
+    slow context) subscribe to the engine without re-rendering
+    on every tick. */
+export type PlaybackSlow = ReturnType<typeof usePlayback>['slow'];

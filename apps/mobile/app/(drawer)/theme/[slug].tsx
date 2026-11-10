@@ -22,7 +22,6 @@ import {
   useLocalSearchParams,
   useRouter,
 } from 'expo-router';
-import { VideoView } from 'expo-video';
 import {
   Check,
   ChevronLeft,
@@ -31,9 +30,7 @@ import {
   Heart,
   LayoutGrid,
   ListPlus,
-  Maximize,
   Music,
-  Pause,
   Play,
   RotateCcw,
   Share2,
@@ -59,9 +56,10 @@ import { ThemeComments } from '../../../src/components/ThemeComments';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import { ThemeRowMenu } from '../../../src/components/ThemeRowMenu';
 import { AddToPlaylistSheet } from '../../../src/components/AddToPlaylistSheet';
-import { WatchQualityPicker } from '../../../src/components/WatchQualityPicker';
+import { DetailListenHero } from '../../../src/components/DetailListenHero';
+import { DetailWatchHero } from '../../../src/components/DetailWatchHero';
 import { AppImage } from '../../../src/components/AppImage';
-import { watchArtworkUnderPlayer } from '../../../src/mediaEngine';
+import { detailBackendForMode } from '../../../src/detailPlayer';
 import { useAuth } from '../../../src/auth';
 import {
   applyFavoriteState,
@@ -75,14 +73,13 @@ import {
 } from '../../../src/libraryApi';
 import {
   entryHasAudio,
-  formatTime,
   isPlausibleUrl,
   resolvePlaybackUrl,
 } from '../../../src/playback';
 import {
   queueItemFromSummary,
   queueItemsFromSummaries,
-  usePlaybackSession,
+  usePlaybackSlowSession,
   type QueueItem,
 } from '../../../src/playback-context';
 import { useOpenThemesAs } from '../../../src/playbackSettings';
@@ -127,6 +124,11 @@ type IconComponent = ComponentType<{
  *      .tsx): Watch/Listen claims it, and it keeps playing under
  *      the mini player after leaving — the player route the
  *      Library/playlists still open binds to the same session.
+ *      Perf problem 12: the hero's two backends are separate
+ *      components (DetailWatchHero / DetailListenHero) and only
+ *      the ACTIVE mode's is mounted; progress renders inside
+ *      their progress components off the progress channel, so a
+ *      progress tick never re-renders this page body.
  *   2. Watch/Listen segmented toggle — directly under the hero
  *      (starts inline playback in that mode; Listen disabled when
  *      the selected entry has no audio, like the web's).
@@ -217,9 +219,14 @@ export default function ThemeDetailScreen() {
   const downloads = useDownloads();
   /* Shared playback session (src/playback-context.tsx): this screen
      claims it via Watch/Listen; `playback` below is the provider's
-     one engine, not a private hook instance. */
+     one engine, not a private hook instance. Perf problem 12: the
+     page reads the session through the SLOW channel
+     (usePlaybackSlowSession) — the engine's slow object, stable
+     across progress ticks — so a progress tick never re-renders
+     this page body; the ticks are consumed inside the heroes'
+     progress components (src/components/DetailProgress.tsx). */
   const { playback, session, startSession, updateSession, endSession } =
-    usePlaybackSession();
+    usePlaybackSlowSession();
   const sessionSlugRef = useRef<string | null>(session.slug);
   useEffect(() => {
     sessionSlugRef.current = session.slug;
@@ -256,8 +263,6 @@ export default function ThemeDetailScreen() {
      `playMode ?? openMode` everywhere below. */
   const { mode: openMode } = useOpenThemesAs();
   const shownMode: PlaybackMode = playMode ?? openMode;
-  const [barWidth, setBarWidth] = useState(0);
-  const videoRef = useRef<VideoView>(null);
 
   /* Similar themes (Slice S8): 'loading' until the read settles;
      a failed fetch resolves to an empty list (the web's empty
@@ -780,89 +785,13 @@ export default function ThemeDetailScreen() {
     setDlSheetOpen(true);
   };
 
-  const onStripSeek = (locationX: number) => {
-    if (barWidth <= 0) return;
-    playback.seekToRatio(locationX / barWidth);
-  };
-
-  /* The inline player's control strip — lives INSIDE the hero,
-     along its bottom edge, in both modes (the design rule: the
-     hero card IS the player; controls sit in the card, not in a
-     separate surface). Play/pause (replay once ended), tap-to-
-     seek with time labels, fullscreen in watch mode. */
-  const playerStrip = (
-    <View style={styles.playerStrip}>
-      <Pressable
-        onPress={playback.toggleMain}
-        accessibilityRole="button"
-        accessibilityLabel={
-          playback.ended ? 'Replay' : playback.isPlaying ? 'Pause' : 'Play'
-        }
-        style={({ pressed }) => [
-          styles.stripButton,
-          pressed && styles.pressed,
-        ]}
-      >
-        {playback.ended ? (
-          <RotateCcw size={18} color={theme.onAccent} strokeWidth={2} />
-        ) : playback.isPlaying ? (
-          <Pause size={18} color={theme.onAccent} strokeWidth={2} />
-        ) : (
-          <Play size={18} color={theme.onAccent} strokeWidth={2} />
-        )}
-      </Pressable>
-      <Pressable
-        onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
-        onPress={(e) => onStripSeek(e.nativeEvent.locationX)}
-        accessibilityRole="adjustable"
-        accessibilityLabel="Seek"
-        style={styles.stripSeekHit}
-      >
-        <View style={styles.seekTrack}>
-          <View
-            style={[
-              styles.seekFill,
-              { width: `${playback.fraction * 100}%` },
-            ]}
-          />
-          <View
-            style={[
-              styles.seekKnob,
-              { left: `${playback.fraction * 100}%` },
-            ]}
-          />
-        </View>
-      </Pressable>
-      <Text style={styles.stripTime}>
-        {formatTime(playback.progress.current)} /{' '}
-        {formatTime(playback.progress.duration)}
-      </Text>
-      {playMode === 'watch' && !playback.audioFallback && (
-        <>
-          {/* Perf problem 7: the quality picker (self-hides for
-              single-source entries). Its pill is the Player's
-              white-glass chip — over the strip's dark card it
-              reads as the design's resolution chip. */}
-          <WatchQualityPicker
-            sources={selectedEntry?.videoSources ?? []}
-            activeUrl={playback.url}
-            onPick={playback.switchQuality}
-          />
-          <Pressable
-            onPress={() => {
-              void videoRef.current?.enterFullscreen();
-            }}
-            hitSlop={6}
-            accessibilityRole="button"
-            accessibilityLabel="Fullscreen"
-            style={styles.stripIconButton}
-          >
-            <Maximize size={18} color={theme.text} strokeWidth={2} />
-          </Pressable>
-        </>
-      )}
-    </View>
-  );
+  /* Perf problem 12 — the player-backend split: exactly ONE
+     backend hero mounts, the active mode's (detailPlayer.ts).
+     The Watch/Listen heroes are separate components
+     (DetailWatchHero / DetailListenHero) rendering the shared
+     engine's slow channel; their progress halves consume the
+     progress channel internally, so no tick reaches this page. */
+  const backend = detailBackendForMode(playMode);
 
   /* Screen header (design polish pass): the mock draws a header
      row ABOVE the hero — bare back chevron left, the share / ⋮
@@ -924,186 +853,27 @@ export default function ThemeDetailScreen() {
             {detailHeader}
             {/* 1 — Media hero (the player, once playing) */}
             <View style={styles.artWrap}>
-              {playMode === 'watch' ? (
-                playback.audioFallback ? (
-                  /* W2 degradation: every video candidate failed,
-                     so the engine is playing the audio chain (the
-                     .ogg) — the media area shows the theme's
-                     artwork instead of a dead black frame, with
-                     the player surface hidden (audio only) and the
-                     honest note under the hero. The strip keeps
-                     working: play/pause and seek drive the audio. */
-                  <View style={styles.heroPlayer}>
-                    <VideoView
-                      player={playback.surfacePlayer}
-                      style={styles.hiddenSurface}
-                      nativeControls={false}
-                    />
-                    {cover ? (
-                      <AppImage
-                        source={cover}
-                        style={styles.heroVideo}
-                      />
-                    ) : (
-                      <View style={[styles.heroVideo, styles.coverEmpty]} />
-                    )}
-                    {playback.buffering && (
-                      <View style={styles.heroCenter}>
-                        <ActivityIndicator color={theme.accent} size="large" />
-                      </View>
-                    )}
-                    {playerStrip}
-                  </View>
-                ) : (
-                  <View style={styles.heroPlayer}>
-                    {/* Perf problem 7: the anime artwork sits UNDER
-                        the video surface until frames render
-                        (initial load and across a quality switch)
-                        — the hero never sits black while a source
-                        loads. Once frames render the video covers
-                        it (the surface's own canvas takes over). */}
-                    {watchArtworkUnderPlayer({
-                      hasArtwork: !!cover,
-                      framesRendered: playback.framesRendered,
-                    }) && cover ? (
-                      <AppImage
-                        source={cover}
-                        style={styles.heroArtworkUnder}
-                        resizeMode="cover"
-                      />
-                    ) : null}
-                    {/* textureView, not the default surfaceView:
-                        this hero mounts conditionally (on the Watch
-                        tap) inside a ScrollView, where a SurfaceView
-                        can attach after playback starts and stay
-                        black; a TextureView composites like a normal
-                        view and reliably shows the frames. */}
-                    <VideoView
-                      ref={videoRef}
-                      player={playback.surfacePlayer}
-                      style={styles.heroVideo}
-                      contentFit="contain"
-                      nativeControls={false}
-                      surfaceType="textureView"
-                    />
-                    {playback.buffering && (
-                      <View style={styles.heroCenter}>
-                        <ActivityIndicator color={theme.accent} size="large" />
-                      </View>
-                    )}
-                    {playerStrip}
-                  </View>
-                )
-              ) : playMode === 'listen' ? (
-                /* Listen hero — the design's card (kaikansen-detail
-                   -listen-mini-realimg.png): a lavender card holding
-                   the centred square artwork with the play/pause
-                   disc hanging off its bottom-right corner, the
-                   waveform row under it (decorative bars; the
-                   played split is the real playback fraction), and
-                   the time row — current time, tap-to-seek track,
-                   duration. The audio surface stays mounted but
-                   invisible, as before. */
-                <View style={styles.listenCard}>
-                  <VideoView
-                    player={playback.surfacePlayer}
-                    style={styles.hiddenSurface}
-                    nativeControls={false}
-                  />
-                  <View style={styles.listenArtWrap}>
-                    {cover ? (
-                      <AppImage
-                        source={cover}
-                        style={styles.listenArt}
-                      />
-                    ) : (
-                      <View style={[styles.listenArt, styles.coverEmpty]} />
-                    )}
-                    <Pressable
-                      onPress={playback.toggleMain}
-                      accessibilityRole="button"
-                      accessibilityLabel={
-                        playback.ended
-                          ? 'Replay'
-                          : playback.isPlaying
-                            ? 'Pause'
-                            : 'Play'
-                      }
-                      style={({ pressed }) => [
-                        styles.listenFab,
-                        pressed && styles.pressed,
-                      ]}
-                    >
-                      {playback.buffering ? (
-                        <ActivityIndicator color={theme.onAccent} />
-                      ) : playback.ended ? (
-                        <RotateCcw
-                          size={22}
-                          color={theme.onAccent}
-                          strokeWidth={2}
-                        />
-                      ) : playback.isPlaying ? (
-                        <Pause
-                          size={22}
-                          color={theme.onAccent}
-                          fill={theme.onAccent}
-                          strokeWidth={2}
-                        />
-                      ) : (
-                        <Play
-                          size={22}
-                          color={theme.onAccent}
-                          fill={theme.onAccent}
-                          strokeWidth={2}
-                        />
-                      )}
-                    </Pressable>
-                  </View>
-                  <View style={styles.waveRow}>
-                    {waveHeights.map((height, i) => (
-                      <View
-                        key={i}
-                        style={[
-                          styles.waveBar,
-                          {
-                            height,
-                            backgroundColor:
-                              i <
-                              Math.round(playback.fraction * WAVE_BAR_COUNT)
-                                ? theme.accent
-                                : withOpacity(theme.accent, 0.22),
-                          },
-                        ]}
-                      />
-                    ))}
-                  </View>
-                  <View style={styles.listenTimeRow}>
-                    <Text style={styles.listenTime}>
-                      {formatTime(playback.progress.current)}
-                    </Text>
-                    <Pressable
-                      onLayout={(e) =>
-                        setBarWidth(e.nativeEvent.layout.width)
-                      }
-                      onPress={(e) => onStripSeek(e.nativeEvent.locationX)}
-                      accessibilityRole="adjustable"
-                      accessibilityLabel="Seek"
-                      style={styles.listenSeekHit}
-                    >
-                      <View style={styles.listenTrack}>
-                        <View
-                          style={[
-                            styles.listenFill,
-                            { width: `${playback.fraction * 100}%` },
-                          ]}
-                        />
-                      </View>
-                    </Pressable>
-                    <Text style={styles.listenTime}>
-                      {formatTime(playback.progress.duration)}
-                    </Text>
-                  </View>
-                </View>
+              {backend === 'watch' ? (
+                /* Perf problem 12: the Watch backend component —
+                   mounted only in watch mode; it owns the video
+                   surface, the W2 hidden-surface fallback, the
+                   quality picker and the strip. The Listen
+                   backend is unmounted, not hidden. */
+                <DetailWatchHero
+                  playback={playback}
+                  cover={cover}
+                  videoSources={selectedEntry?.videoSources ?? []}
+                />
+              ) : backend === 'listen' ? (
+                /* Perf problem 12: the Listen backend component —
+                   mounted only in listen mode; it owns the
+                   listen card and the hidden-video surface mount
+                   (the untouchable fallback, see its header). */
+                <DetailListenHero
+                  playback={playback}
+                  cover={cover}
+                  waveHeights={waveHeights}
+                />
               ) : (
                 <>
                   {cover ? (
@@ -1922,165 +1692,6 @@ const createStyles = (theme: Theme) =>
     letterSpacing: 0.8,
     color: theme.onAccent,
     textTransform: 'uppercase',
-  },
-  heroPlayer: {
-    position: 'relative',
-    backgroundColor: '#000',
-  },
-  heroVideo: {
-    width: '100%',
-    aspectRatio: 16 / 9,
-    backgroundColor: '#000',
-  },
-  // Watch artwork-under-player (perf problem 7): absolutely
-  // fills heroPlayer's 16:9 canvas, behind the VideoView.
-  heroArtworkUnder: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: '100%',
-    aspectRatio: 16 / 9,
-  },
-  hiddenSurface: {
-    position: 'absolute',
-    width: 1,
-    height: 1,
-    opacity: 0,
-  },
-  listenCard: {
-    // The Listen mock's card (measured from
-    // kaikansen-detail-listen-mini-realimg.png): ≈10pt side
-    // insets, cardLg radius, ≈20pt padding, accentContainer fill.
-    marginHorizontal: 10,
-    marginTop: spacing.md,
-    backgroundColor: theme.accentContainer,
-    borderRadius: radii.cardLg,
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.xl,
-    paddingBottom: spacing.xl,
-  },
-  listenArtWrap: {
-    alignSelf: 'center',
-    width: 96,
-    height: 96,
-  },
-  listenArt: {
-    width: 96,
-    height: 96,
-    borderRadius: radii.base,
-    backgroundColor: theme.surface,
-  },
-  listenFab: {
-    // Measured: the ≈52pt disc's centre sits ≈9pt right and
-    // ≈17.5pt below the artwork's bottom-right corner — it hangs
-    // off the corner over the waveform zone.
-    position: 'absolute',
-    right: -35,
-    bottom: -43,
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: theme.accent,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 6,
-    elevation: 6,
-  },
-  waveRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4.5,
-    height: 28,
-    // Mock: artwork bottom → waveform band ≈33pt.
-    marginTop: 33,
-  },
-  waveBar: {
-    width: 5,
-    borderRadius: 2.5,
-  },
-  listenTimeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    marginTop: spacing.sm,
-  },
-  listenTime: {
-    ...typeStyles.bodySmall,
-    color: theme.text,
-  },
-  listenSeekHit: {
-    flex: 1,
-    paddingVertical: spacing.sm,
-  },
-  listenTrack: {
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: withOpacity(theme.accent, 0.22),
-  },
-  listenFill: {
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: theme.accent,
-  },
-  heroCenter: {
-    ...StyleSheet.absoluteFill,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  playerStrip: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-    backgroundColor: withOpacity(theme.background, 0.72),
-    zIndex: 4,
-  },
-  stripButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: theme.accent,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stripIconButton: {
-    width: 38,
-    height: 38,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stripSeekHit: {
-    flex: 1,
-    paddingVertical: spacing.sm,
-  },
-  seekTrack: {
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: theme.raised,
-    justifyContent: 'center',
-  },
-  seekFill: {
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: theme.accent,
-  },
-  seekKnob: {
-    position: 'absolute',
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    marginLeft: -6,
-    backgroundColor: theme.accent,
-  },
-  stripTime: {
-    ...typeStyles.mono,
-    color: theme.text,
   },
   playerNote: {
     ...typeStyles.bodySmall,

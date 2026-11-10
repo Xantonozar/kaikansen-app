@@ -24,6 +24,7 @@ import {
   usePlayback,
   type NextTrackPreload,
   type PlaybackPreloadRequest,
+  type PlaybackSlow,
 } from './usePlayback';
 
 /**
@@ -286,6 +287,60 @@ interface PlaybackContextValue {
 }
 
 const PlaybackContext = createContext<PlaybackContextValue | null>(null);
+
+/* Perf problem 12 (theme detail split) — two extra channels off
+   the same provider, so a consumer can subscribe to exactly the
+   rate of change it renders:
+   - the PROGRESS channel carries only the tick pair
+     ({ progress, fraction }); it changes ~2×/sec while a track
+     plays, and ONLY the small progress components (seek fill,
+     waveform split, time labels) consume it.
+   - the SLOW session channel carries the session + the engine's
+     slow object (identity stable across ticks, problem 8) + the
+     claim actions; a page body on this channel does NOT
+     re-render on progress ticks.
+   The main context above is unchanged for every existing
+   consumer (the mini player and the player route keep reading
+   the combined object). */
+export interface PlaybackProgressValue {
+  progress: { current: number; duration: number };
+  fraction: number;
+}
+
+const PlaybackProgressContext =
+  createContext<PlaybackProgressValue | null>(null);
+
+export function usePlaybackProgress(): PlaybackProgressValue {
+  const ctx = useContext(PlaybackProgressContext);
+  if (!ctx) {
+    throw new Error(
+      'usePlaybackProgress must be used inside <PlaybackProvider>.',
+    );
+  }
+  return ctx;
+}
+
+export interface PlaybackSlowSessionValue {
+  session: PlaybackSession;
+  /** The engine's slow channel only (see PlaybackSlow). */
+  playback: PlaybackSlow;
+  startSession: PlaybackContextValue['startSession'];
+  updateSession: PlaybackContextValue['updateSession'];
+  endSession: PlaybackContextValue['endSession'];
+}
+
+const PlaybackSlowContext =
+  createContext<PlaybackSlowSessionValue | null>(null);
+
+export function usePlaybackSlowSession(): PlaybackSlowSessionValue {
+  const ctx = useContext(PlaybackSlowContext);
+  if (!ctx) {
+    throw new Error(
+      'usePlaybackSlowSession must be used inside <PlaybackProvider>.',
+    );
+  }
+  return ctx;
+}
 
 export function PlaybackProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<PlaybackSession>(IDLE_SESSION);
@@ -869,9 +924,35 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     ],
   );
 
+  /* Perf problem 12: the two extra channels (see their note at
+     the context declarations). The progress value is rebuilt
+     only when the tick pair actually changes (the engine's
+     stabilized progress keeps its identity within a second, so
+     this memo holds across same-second ticks too); the slow
+     value rides the engine slow object's identity, which is
+     stable across ALL ticks. */
+  const progressValue = useMemo<PlaybackProgressValue>(
+    () => ({ progress: playback.progress, fraction: playback.fraction }),
+    [playback.progress, playback.fraction],
+  );
+  const slowSessionValue = useMemo<PlaybackSlowSessionValue>(
+    () => ({
+      session,
+      playback: playback.slow,
+      startSession,
+      updateSession,
+      endSession,
+    }),
+    [session, playback.slow, startSession, updateSession, endSession],
+  );
+
   return (
     <PlaybackContext.Provider value={value}>
-      {children}
+      <PlaybackSlowContext.Provider value={slowSessionValue}>
+        <PlaybackProgressContext.Provider value={progressValue}>
+          {children}
+        </PlaybackProgressContext.Provider>
+      </PlaybackSlowContext.Provider>
     </PlaybackContext.Provider>
   );
 }
