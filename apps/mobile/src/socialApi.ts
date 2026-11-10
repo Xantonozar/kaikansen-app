@@ -4,6 +4,7 @@ import type {
   MarkNotificationsReadResponse,
   NetworkResponse,
   NotificationsResponse,
+  PlaylistsResponse,
   ThemeComment,
   ThemeCommentsResponse,
   UpdateProfileRequest,
@@ -126,6 +127,19 @@ export async function fetchUserHistory(
   if (fixtureMode)
     return { entries: [], meta: { total: 0, localCount: 0, remoteCount: 0, merged: false } };
   return apiJson<UserHistoryResponse>(`/users/${enc(username)}/history`);
+}
+
+/**
+ * The user's PUBLIC playlists for their profile's Playlists
+ * section (GET /users/:username/playlists — the API lists public
+ * ones only, so every row is safe to show a visitor). Fixture mode
+ * fabricates no people, so the section simply stays hidden.
+ */
+export async function fetchUserPlaylists(
+  username: string,
+): Promise<PlaylistsResponse> {
+  if (fixtureMode) return { playlists: [] };
+  return apiJson<PlaylistsResponse>(`/users/${enc(username)}/playlists`);
 }
 
 /** A user's rank document (public read) — used for the profile chip. */

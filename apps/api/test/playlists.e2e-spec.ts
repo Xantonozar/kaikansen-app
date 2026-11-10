@@ -88,6 +88,12 @@ describe('Playlists without a database (e2e)', () => {
       .get('/playlists/507f1f77bcf86cd799439011')
       .expect(503);
   });
+
+  it('serves the profile playlist listing tokenless — 503 without a database', async () => {
+    await request(app.getHttpServer())
+      .get('/users/ghost/playlists')
+      .expect(503);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -227,7 +233,16 @@ function makeFakeModels() {
     },
     find: (filter: Record<string, unknown>) =>
       chain(
-        playlists.filter((p) => String(p.userId) === String(filter.userId)),
+        playlists.filter((p) => {
+          if (String(p.userId) !== String(filter.userId)) return false;
+          // Honour the profile listing's visibility predicate
+          // (isPublic: { $ne: false }) so its privacy test is real.
+          const vis = filter.isPublic as { $ne?: unknown } | undefined;
+          if (vis && typeof vis === 'object' && '$ne' in vis) {
+            return p.isPublic !== vis.$ne;
+          }
+          return true;
+        }),
       ),
     findOne: (filter: Record<string, unknown>) => queryOf(byIdAndUser(filter)),
     findById: (id: unknown) =>
@@ -293,6 +308,8 @@ function makeFakeModels() {
     docs: users,
     findById: (id: unknown) =>
       queryOf(users.find((u) => String(u._id) === String(id)) ?? null),
+    findOne: (filter: Record<string, unknown>) =>
+      queryOf(users.find((u) => u.username === filter.username) ?? null),
   };
 
   return { playlistModel, themeModel, userModel };
@@ -623,5 +640,47 @@ describe('Playlists flow with mocked models (e2e)', () => {
     expect(
       mine.body.playlists.some((p: { id: string }) => p.id === id),
     ).toBe(false);
+  });
+
+  it('lists a user’s PUBLIC playlists on the profile route — private never appears', async () => {
+    const http = request(app.getHttpServer());
+
+    // user-2 owns only the seeded PRIVATE playlist so far: the
+    // profile listing is empty and the private name leaks nowhere.
+    const before = await http.get('/users/usertwo/playlists').expect(200);
+    expect(before.body).toEqual({ playlists: [] });
+    expect(JSON.stringify(before.body)).not.toContain('Secret Mix');
+
+    // A public playlist with an item appears with the full
+    // summary shape a profile card needs.
+    const created = await http
+      .post('/playlists')
+      .set(asUser2())
+      .send({ name: 'Two Public' })
+      .expect(200);
+    const id = created.body.id as string;
+    await http
+      .post(`/playlists/${id}/items`)
+      .set(asUser2())
+      .send({ slug: 'anime_a-op1-1' })
+      .expect(200);
+
+    // Tokenless, like the profile read it feeds; the username
+    // resolves case-insensitively.
+    const listed = await http.get('/users/UserTwo/playlists').expect(200);
+    expect(listed.body.playlists).toHaveLength(1);
+    expect(listed.body.playlists[0]).toMatchObject({
+      id,
+      name: 'Two Public',
+      isPublic: true,
+      themeCount: 1,
+      coverImages: ['https://example.com/a.jpg'],
+      totalDurationSeconds: 90,
+    });
+    expect(JSON.stringify(listed.body)).not.toContain('Secret Mix');
+
+    // Unknown usernames 404 like the profile read.
+    const missing = await http.get('/users/ghost/playlists').expect(404);
+    expect(missing.body.message).toBe('User not found');
   });
 });

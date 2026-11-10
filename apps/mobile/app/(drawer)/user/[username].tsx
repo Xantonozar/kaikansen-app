@@ -16,6 +16,7 @@ import {
   ArrowLeft,
   Check,
   ChevronRight,
+  ListMusic,
   Medal,
   MoreVertical,
   Pencil,
@@ -25,6 +26,7 @@ import {
   X,
 } from 'lucide-react-native';
 import type {
+  PlaylistSummary,
   UserHistoryResponse,
   UserPublicProfile,
   UserRankProfile,
@@ -38,6 +40,7 @@ import { ThemeRow } from '../../../src/components/ThemeRow';
 import {
   fetchFollowState,
   fetchUserHistory,
+  fetchUserPlaylists,
   fetchUserProfile,
   fetchUserRank,
   fetchUserRatings,
@@ -84,6 +87,19 @@ const TOP_COUNT = 3;
  * (there is no separate all-ratings route in the app or the web;
  * the history read is public on the web and mirrored as-is).
  *
+ * Playlists (owner-ordered addition, 2026-11-10): under the stats
+ * card, a "Playlists" section lists the user's PUBLIC playlists
+ * (GET /users/:username/playlists — the API filters private ones
+ * out in the query, so nothing private can render here). The
+ * cards are the Library Playlists cards minus the owner's chrome:
+ * the same 2×2 cover mosaic, name and "N themes · M min" line,
+ * but no ⋮ menu and no visibility pill (every listed row is
+ * public, and none of them is the viewer's to edit). A tap opens
+ * the playlist detail, which already gates its owner controls to
+ * the owner, so a visitor gets playback only. The section renders
+ * only when at least one public playlist exists, and the read is
+ * a satellite like the others — a failure hides the section.
+ *
  * Design notes / honest gaps:
  * - The rank chip draws "Tier · N RP" exactly as the mock phrases
  *   it (real tier + RP from GET /rank/:userId). The division the
@@ -113,6 +129,9 @@ export default function UserProfileScreen() {
   const [profile, setProfile] = useState<UserPublicProfile | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [rank, setRank] = useState<UserRankProfile | null>(null);
+  const [profilePlaylists, setProfilePlaylists] = useState<
+    PlaylistSummary[] | null
+  >(null);
   const [ratings, setRatings] = useState<UserRatingsResponse | null>(null);
   const [history, setHistory] = useState<UserHistoryResponse | null>(null);
   /** The design's "See all ratings and history" expansion. */
@@ -134,6 +153,7 @@ export default function UserProfileScreen() {
     setProfile(null);
     setLoadError(null);
     setRank(null);
+    setProfilePlaylists(null);
     setRatings(null);
     setHistory(null);
     setExpanded(false);
@@ -149,6 +169,9 @@ export default function UserProfileScreen() {
         fetchUserRank(p.id)
           .then((r) => live && setRank(r))
           .catch(() => {});
+        fetchUserPlaylists(p.username)
+          .then((r) => live && setProfilePlaylists(r.playlists))
+          .catch(() => live && setProfilePlaylists([]));
         fetchUserRatings(p.username)
           .then((r) => live && setRatings(r))
           .catch(() => live && setRatings({ ratings: [] }));
@@ -319,6 +342,75 @@ export default function UserProfileScreen() {
     );
   };
 
+  /**
+   * The Library Playlists card's 2×2 cover mosaic at the same
+   * geometry (the summary's distinct covers in stored order; a
+   * lone cover fills the square; an empty playlist carries the
+   * ListMusic glyph in its first cell).
+   */
+  const playlistMosaic = (covers: string[]) => {
+    if (covers.length === 1) {
+      return (
+        <Image source={{ uri: covers[0] }} style={styles.plGridSingle} />
+      );
+    }
+    return (
+      <View style={styles.plGrid}>
+        {[0, 1, 2, 3].map((i) =>
+          covers[i] ? (
+            <Image
+              key={i}
+              source={{ uri: covers[i] }}
+              style={styles.plGridCell}
+            />
+          ) : (
+            <View
+              key={i}
+              style={[styles.plGridCell, styles.plGridCellEmpty]}
+            >
+              {covers.length === 0 && i === 0 ? (
+                <ListMusic size={16} color={theme.muted} strokeWidth={2} />
+              ) : null}
+            </View>
+          ),
+        )}
+      </View>
+    );
+  };
+
+  /**
+   * One public-playlist card — the Library Playlists card's body
+   * (mosaic, name, "N themes · M min") without the owner chrome.
+   * The runtime segment follows the detail header's rule: summed
+   * KNOWN durations rounded to minutes, omitted when none is known.
+   */
+  const playlistCard = (p: PlaylistSummary) => {
+    const runtimeMin =
+      p.totalDurationSeconds != null
+        ? Math.round(p.totalDurationSeconds / 60)
+        : null;
+    return (
+      <Pressable
+        key={p.id}
+        onPress={() => router.push(`/playlist/${p.id}`)}
+        accessibilityRole="button"
+        accessibilityLabel={`Open playlist ${p.name}`}
+        style={({ pressed }) => [styles.plCard, pressed && styles.pressed]}
+      >
+        {playlistMosaic(p.coverImages)}
+        <View style={styles.plCardMain}>
+          <Text style={styles.plCardName} numberOfLines={1}>
+            {p.name}
+          </Text>
+          <Text style={styles.plCardMeta} numberOfLines={1}>
+            {p.themeCount} {p.themeCount === 1 ? 'theme' : 'themes'}
+            {runtimeMin !== null ? ` · ${runtimeMin} min` : ''}
+          </Text>
+        </View>
+      </Pressable>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.topBar}>
@@ -460,6 +552,16 @@ export default function UserProfileScreen() {
             {statBlock('Followers', followersCount, 'followers', true)}
             {statBlock('Following', profile.totalFollowing, 'following', false)}
           </View>
+
+          {/* Playlists — the user's PUBLIC playlists only (the
+              endpoint never lists private ones); hidden entirely
+              when they have none. */}
+          {profilePlaylists && profilePlaylists.length > 0 && (
+            <>
+              <Text style={styles.sectionHeading}>Playlists</Text>
+              {profilePlaylists.map(playlistCard)}
+            </>
+          )}
 
           {ratings && sortedRatings.length > 0 && (
             <>
@@ -822,6 +924,63 @@ const createStyles = (theme: Theme) =>
       fontFamily: fontFamilies.bodyStrong,
       fontSize: 12,
       color: theme.accent,
+    },
+    /* Playlist cards — the Library Playlists card's geometry,
+       verbatim (white card, 14 padding, spacing.lg stack gap). */
+    plCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.card,
+      padding: 14,
+      marginBottom: spacing.lg,
+    },
+    plCardMain: {
+      flex: 1,
+      gap: 3,
+    },
+    plCardName: {
+      fontFamily: fontFamilies.display,
+      fontSize: 18,
+      color: theme.text,
+    },
+    plCardMeta: {
+      fontFamily: fontFamilies.caption,
+      fontSize: 14,
+      color: theme.muted,
+    },
+    plGrid: {
+      // The detail header's collage at this card's scale: 64
+      // square, 2 padding + 2 gutters, cells rounded 3.
+      width: 64,
+      height: 64,
+      borderRadius: radii.base,
+      backgroundColor: theme.raised,
+      padding: 2,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 2,
+      overflow: 'hidden',
+    },
+    plGridCell: {
+      width: 29,
+      height: 29,
+      borderRadius: 3,
+      backgroundColor: theme.surface,
+    },
+    plGridCellEmpty: {
+      backgroundColor: theme.accentContainer,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    plGridSingle: {
+      width: 64,
+      height: 64,
+      borderRadius: radii.base,
+      backgroundColor: theme.surface,
     },
     seeAllRow: {
       // The HTML's bare link row (no card): px-2 py-1, bold mauve.

@@ -178,7 +178,16 @@ function makeModels() {
     }),
     find: jest.fn((filter: Record<string, unknown>) =>
       chain(
-        playlists.filter((p) => String(p.userId) === String(filter.userId)),
+        playlists.filter((p) => {
+          if (String(p.userId) !== String(filter.userId)) return false;
+          // Honour the profile listing's visibility predicate
+          // (isPublic: { $ne: false }) so its privacy test is real.
+          const vis = filter.isPublic as { $ne?: unknown } | undefined;
+          if (vis && typeof vis === 'object' && '$ne' in vis) {
+            return p.isPublic !== vis.$ne;
+          }
+          return true;
+        }),
       ),
     ),
     findOne: jest.fn((filter: Record<string, unknown>) =>
@@ -233,6 +242,9 @@ function makeModels() {
     findById: jest.fn((id: unknown) =>
       queryOf(users.find((u) => String(u._id) === String(id)) ?? null),
     ),
+    findOne: jest.fn((filter: Record<string, unknown>) =>
+      queryOf(users.find((u) => u.username === filter.username) ?? null),
+    ),
   };
 
   const playlistActivities: Record<string, unknown>[] = [];
@@ -275,6 +287,9 @@ describe('PlaylistsService — no database configured', () => {
     await expect(service.listMyPlaylists('u')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
+    await expect(
+      service.listUserPublicPlaylists('zadid'),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
     await expect(service.getPlaylist('507f1f77bcf86cd799439011')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
@@ -392,6 +407,52 @@ describe('PlaylistsService — list mine', () => {
     });
     expect(filled.coverImages).toEqual(['https://example.com/a.jpg']);
     expect(filled.totalDurationSeconds).toBeNull();
+  });
+});
+
+describe('PlaylistsService — user public playlists (profile listing)', () => {
+  it('lists only the named user’s PUBLIC playlists, with full summaries', async () => {
+    const { service } = makeService();
+    const pub = await service.createPlaylist('user-1', { name: 'Public Mix' });
+    await service.addItem('user-1', pub.id, { slug: 'anime_a-op1-1' });
+    const priv = await service.createPlaylist('user-1', {
+      name: 'Secret Mix',
+    });
+    await service.updatePlaylist('user-1', priv.id, { isPublic: false });
+    await service.createPlaylist('user-2', { name: 'Someone Else’s' });
+
+    const res = await service.listUserPublicPlaylists('zadid');
+    expect(res.playlists.map((p) => p.name)).toEqual(['Public Mix']);
+    const [only] = res.playlists;
+    expect(only.isPublic).toBe(true);
+    expect(only.themeCount).toBe(1);
+    expect(only.coverImages).toEqual(['https://example.com/a.jpg']);
+    expect(only.totalDurationSeconds).toBe(90);
+  });
+
+  it('a user with only private playlists lists empty — nothing leaks', async () => {
+    const { service, models } = makeService();
+    const priv = await service.createPlaylist('user-1', { name: 'Hidden' });
+    await service.updatePlaylist('user-1', priv.id, { isPublic: false });
+
+    const res = await service.listUserPublicPlaylists('zadid');
+    expect(res.playlists).toEqual([]);
+    expect(JSON.stringify(res)).not.toContain('Hidden');
+    // The private playlist still exists — it is only unlisted.
+    expect(models.playlistModel.docs).toHaveLength(1);
+  });
+
+  it('resolves the username case-insensitively; unknown ones 404', async () => {
+    const { service } = makeService();
+    await expect(
+      service.listUserPublicPlaylists('ZADID'),
+    ).resolves.toEqual({ playlists: [] });
+    await expect(
+      service.listUserPublicPlaylists('ghost'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.listUserPublicPlaylists('ghost')).rejects.toThrow(
+      'User not found',
+    );
   });
 });
 

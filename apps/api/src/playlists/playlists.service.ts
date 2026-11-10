@@ -382,6 +382,54 @@ export class PlaylistsService {
   }
 
   /**
+   * GET /users/:username/playlists — the profile listing (this
+   * backend's own addition for the mobile User Profile's Playlists
+   * section; the web has no equivalent — its only list is the
+   * owner's own GET /playlists). PUBLIC, like the profile read it
+   * feeds: the username is lower-cased and an unknown one 404s
+   * ('User not found'), both exactly as the social service's
+   * profile lookup.
+   *
+   * Privacy is enforced IN THE QUERY, not by filtering the result:
+   * the visibility predicate is the summary projection's own rule
+   * (a stored isPublic counts as public unless explicitly false —
+   * the schema/create default), so a private playlist's data never
+   * enters the payload at all. That is deliberately UNLIKE the
+   * single-playlist read below, which mirrors the web's no-check
+   * quirk: knowing an id is one thing, a listing must never hand
+   * out the private entries themselves. Order matches the owner's
+   * list (most recently updated first).
+   */
+  async listUserPublicPlaylists(
+    username: string,
+  ): Promise<PlaylistsResponse> {
+    const models = this.requireModels();
+    if (!this.userModel) {
+      throw new ServiceUnavailableException(
+        'Playlists unavailable — API booted without MONGODB_URI',
+      );
+    }
+    const user = await this.userModel
+      .findOne({ username: String(username ?? '').toLowerCase() })
+      .lean()
+      .exec();
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    const docs = (await models.playlists
+      .find({ userId: user._id, isPublic: { $ne: false } })
+      .sort({ updatedAt: -1 })
+      .lean()
+      .exec()) as PlaylistDoc[];
+
+    const allIds = docs.flatMap((d) => d.themes ?? []);
+    const themesById = await this.resolveThemes(models, allIds);
+    return {
+      playlists: docs.map((d) => this.toSummary(d, themesById)),
+    };
+  }
+
+  /**
    * GET /playlists/:id — the web's GET, mirrored INCLUDING its
    * visibility quirk: the web route performs no auth and no
    * isPublic check (its own comment floats private-playlist auth

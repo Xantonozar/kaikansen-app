@@ -561,9 +561,9 @@ export interface UpdatePlaylistRequest {
 }
 
 /**
- * Card projection of one of the caller's playlists
- * (GET /playlists list rows). The web serves the raw documents; this
- * API projects them the way it projects themes.
+ * Card projection of one of a user's playlists (the GET /playlists
+ * and GET /users/:username/playlists list rows). The web serves the
+ * raw documents; this API projects them the way it projects themes.
  */
 export interface PlaylistSummary {
   id: string;
@@ -605,8 +605,10 @@ export interface PlaylistSummary {
 }
 
 /**
- * Response body of GET /playlists — the caller's playlists, in the
- * web's order (most recently updated first).
+ * Response body of GET /playlists — the caller's playlists — and of
+ * GET /users/:username/playlists, that user's PUBLIC playlists only
+ * (private ones are never listed), both in the web's order (most
+ * recently updated first).
  */
 export interface PlaylistsResponse {
   playlists: PlaylistSummary[];

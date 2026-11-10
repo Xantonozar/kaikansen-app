@@ -25,12 +25,15 @@ import { PlaylistsService } from './playlists.service';
 
 /**
  * Slice S2 — playlists (see PlaylistsService for the web ports).
- * Every route except the single-playlist read sits behind the
- * Bearer access-token guard; the read is public because the web's
- * GET /api/playlists/[id] is public (it checks neither the session
- * nor isPublic — mirrored and flagged in the service). When the API
- * is booted without MONGODB_URI the service answers 503; the guard
- * still rejects tokenless writes with 401 first (it needs no DB).
+ * Every route except the two public reads sits behind the
+ * Bearer access-token guard: the single-playlist read is public
+ * because the web's GET /api/playlists/[id] is public (it checks
+ * neither the session nor isPublic — mirrored and flagged in the
+ * service), and the per-user listing GET /users/:username/playlists
+ * is public like the profile read it feeds (it serves PUBLIC
+ * playlists only — see the service). When the API is booted
+ * without MONGODB_URI the service answers 503; the guard still
+ * rejects tokenless writes with 401 first (it needs no DB).
  */
 @ApiTags('playlists')
 @Controller()
@@ -57,6 +60,17 @@ export class PlaylistsController {
   })
   listMine(@Req() req: { user: TokenPayload }): Promise<PlaylistsResponse> {
     return this.playlists.listMyPlaylists(req.user.userId);
+  }
+
+  @Get('users/:username/playlists')
+  @ApiOkResponse({
+    description:
+      'The named user’s PUBLIC playlists for their profile, most recently updated first. Public like the profile read; private playlists are never listed. Unknown username 404s.',
+  })
+  listUserPublic(
+    @Param('username') username: string,
+  ): Promise<PlaylistsResponse> {
+    return this.playlists.listUserPublicPlaylists(username);
   }
 
   @Get('playlists/:id')
