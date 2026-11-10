@@ -18,7 +18,6 @@ import type {
 import { fixtureMode } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
-import { pickDefaultAvatar } from '../../../src/defaultAvatars';
 import { PersonRow } from '../../../src/components/PersonRow';
 import {
   fetchFriendsActivity,
@@ -377,54 +376,28 @@ export default function SocialScreen() {
                   style={styles.rail}
                   contentContainerStyle={styles.railContent}
                 >
-                  {friends.map((person) => {
-                    const usable =
-                      person.avatarUrl !== null &&
-                      person.avatarUrl.length > 0 &&
-                      !person.avatarUrl.toLowerCase().includes('.svg');
-                    // No avatar at all, or an SVG (DiceBear) URL the
-                    // app cannot draw → the deterministic bundled
-                    // chibi (same rule as the shared Avatar, owner
-                    // decision 2026-11-09).
-                    return (
-                      <Pressable
-                        key={person.id}
-                        onPress={() => openProfile(person.username)}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Open ${person.username}'s profile`}
-                        style={({ pressed }) => [
-                          styles.railItem,
-                          pressed && styles.pressed,
-                        ]}
-                      >
-                        {usable ? (
-                          <Image
-                            source={{ uri: person.avatarUrl! }}
-                            style={styles.railAvatar}
-                          />
-                        ) : !usable ? (
-                          <Image
-                            source={pickDefaultAvatar(person.id)}
-                            style={styles.railAvatar}
-                          />
-                        ) : (
-                          <View
-                            style={[
-                              styles.railAvatar,
-                              styles.railAvatarFallback,
-                            ]}
-                          >
-                            <Text style={styles.railInitials}>
-                              {person.username.slice(0, 2).toUpperCase()}
-                            </Text>
-                          </View>
-                        )}
-                        <Text style={styles.railName} numberOfLines={1}>
-                          {person.username}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
+                  {friends.map((person) => (
+                    <Pressable
+                      key={person.id}
+                      onPress={() => openProfile(person.username)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${person.username}'s profile`}
+                      style={({ pressed }) => [
+                        styles.railItem,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Avatar
+                        url={person.avatarUrl}
+                        name={person.displayName || person.username}
+                        seed={person.username}
+                        size={60}
+                      />
+                      <Text style={styles.railName} numberOfLines={1}>
+                        {person.username}
+                      </Text>
+                    </Pressable>
+                  ))}
                 </ScrollView>
               </>
             )}
@@ -548,22 +521,6 @@ const createStyles = (theme: Theme) =>
       width: 68,
       alignItems: 'center',
       gap: spacing.xs + 2,
-    },
-    railAvatar: {
-      width: 60,
-      height: 60,
-      borderRadius: 30,
-      backgroundColor: theme.surface,
-    },
-    railAvatarFallback: {
-      backgroundColor: theme.accentContainer,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    railInitials: {
-      fontFamily: fontFamilies.bodyStrong,
-      fontSize: 17,
-      color: theme.onAccentContainer,
     },
     railName: {
       ...typeStyles.caption,
