@@ -32,6 +32,8 @@ import type { PlaybackMode } from '@kaikansen/contracts';
 import { fixtureMode } from '../../src/api';
 import { downloadId, useDownloads } from '../../src/downloads';
 import { entryHasAudio, formatTime } from '../../src/playback';
+import { watchArtworkUnderPlayer } from '../../src/mediaEngine';
+import { WatchQualityPicker } from '../../src/components/WatchQualityPicker';
 import { usePlaybackSession } from '../../src/playback-context';
 import {
   fontFamilies,
@@ -329,14 +331,32 @@ export default function PlayerScreen() {
       <View style={styles.column}>
         <View style={styles.mediaWrap}>
           {mode === 'watch' ? (
-            <VideoView
-              ref={videoRef}
-              player={player}
-              style={styles.video}
-              contentFit="contain"
-              nativeControls={false}
-              surfaceType="textureView"
-            />
+            <>
+              {/* Perf problem 7: the anime artwork sits UNDER the
+                  video surface until frames render (initial load
+                  and across a quality switch) — the hero never
+                  sits black while a source loads. Once frames
+                  render the VideoView's own black canvas + the
+                  video fully cover it. */}
+              {watchArtworkUnderPlayer({
+                hasArtwork: !!cover,
+                framesRendered: playback.framesRendered,
+              }) && cover ? (
+                <Image
+                  source={{ uri: cover }}
+                  style={styles.artworkUnder}
+                  resizeMode="cover"
+                />
+              ) : null}
+              <VideoView
+                ref={videoRef}
+                player={player}
+                style={styles.video}
+                contentFit="contain"
+                nativeControls={false}
+                surfaceType="textureView"
+              />
+            </>
           ) : (
             <>
               {cover ? (
@@ -403,6 +423,16 @@ export default function PlayerScreen() {
                   </Text>
                 </View>
               )}
+              {/* Perf problem 7: the quality picker (self-hides
+                  for single-source entries and local downloads —
+                  the engine refuses local switches anyway). */}
+              {mode === 'watch' && !localUsable && entry ? (
+                <WatchQualityPicker
+                  sources={entry.videoSources}
+                  activeUrl={playback.url}
+                  onPick={playback.switchQuality}
+                />
+              ) : null}
             </View>
           )}
         </View>
@@ -730,6 +760,15 @@ const createStyles = (theme: Theme) =>
       // The mock's hero is one 16:9 canvas in both modes.
       aspectRatio: 16 / 9,
       backgroundColor: theme.surface,
+    },
+    // Watch artwork-under-player (perf problem 7): absolutely
+    // fills mediaWrap's 16:9 canvas, behind the VideoView.
+    artworkUnder: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
     },
     artworkPlaceholder: {
       backgroundColor: theme.raised,

@@ -331,3 +331,141 @@ export function queuePreloadKey(item: {
 }): string {
   return `queue:${item.slug}:${item.atEntryId ?? 'first'}`;
 }
+
+/* ------------------------------------------------------------------ */
+/* Watch quality (perf problem 7 — best-quality start + picker)        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One quality the picker offers: an entry video source, by its
+ * REAL resolution value. The picker lists exactly these — never
+ * a rung the entry does not offer.
+ */
+export interface WatchQualityOption {
+  url: string;
+  resolution: number;
+}
+
+/**
+ * The picker's options for an entry: its video sources by
+ * resolution DESCENDING (the watch chain's own order — best
+ * first, which is also the start rule), plausible URLs only,
+ * de-duplicated by URL (first wins — the highest resolution a
+ * URL appears under) and by resolution (when two encodes claim
+ * the same rung, the chain's earlier one is what the engine
+ * would walk to anyway).
+ */
+export function watchQualityOptions(
+  sources: readonly WatchQualityOption[],
+): WatchQualityOption[] {
+  const sorted = [...sources].sort((a, b) => b.resolution - a.resolution);
+  const urls = new Set<string>();
+  const resolutions = new Set<number>();
+  const out: WatchQualityOption[] = [];
+  for (const source of sorted) {
+    const plausible =
+      typeof source.url === 'string' && /^https?:\/\//i.test(source.url);
+    if (!plausible) continue;
+    if (urls.has(source.url) || resolutions.has(source.resolution)) {
+      continue;
+    }
+    urls.add(source.url);
+    resolutions.add(source.resolution);
+    out.push({ url: source.url, resolution: source.resolution });
+  }
+  return out;
+}
+
+/**
+ * Whether the quality picker exists at all: only when the entry
+ * offers MORE THAN ONE quality. A single-source entry shows no
+ * picker (owner spec) — its resolution chip still reports.
+ */
+export function watchQualityPickerVisible(
+  sources: readonly WatchQualityOption[],
+): boolean {
+  return watchQualityOptions(sources).length > 1;
+}
+
+/**
+ * The resolution of the source ACTUALLY playing: the engine's
+ * active URL matched back to an offered source. A fallback URL
+ * (entry / theme videoUrl) or a local download matches nothing —
+ * the result is null and the chip is omitted, NEVER guessed from
+ * the highest resolution the entry merely offers (the batch-2
+ * rule the Player chip already lives by).
+ */
+export function playingResolution(
+  sources: readonly WatchQualityOption[],
+  activeUrl: string | null,
+): number | null {
+  if (activeUrl === null) return null;
+  return sources.find((s) => s.url === activeUrl)?.resolution ?? null;
+}
+
+/**
+ * The plan for a quality switch: a CONTROLLED CANDIDATE JUMP
+ * inside the existing watch chain — the picked source becomes
+ * the chain's current candidate, and the failure machinery keeps
+ * walking FORWARD from there (the next candidate after the pick),
+ * never backwards into encodes the user just moved away from.
+ *
+ * - `resumeAt`: the position the swapped source starts from —
+ *   the position captured at pick time; the caller re-applies it
+ *   after the new source loads (a native replace starts at 0).
+ * - `resumePlaying`: the playing state to restore after the
+ *   load — a pick made while paused stays paused.
+ * - `watchdogArmedFromPick`: true for EVERY pick: the stall
+ *   watchdog must be ARMED for a switch load exactly like a
+ *   start load (spec: the watchdog applies to picker switches).
+ *   The engine re-arms it off the load's start, which the switch
+ *   path re-stamps.
+ *
+ * Returns null for a pick that changes nothing — the picked URL
+ * is already the playing one (the picker marks it current), or
+ * it is not in the chain at all (a stale pick against a chain
+ * that has moved on).
+ */
+export interface QualitySwitchPlan {
+  targetIndex: number;
+  resumeAt: number;
+  resumePlaying: boolean;
+  watchdogArmedFromPick: boolean;
+}
+
+export function planQualitySwitch(args: {
+  chain: readonly string[];
+  targetUrl: string;
+  position: number;
+  isPlaying: boolean;
+}): QualitySwitchPlan | null {
+  const targetIndex = args.chain.indexOf(args.targetUrl);
+  if (targetIndex < 0) return null;
+  return {
+    targetIndex,
+    resumeAt: Math.max(0, Number.isFinite(args.position) ? args.position : 0),
+    resumePlaying: args.isPlaying,
+    watchdogArmedFromPick: true,
+  };
+}
+
+/**
+ * The artwork-under-player rule (perf problem 7): while a watch
+ * surface has NOT rendered video frames for the CURRENT source —
+ * before the first frame, and during a quality switch until the
+ * new source renders — the anime artwork shows under/behind the
+ * video surface instead of a black rectangle. The moment frames
+ * render, the video fully covers it. Listen mode never reaches
+ * this rule (its own artwork presentation is separate), and a
+ * source with no artwork leaves the plain black surface.
+ *
+ * - `framesRendered`: frames for the CURRENT source are on
+ *   screen (the engine keys this per source; any source change
+ *   resets it — a switch is a new source).
+ */
+export function watchArtworkUnderPlayer(args: {
+  hasArtwork: boolean;
+  framesRendered: boolean;
+}): boolean {
+  return args.hasArtwork && !args.framesRendered;
+}

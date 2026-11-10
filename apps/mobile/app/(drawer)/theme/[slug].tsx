@@ -60,6 +60,8 @@ import { ThemeComments } from '../../../src/components/ThemeComments';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import { ThemeRowMenu } from '../../../src/components/ThemeRowMenu';
 import { AddToPlaylistSheet } from '../../../src/components/AddToPlaylistSheet';
+import { WatchQualityPicker } from '../../../src/components/WatchQualityPicker';
+import { watchArtworkUnderPlayer } from '../../../src/mediaEngine';
 import { useAuth } from '../../../src/auth';
 import {
   applyFavoriteState,
@@ -836,17 +838,28 @@ export default function ThemeDetailScreen() {
         {formatTime(playback.progress.duration)}
       </Text>
       {playMode === 'watch' && !playback.audioFallback && (
-        <Pressable
-          onPress={() => {
-            void videoRef.current?.enterFullscreen();
-          }}
-          hitSlop={6}
-          accessibilityRole="button"
-          accessibilityLabel="Fullscreen"
-          style={styles.stripIconButton}
-        >
-          <Maximize size={18} color={theme.text} strokeWidth={2} />
-        </Pressable>
+        <>
+          {/* Perf problem 7: the quality picker (self-hides for
+              single-source entries). Its pill is the Player's
+              white-glass chip — over the strip's dark card it
+              reads as the design's resolution chip. */}
+          <WatchQualityPicker
+            sources={selectedEntry?.videoSources ?? []}
+            activeUrl={playback.url}
+            onPick={playback.switchQuality}
+          />
+          <Pressable
+            onPress={() => {
+              void videoRef.current?.enterFullscreen();
+            }}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel="Fullscreen"
+            style={styles.stripIconButton}
+          >
+            <Maximize size={18} color={theme.text} strokeWidth={2} />
+          </Pressable>
+        </>
       )}
     </View>
   );
@@ -943,6 +956,22 @@ export default function ThemeDetailScreen() {
                   </View>
                 ) : (
                   <View style={styles.heroPlayer}>
+                    {/* Perf problem 7: the anime artwork sits UNDER
+                        the video surface until frames render
+                        (initial load and across a quality switch)
+                        — the hero never sits black while a source
+                        loads. Once frames render the video covers
+                        it (the surface's own canvas takes over). */}
+                    {watchArtworkUnderPlayer({
+                      hasArtwork: !!cover,
+                      framesRendered: playback.framesRendered,
+                    }) && cover ? (
+                      <Image
+                        source={{ uri: cover }}
+                        style={styles.heroArtworkUnder}
+                        resizeMode="cover"
+                      />
+                    ) : null}
                     {/* textureView, not the default surfaceView:
                         this hero mounts conditionally (on the Watch
                         tap) inside a ScrollView, where a SurfaceView
@@ -1902,6 +1931,15 @@ const createStyles = (theme: Theme) =>
     width: '100%',
     aspectRatio: 16 / 9,
     backgroundColor: '#000',
+  },
+  // Watch artwork-under-player (perf problem 7): absolutely
+  // fills heroPlayer's 16:9 canvas, behind the VideoView.
+  heroArtworkUnder: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    aspectRatio: 16 / 9,
   },
   hiddenSurface: {
     position: 'absolute',

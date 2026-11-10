@@ -5,6 +5,8 @@ import {
   firstCandidateIsVideo,
   mediaKindForUrl,
   pickPreloadCandidate,
+  planQualitySwitch,
+  playingResolution,
   preloadMatches,
   progressFraction,
   progressValueChanged,
@@ -13,6 +15,9 @@ import {
   shouldPreloadNext,
   stabilizeProgress,
   tagCandidates,
+  watchArtworkUnderPlayer,
+  watchQualityOptions,
+  watchQualityPickerVisible,
   watchdogPollActive,
   watchdogShouldTrip,
   type WatchdogSnapshot,
@@ -244,5 +249,123 @@ describe('problem 3 — next-track preload gate', () => {
     expect(queuePreloadKey(next)).not.toBe(
       queuePreloadKey({ slug: 'next-theme', atEntryId: 7 }),
     );
+  });
+});
+
+describe('problem 7 — watch quality picker', () => {
+  const V1080 = 'https://v.animethemes.moe/FateZero-OP1-1080.webm';
+  const V720 = 'https://v.animethemes.moe/FateZero-OP1-720.webm';
+  const V360 = 'https://v.animethemes.moe/FateZero-OP1-360.webm';
+  const sources = [
+    { url: V360, resolution: 360 },
+    { url: V1080, resolution: 1080 },
+    { url: V720, resolution: 720 },
+  ];
+
+  it('lists exactly the offered sources, best first, by real resolution', () => {
+    expect(watchQualityOptions(sources)).toEqual([
+      { url: V1080, resolution: 1080 },
+      { url: V720, resolution: 720 },
+      { url: V360, resolution: 360 },
+    ]);
+  });
+
+  it('dedupes by URL and by resolution, drops implausible URLs', () => {
+    expect(
+      watchQualityOptions([
+        { url: V720, resolution: 720 },
+        { url: V720, resolution: 720 },
+        { url: 'https://v.animethemes.moe/other.webm', resolution: 720 },
+        { url: 'relative/clip.webm', resolution: 1080 },
+        { url: V360, resolution: 360 },
+      ]),
+    ).toEqual([
+      { url: V720, resolution: 720 },
+      { url: V360, resolution: 360 },
+    ]);
+  });
+
+  it('single-source (or empty) entries show no picker', () => {
+    expect(watchQualityPickerVisible([{ url: V720, resolution: 720 }])).toBe(
+      false,
+    );
+    expect(watchQualityPickerVisible([])).toBe(false);
+    // Two sources collapsing to one rung (same URL) is still single.
+    expect(
+      watchQualityPickerVisible([
+        { url: V720, resolution: 720 },
+        { url: V720, resolution: 480 },
+      ]),
+    ).toBe(false);
+    expect(watchQualityPickerVisible(sources)).toBe(true);
+  });
+
+  it('the switch plan jumps to the picked candidate, keeping position + state', () => {
+    const chain = [V1080, V720, V360, VIDEO];
+    const plan = planQualitySwitch({
+      chain,
+      targetUrl: V360,
+      position: 42.5,
+      isPlaying: true,
+    });
+    expect(plan).toEqual({
+      targetIndex: 2,
+      resumeAt: 42.5,
+      resumePlaying: true,
+      watchdogArmedFromPick: true,
+    });
+    // A pick made while paused stays paused.
+    expect(
+      planQualitySwitch({
+        chain,
+        targetUrl: V720,
+        position: 10,
+        isPlaying: false,
+      })?.resumePlaying,
+    ).toBe(false);
+    // A bad position never leaks into the plan.
+    expect(
+      planQualitySwitch({
+        chain,
+        targetUrl: V720,
+        position: Number.NaN,
+        isPlaying: true,
+      })?.resumeAt,
+    ).toBe(0);
+  });
+
+  it('a pick outside the chain plans nothing', () => {
+    expect(
+      planQualitySwitch({
+        chain: [V1080, V720],
+        targetUrl: 'https://v.animethemes.moe/not-offered.webm',
+        position: 5,
+        isPlaying: true,
+      }),
+    ).toBeNull();
+  });
+
+  it('chip resolution follows the ACTUALLY playing source, never the offer', () => {
+    // Mid-chain after a failure: the 720 encode is what plays.
+    expect(playingResolution(sources, V720)).toBe(720);
+    expect(playingResolution(sources, V1080)).toBe(1080);
+    // A failed pick falls back through the chain: the URL that
+    // ends up playing (here the theme-level fallback) matches
+    // no source, so the chip is omitted — never faked at 1080p
+    // or at the picked rung.
+    expect(playingResolution(sources, VIDEO)).toBeNull();
+    expect(playingResolution(sources, null)).toBeNull();
+  });
+
+  it('artwork shows under the player until frames render for the source', () => {
+    expect(
+      watchArtworkUnderPlayer({ hasArtwork: true, framesRendered: false }),
+    ).toBe(true);
+    expect(
+      watchArtworkUnderPlayer({ hasArtwork: true, framesRendered: true }),
+    ).toBe(false);
+    expect(
+      watchArtworkUnderPlayer({ hasArtwork: false, framesRendered: false }),
+    ).toBe(false);
   });
 });
