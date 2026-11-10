@@ -486,8 +486,12 @@ export default function HomeScreen() {
           </View>
         </Pressable>
 
-        {/* Continue Listening — recent history as landscape cards
-            with a play disc; tapping resumes in the entry's mode. */}
+        {/* Continue Listening — the Home v3 mock's card (owner
+            correction, 2026-11-10): a frosted white card holding
+            SQUARE cover art, a progress bar under the art, and the
+            title + artist inside the card; a mauve play disc
+            overlaps the art's bottom-right corner. The card body
+            opens the theme; the disc resumes in the entry's mode. */}
         {history !== null && history.length > 0 && (
           <>
             <View style={[styles.sectionHeader, styles.feedHeader]}>
@@ -506,14 +510,14 @@ export default function HomeScreen() {
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.rail}
+              contentContainerStyle={[styles.rail, styles.continueRail]}
             >
               {history.map((entry) => (
                 <Pressable
                   key={entry.id}
-                  onPress={() => continuePlay(entry)}
+                  onPress={() => openTheme(entry.theme!.slug)}
                   accessibilityRole="button"
-                  accessibilityLabel={`Continue ${entry.theme!.songTitle}`}
+                  accessibilityLabel={`Open ${entry.theme!.songTitle}`}
                   style={({ pressed }) => [
                     styles.continueCard,
                     pressed && styles.pressed,
@@ -533,14 +537,39 @@ export default function HomeScreen() {
                         ]}
                       />
                     )}
-                    <View style={styles.continuePlay}>
+                    <Pressable
+                      onPress={() => continuePlay(entry)}
+                      hitSlop={6}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Continue ${entry.theme!.songTitle}`}
+                      style={({ pressed }) => [
+                        styles.continuePlay,
+                        pressed && styles.pressed,
+                      ]}
+                    >
                       <Play
-                        size={13}
+                        size={14}
                         color={theme.onAccent}
                         fill={theme.onAccent}
                         strokeWidth={2}
                       />
-                    </View>
+                    </Pressable>
+                  </View>
+                  {/* Resume progress. No fraction is drawn yet:
+                      history records only THAT a theme played —
+                      the shared watchhistories rows carry no
+                      position field and the player never persists
+                      one — so there is no real value to fill the
+                      measured track with (owner report, 2026-11-10).
+                      The fill takes the recorded fraction the day
+                      position recording exists end to end. */}
+                  <View style={styles.continueProgressTrack}>
+                    <View
+                      style={[
+                        styles.continueProgressFill,
+                        { width: '0%' },
+                      ]}
+                    />
                   </View>
                   <Text style={styles.continueTitle} numberOfLines={1}>
                     {entry.theme!.songTitle}
@@ -963,38 +992,68 @@ const createStyles = (theme: Theme) =>
     letterSpacing: 1.2,
     marginBottom: 2,
   },
+  // Continue Listening card — measured from the Home v3 Stitch
+  // HTML (home-v3.html): w-28 card (112) at p-2 (8) with rounded-2xl
+  // (16); square art at rounded-xl (12); play disc w-6 (24) in mauve
+  // (#8e5b7b = secondary) hung -bottom-2 / -right-1 off the art;
+  // progress h-1 (4) at mt-2.5 / mb-1; title text-xs bold (12);
+  // artist text-[10px] medium (10). The white is the Home glass
+  // treatment (design law #3, as on PopularCard) at this card's
+  // measured 80% (the HTML's bg-white/80).
   continueCard: {
-    width: 168,
+    width: 112,
+    padding: spacing.sm,
+    borderRadius: radii.md,
+    backgroundColor: withOpacity(theme.surface, 0.8),
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
   },
   continueArtWrap: {
     position: 'relative',
   },
   continueArt: {
-    width: 168,
-    height: 96,
-    borderRadius: radii.md,
+    width: '100%',
+    aspectRatio: 1,
+    borderRadius: radii.base,
     backgroundColor: theme.surface,
   },
   continuePlay: {
     position: 'absolute',
-    right: spacing.sm,
-    bottom: spacing.sm,
-    width: 28,
-    height: 28,
+    right: -4,
+    bottom: -8,
+    width: 24,
+    height: 24,
     borderRadius: radii.pill,
-    backgroundColor: theme.accent,
+    backgroundColor: theme.secondary,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
+  },
+  continueProgressTrack: {
+    height: 4,
+    borderRadius: radii.pill,
+    backgroundColor: theme.raised,
+    overflow: 'hidden',
+    marginTop: 10,
+    marginBottom: spacing.xs,
+  },
+  continueProgressFill: {
+    height: '100%',
+    borderRadius: radii.pill,
+    backgroundColor: theme.secondary,
   },
   continueTitle: {
-    ...typeStyles.body,
-    fontSize: 13,
     fontFamily: fontFamilies.bodyStrong,
+    fontSize: 12,
     color: theme.text,
-    marginTop: spacing.sm,
   },
   continueArtist: {
-    ...typeStyles.caption,
+    fontFamily: fontFamilies.caption,
+    fontSize: 10,
     color: theme.muted,
     marginTop: 1,
   },
@@ -1011,6 +1070,12 @@ const createStyles = (theme: Theme) =>
     // (measured from kaikansen-home-v3-realimg.png) — wider than
     // the shared rail gap the Continue Listening rail keeps.
     gap: 14,
+  },
+  continueRail: {
+    // The Home v3 HTML draws the Continue rail at gap-3 (12) with
+    // pb-1 (4) under the cards.
+    gap: spacing.md,
+    paddingBottom: spacing.xs,
   },
   surprise: {
     flexDirection: 'row',
