@@ -1,6 +1,8 @@
 import {
   buildRoundOptions,
   buildSoloOptions,
+  creditedLoadMs,
+  effectiveQuestionStart,
   generateRoomCode,
   getBaseRP,
   getStreakBonus,
@@ -9,6 +11,7 @@ import {
   multiplayerScoreFor,
   secondsRemainingAt,
   shouldAutoLock,
+  SOLO_LOAD_CREDIT_CAP_MS,
   soloScoreFor,
   type QuizThemeLike,
 } from './quiz-game.utils';
@@ -121,6 +124,37 @@ describe('secondsRemainingAt (web answer-route measurement)', () => {
     expect(
       secondsRemainingAt(start, 20, new Date('2026-11-07T00:00:00.000Z')),
     ).toBe(20);
+  });
+});
+
+describe('solo playback-start credit (owner timing fix, 2026-11-10)', () => {
+  const draw = new Date('2026-11-10T00:00:00.000Z');
+
+  it('credits nothing when playback was never signalled', () => {
+    expect(creditedLoadMs(draw, null)).toBe(0);
+    expect(creditedLoadMs(draw, undefined)).toBe(0);
+    expect(effectiveQuestionStart(draw, null)).toEqual(draw);
+  });
+
+  it('credits the real load time under the cap', () => {
+    const played = new Date(draw.getTime() + 2300);
+    expect(creditedLoadMs(draw, played)).toBe(2300);
+    expect(effectiveQuestionStart(draw, played)).toEqual(played);
+  });
+
+  it('caps the credit at SOLO_LOAD_CREDIT_CAP_MS, however late the signal', () => {
+    const late = new Date(draw.getTime() + 45_000);
+    expect(SOLO_LOAD_CREDIT_CAP_MS).toBe(5000);
+    expect(creditedLoadMs(draw, late)).toBe(5000);
+    expect(effectiveQuestionStart(draw, late)).toEqual(
+      new Date(draw.getTime() + 5000),
+    );
+  });
+
+  it('never credits negative load (a signal stamped before the draw)', () => {
+    const early = new Date(draw.getTime() - 1000);
+    expect(creditedLoadMs(draw, early)).toBe(0);
+    expect(effectiveQuestionStart(draw, early)).toEqual(draw);
   });
 });
 

@@ -4,6 +4,7 @@ import type {
   QuizLeaderboardResponse,
   SoloAnswerResponse,
   SoloGameState,
+  SoloPlaybackStartedResponse,
 } from '@kaikansen/contracts';
 import { apiJson, fixtureMode } from './api';
 import { getAccessToken } from './session';
@@ -13,6 +14,7 @@ import { getAccessToken } from './session';
  *
  * - POST /quiz/solo/games               create a 10-question game
  * - GET  /quiz/solo/games/:gameId       the live game state
+ * - POST /quiz/solo/games/:gameId/playback-started  signal the question's audio actually started (or proved unplayable) — the answer window opens there
  * - POST /quiz/solo/games/:gameId/answers  answer (null = skip/timeout)
  * - GET  /quiz/leaderboard              public top-10 attempts board
  *
@@ -51,6 +53,24 @@ export async function fetchSoloGame(gameId: string): Promise<SoloGameState> {
   guardPlay();
   return apiJson<SoloGameState>(
     `/quiz/solo/games/${encodeURIComponent(gameId)}`,
+  );
+}
+
+/**
+ * Signal that the live question's media wait ended — the audio
+ * actually started playing, or every candidate failed (owner
+ * timing fix, 2026-11-10). The server stamps its own clock; the
+ * answer measurement opens at draw + the credited load. Callers
+ * fire this once per question and may ignore failures: without
+ * the signal the server measures from the draw, as before.
+ */
+export async function markSoloPlaybackStarted(
+  gameId: string,
+): Promise<SoloPlaybackStartedResponse> {
+  guardPlay();
+  return apiJson<SoloPlaybackStartedResponse>(
+    `/quiz/solo/games/${encodeURIComponent(gameId)}/playback-started`,
+    { method: 'POST' },
   );
 }
 

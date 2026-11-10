@@ -28,10 +28,18 @@ import { useTheme } from '../theme-context';
  * the first candidate and autoplays; leaving the screen pauses the
  * player (the hook releases it on unmount), so no clip leaks over
  * other screens.
+ *
+ * `playAtMs` (multiplayer countdown, owner design 2026-11-10):
+ * when given, a loaded source is HELD — loaded, not playing —
+ * until that epoch-ms moment, so a room's pre-round countdown can
+ * preload the audio and every client starts it at 0 together.
+ * A moment already past plays immediately; `holdPending` reports
+ * the held state so callers show "loading" until the start.
  */
 function useQuizMediaPlayer(
   candidates: (string | null)[],
   mediaKey: string,
+  playAtMs?: number,
 ) {
   const sources = useMemo(
     () => candidates.filter(isPlausibleUrl),
@@ -40,11 +48,16 @@ function useQuizMediaPlayer(
   const [sourceIndex, setSourceIndex] = useState(0);
   const [muted, setMuted] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [holdPending, setHoldPending] = useState(false);
+  const playAtRef = useRef(playAtMs);
+  playAtRef.current = playAtMs;
+  const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // A new question/round restarts from the first candidate.
   useEffect(() => {
     setSourceIndex(0);
     setFailed(false);
+    setHoldPending(false);
   }, [mediaKey]);
 
   const url = sources[sourceIndex] ?? null;
@@ -67,14 +80,37 @@ function useQuizMediaPlayer(
   useEffect(() => {
     if (!url || loadedRef.current === `${mediaKey}:${url}`) return;
     loadedRef.current = `${mediaKey}:${url}`;
+    let cancelled = false;
     void player
       .replaceAsync(url)
       .then(() => {
-        if (mountedRef.current) player.play();
+        if (!mountedRef.current || cancelled) return;
+        const target = playAtRef.current;
+        const waitMs = target ? target - Date.now() : 0;
+        if (waitMs > 0) {
+          // Held for the shared start moment (see the hook's
+          // docblock): loaded now, played at playAtMs.
+          setHoldPending(true);
+          holdTimerRef.current = setTimeout(() => {
+            holdTimerRef.current = null;
+            setHoldPending(false);
+            if (mountedRef.current) player.play();
+          }, waitMs);
+        } else {
+          player.play();
+        }
       })
       .catch(() => {
         // Load failures also surface via statusChange; nothing to do.
       });
+    return () => {
+      cancelled = true;
+      if (holdTimerRef.current) {
+        clearTimeout(holdTimerRef.current);
+        holdTimerRef.current = null;
+      }
+      if (mountedRef.current) setHoldPending(false);
+    };
   }, [url, mediaKey, player]);
 
   useEventListener(player, 'statusChange', ({ status: next }) => {
@@ -107,7 +143,16 @@ function useQuizMediaPlayer(
     };
   }, [player]);
 
-  return { player, status, url, sourceIndex, failed, muted, toggleMute };
+  return {
+    player,
+    status,
+    url,
+    sourceIndex,
+    failed,
+    muted,
+    toggleMute,
+    holdPending,
+  };
 }
 
 /**
@@ -275,19 +320,24 @@ export function QuizAudioOnly({
   candidates,
   mediaKey,
   onStateChange,
+  playAtMs,
 }: {
   candidates: (string | null)[];
   mediaKey: string;
   onStateChange?: (state: QuizAudioState) => void;
+  /** Multiplayer countdown: load now, start playing at this
+   *  epoch-ms moment (the round's server startedAt). While held,
+   *  the phase reports 'buffering' — the clip has not started. */
+  playAtMs?: number;
 }) {
-  const { player, status, url, failed, muted, toggleMute } =
-    useQuizMediaPlayer(candidates, mediaKey);
+  const { player, status, url, failed, muted, toggleMute, holdPending } =
+    useQuizMediaPlayer(candidates, mediaKey, playAtMs);
 
   const phase: QuizAudioPhase = failed
     ? 'failed'
     : url === null
       ? 'empty'
-      : status === 'loading' || status === 'idle'
+      : holdPending || status === 'loading' || status === 'idle'
         ? 'buffering'
         : 'playing';
 

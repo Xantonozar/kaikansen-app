@@ -37,7 +37,11 @@ import type {
   UserRankProfile,
 } from '@kaikansen/contracts';
 import { ApiRequestError } from '../../../src/api';
-import { createSoloGame, submitSoloAnswer } from '../../../src/quizApi';
+import {
+  createSoloGame,
+  markSoloPlaybackStarted,
+  submitSoloAnswer,
+} from '../../../src/quizApi';
 import { fetchMyRank } from '../../../src/socialApi';
 import { RankResultCard } from '../../../src/components/RankCard';
 import { CountdownRing } from '../../../src/components/CountdownRing';
@@ -59,6 +63,13 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 type Phase = 'creating' | 'question' | 'feedback' | 'over' | 'fatal';
 
 const FEEDBACK_MS = 2800;
+
+/**
+ * Safety net for the playback-start clock (below): a load that
+ * neither plays nor errors within this long starts the clock
+ * anyway — a question must never hang forever.
+ */
+const LOAD_SAFETY_MS = 10_000;
 
 /**
  * The question prompt per guess type — the Quiz Question v2 mock's
@@ -88,7 +99,16 @@ const RESULTS_GUESS_LABEL: Record<QuizGuessType, string> = {
  * cover, nothing that gives the anime away on sight — under a big
  * countdown ring, while a LOCAL 20s countdown drives the ring's
  * display (the server measures and scores authoritatively), and
- * the chosen option is sent verbatim — or null on timeout/skip. The answer
+ * the chosen option is sent verbatim — or null on timeout/skip.
+ * BOTH clocks start when the audio ACTUALLY starts playing, not
+ * when the question renders (owner timing fix, 2026-11-10 — the
+ * load used to eat the window on both clocks): the ring holds
+ * full while the hidden audio loads, the screen signals the
+ * moment playback begins (or the media proves unplayable) via
+ * POST …/playback-started, and the server measures from the
+ * draw plus the credited load, capped server-side. A load that
+ * neither plays nor errors within LOAD_SAFETY_MS starts the
+ * clock through the same path, so a question can never hang. The answer
  * response drives the feedback state (correct option revealed,
  * points + streak), then the game auto-advances (a Next button
  * skips the wait). The end screen is the designed results screen
@@ -158,13 +178,46 @@ export default function SoloQuizScreen() {
   const advanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const feedbackRef = useRef<SoloAnswerResponse | null>(null);
   const advancedForRef = useRef(0);
+  // Playback-start clock (owner timing fix, 2026-11-10): the
+  // question index the clock has started for (0 = not yet), the
+  // live game's id/limit for the signal + deadline, the safety
+  // timer, and the render-visible running flag for the ring.
+  const clockStartedForRef = useRef(0);
+  const gameIdRef = useRef<string | null>(null);
+  const limitRef = useRef(20);
+  const loadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [clockRunning, setClockRunning] = useState(false);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       if (advanceTimerRef.current) clearTimeout(advanceTimerRef.current);
+      if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
     };
+  }, []);
+
+  /**
+   * Start the answer clock for a question — exactly once per
+   * question, at the moment the media wait ends: the deadline
+   * moves to now + the limit (the ring unpauses onto it) and the
+   * server is signalled so its measurement opens at the same
+   * moment. Fire-and-forget: a lost signal only means the server
+   * measures from the draw (the pre-fix behaviour).
+   */
+  const startClock = useCallback((qIndex: number) => {
+    if (clockStartedForRef.current === qIndex) return;
+    clockStartedForRef.current = qIndex;
+    if (loadTimerRef.current) {
+      clearTimeout(loadTimerRef.current);
+      loadTimerRef.current = null;
+    }
+    setDeadlineMs(Date.now() + limitRef.current * 1000);
+    setClockRunning(true);
+    const gid = gameIdRef.current;
+    if (gid) {
+      void markSoloPlaybackStarted(gid).catch(() => {});
+    }
   }, []);
 
   const startQuestion = useCallback(
@@ -174,10 +227,23 @@ export default function SoloQuizScreen() {
       setFeedback(null);
       feedbackRef.current = null;
       setError(null);
+      limitRef.current = limitSeconds;
+      // Hold the clock until this question's audio starts: reset
+      // the started marker, treat the media as loading again (a
+      // stale 'playing' from the previous question must not
+      // start this one early), and arm the safety start.
+      clockStartedForRef.current = 0;
+      setClockRunning(false);
+      setAudioState((s) => ({ ...s, phase: 'buffering' }));
+      if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+      loadTimerRef.current = setTimeout(
+        () => startClock(q.index),
+        LOAD_SAFETY_MS,
+      );
       setDeadlineMs(Date.now() + limitSeconds * 1000);
       setPhase('question');
     },
-    [],
+    [startClock],
   );
 
   /* Create the game (and recreate on Play again via runId). */
@@ -196,6 +262,7 @@ export default function SoloQuizScreen() {
     createSoloGame({ quizType, source })
       .then((state) => {
         if (!live) return;
+        gameIdRef.current = state.gameId;
         setGameId(state.gameId);
         setTotalQuestions(state.totalQuestions);
         setTimeLimit(state.timeLimitSeconds);
@@ -217,6 +284,15 @@ export default function SoloQuizScreen() {
       live = false;
     };
   }, [quizType, source, runId, startQuestion]);
+
+  /* The clock starts when the media wait ends: the audio
+     actually playing, or known-unplayable ('failed' / 'empty') —
+     either way the question is live from that moment. */
+  useEffect(() => {
+    if (phase !== 'question' || !question) return;
+    if (audioState.phase === 'buffering') return;
+    startClock(question.index);
+  }, [audioState.phase, phase, question, startClock]);
 
   const advance = useCallback(() => {
     if (advanceTimerRef.current) {
@@ -524,6 +600,7 @@ export default function SoloQuizScreen() {
               deadlineMs={deadlineMs}
               totalSeconds={timeLimit}
               onExpire={phase === 'question' ? onExpire : undefined}
+              paused={phase === 'question' && !clockRunning}
               size={168}
               glyph={
                 audioState.phase === 'buffering' ? (

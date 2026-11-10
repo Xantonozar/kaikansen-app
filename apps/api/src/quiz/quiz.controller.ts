@@ -16,6 +16,7 @@ import type {
   SoloAnswerRequest,
   SoloAnswerResponse,
   SoloGameState,
+  SoloPlaybackStartedResponse,
 } from '@kaikansen/contracts';
 import { AccessTokenGuard } from '../auth/access-token.guard';
 import type { TokenPayload } from '../auth/auth.service';
@@ -29,6 +30,7 @@ import { SoloQuizService } from './solo-quiz.service';
  *
  * - POST /quiz/solo/games            create a 10-question game (first question included)
  * - GET  /quiz/solo/games/:gameId    the live game state (question re-served, timer untouched)
+ * - POST /quiz/solo/games/:gameId/playback-started  the client signals the question's audio actually started (or proved unplayable); the answer window opens there, not at the draw
  * - POST /quiz/solo/games/:gameId/answers  answer (or null to skip); scores + persists + advances
  * - GET  /quiz/leaderboard           public; the web's top-10 attempts board
  *
@@ -66,6 +68,21 @@ export class QuizController {
     @Param('gameId') gameId: string,
   ): Promise<SoloGameState> {
     return this.solo.getGame(req.user.userId, gameId);
+  }
+
+  @Post('quiz/solo/games/:gameId/playback-started')
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @UseGuards(AccessTokenGuard)
+  @ApiOkResponse({
+    description:
+      'Signal that the live question’s audio actually started playing (or failed outright); the answer window is measured from there (idempotent per question).',
+  })
+  playbackStarted(
+    @Req() req: { user: TokenPayload },
+    @Param('gameId') gameId: string,
+  ): Promise<SoloPlaybackStartedResponse> {
+    return this.solo.markPlaybackStarted(req.user.userId, gameId);
   }
 
   @Post('quiz/solo/games/:gameId/answers')

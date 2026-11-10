@@ -11,6 +11,12 @@ import { useTheme } from '../theme-context';
  * ring self-corrects against the server's clock; the server owns
  * the actual round end either way). `onExpire` fires exactly once
  * per deadline — solo uses it to submit the timeout answer.
+ *
+ * `paused` (solo timing fix, 2026-11-10): while true the ring
+ * renders the FULL window and never ticks or expires — solo holds
+ * it until the question's audio actually starts, so load time
+ * never eats the displayed window; the caller moves the deadline
+ * to the real start moment as it unpauses.
  */
 export function CountdownRing({
   deadlineMs,
@@ -20,11 +26,14 @@ export function CountdownRing({
   glyph,
   caption,
   variant = 'standard',
+  paused = false,
 }: {
   deadlineMs: number;
   totalSeconds: number;
   onExpire?: () => void;
   size?: number;
+  /** Held at the full window: no ticking, no expiry. */
+  paused?: boolean;
   /** Large rings only: a glyph rendered above the seconds number
    *  (the solo question screen's music note / buffering spinner). */
   glyph?: ReactNode;
@@ -46,6 +55,12 @@ export function CountdownRing({
   expireRef.current = onExpire;
 
   useEffect(() => {
+    if (paused) {
+      // Held at the full window (see the docblock): no ticking,
+      // no expiry — the deadline takes over when `paused` lifts.
+      setRemainingMs(Math.max(1, totalSeconds * 1000));
+      return;
+    }
     expiredForRef.current = null;
     setRemainingMs(Math.max(0, deadlineMs - Date.now()));
     const tick = () => {
@@ -59,7 +74,7 @@ export function CountdownRing({
     tick();
     const id = setInterval(tick, 100);
     return () => clearInterval(id);
-  }, [deadlineMs]);
+  }, [deadlineMs, paused, totalSeconds]);
 
   const totalMs = Math.max(1, totalSeconds * 1000);
   const fraction = Math.min(1, Math.max(0, remainingMs / totalMs));

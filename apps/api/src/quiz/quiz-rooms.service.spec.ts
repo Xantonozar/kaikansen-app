@@ -486,7 +486,16 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect(event?.payload).toMatchObject({
       round: 1,
       timeLimitSeconds: 30,
+      countdownSeconds: 5,
     });
+    // Pre-round countdown (owner, 2026-11-10): the broadcast's
+    // startedAt — the moment the answer window opens — is
+    // stamped the countdown length into the future, and the
+    // client-facing round state carries the same stamp.
+    const startedAtMs = Date.parse(event!.payload.startedAt as string);
+    expect(startedAtMs).toBeGreaterThan(Date.now() + 4000);
+    expect(startedAtMs).toBeLessThan(Date.now() + 6000);
+    expect(Date.parse(liveRound.startedAt)).toBe(startedAtMs);
     const theme = (event!.payload.theme ?? {}) as Record<string, unknown>;
     expect(theme.videoUrl).toBe('https://video/main.webm');
     // Owner doctrine (2026-11-10): the fixture's stored audioUrl
@@ -510,6 +519,33 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect(stored.themeId).toBe('theme-correct');
     expect(doc.usedThemeIds).toEqual(['theme-correct']);
     expect(doc.timerAuthority).toBeTruthy();
+  });
+
+  it('answers during the pre-round countdown are refused, then accepted at the window', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await startedParty(m);
+    const doc = roomDoc(m, roomId);
+    const round = (doc.rounds as Record<string, unknown>[])[0];
+
+    // The window opens at startedAt, ROUND_COUNTDOWN_SECONDS
+    // after the broadcast (owner design, 2026-11-10).
+    expect(
+      new Date(round.startedAt as Date).getTime(),
+    ).toBeGreaterThan(Date.now());
+
+    await expect(
+      m.service.submitAnswer(GUEST, roomId, 1, 'Correct EN'),
+    ).rejects.toThrow('Round has not started yet');
+    // Refused outright: nothing recorded, nobody locked.
+    expect(round.answers).toHaveLength(0);
+    expect(round.endedAt).toBeFalsy();
+    expect(doc.status).toBe('in_progress');
+
+    // Once the countdown ends, the same answer scores against
+    // the full window (elapsed measured from startedAt).
+    round.startedAt = new Date();
+    const ack = await m.service.submitAnswer(GUEST, roomId, 1, 'Correct EN');
+    expect(ack).toMatchObject({ success: true, correct: true, secondsRemaining: 30 });
   });
 
   it('round media candidates carry the derived .ogg when the theme stores no audio', async () => {
@@ -602,7 +638,9 @@ describe('QuizRoomsService — game flow + scoring', () => {
     ).toBeUndefined();
     expect(m.rank.scheduled).toEqual([]);
 
-    // A member answer right after still works normally.
+    // A member answer right after still works normally (past the
+    // pre-round countdown — the window opens at startedAt).
+    round.startedAt = new Date();
     const ack = await m.service.submitAnswer(HOST, roomId, 1, 'Correct EN');
     expect(ack).toMatchObject({ success: true, correct: true });
   });
@@ -645,6 +683,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     const doc = roomDoc(m, roomId);
     expect(doc.status).toBe('in_progress');
     const round = (doc.rounds as Record<string, unknown>[])[0];
+    round.startedAt = new Date(); // past the pre-round countdown
 
     const wrong = await m.service.submitAnswer(HOST, roomId, 1, 'Distractor1 EN');
     expect(wrong.correct).toBe(false);
@@ -666,6 +705,10 @@ describe('QuizRoomsService — game flow + scoring', () => {
       m.service.submitAnswer(HOST, roomId, 99, 'Correct EN'),
     ).rejects.toThrow('round_mismatch: expected 1, got 99');
 
+    // Past the pre-round countdown, answers are accepted.
+    const doc = roomDoc(m, roomId);
+    const round = (doc.rounds as Record<string, unknown>[])[0];
+    round.startedAt = new Date();
     await m.service.submitAnswer(HOST, roomId, 1, 'Correct EN');
     await expect(
       m.service.submitAnswer(HOST, roomId, 1, 'Correct EN'),
@@ -675,6 +718,9 @@ describe('QuizRoomsService — game flow + scoring', () => {
   it('a late answer after all-but-one answered is auto-locked at 0', async () => {
     const m = makeFakeModels();
     const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
+    const doc0 = roomDoc(m, roomId);
+    const round0 = (doc0.rounds as Record<string, unknown>[])[0];
+    round0.startedAt = new Date(); // past the pre-round countdown
     await m.service.submitAnswer(HOST, roomId, 1, 'Distractor1 EN'); // wrong, 1/3
     // A player leaving mid-round shrinks the denominator: now 1 of
     // the remaining 2 has answered, so the next attempt hits the
@@ -723,6 +769,9 @@ describe('QuizRoomsService — game flow + scoring', () => {
   it('server timer ends the round: unanswered players get autoLocked rows', async () => {
     const m = makeFakeModels();
     const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
+    const docPre = roomDoc(m, roomId);
+    const roundPre = (docPre.rounds as Record<string, unknown>[])[0];
+    roundPre.startedAt = new Date(); // past the pre-round countdown
     await m.service.submitAnswer(HOST, roomId, 1, 'Correct EN');
 
     const doc = roomDoc(m, roomId);

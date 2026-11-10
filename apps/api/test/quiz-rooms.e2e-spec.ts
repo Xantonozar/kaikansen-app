@@ -421,6 +421,27 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     expect(theme.options).toContain('Correct EN');
     expect(JSON.stringify(startPayload)).not.toContain('correctAnswer');
 
+    // Pre-round countdown (owner design, 2026-11-10): the
+    // payload carries the countdown and a startedAt 5s out —
+    // the answer window opens there, not at the broadcast.
+    expect(startPayload.countdownSeconds).toBe(5);
+    const windowOpensAt = Date.parse(startPayload.startedAt as string);
+    expect(windowOpensAt).toBeGreaterThan(Date.now());
+    // An answer during the countdown is refused by the server.
+    const early = await emitAck(guest, 'room:answer', {
+      roomId,
+      roundNumber: 1,
+      submittedAnswer: 'Correct EN',
+    });
+    expect(early).toMatchObject({
+      success: false,
+      error: 'Round has not started yet',
+    });
+    // Wait out the countdown; from startedAt the window is open.
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.max(0, windowOpensAt - Date.now()) + 100),
+    );
+
     // Guest answers correctly and instantly; the host (last
     // remaining player in a party) is auto-locked and the game ends.
     const guestEnded = waitFor(guest, 'room:round-ended');
@@ -458,7 +479,7 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     const hostRankPayload = (await hostRank) as unknown as Record<string, unknown>;
     expect(hostRankPayload).toMatchObject({ userId: HOST, rpAfter: 10 }); // party 2nd place
     expect(models.historyRows).toHaveLength(2);
-  }, 20000);
+  }, 30000);
 
   it('server timer ends an unanswered round on its own', async () => {
     const host = await connect(tokenFor(HOST, 'host'));
@@ -484,7 +505,8 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     await emitAck(host, 'room:ready', { roomId });
     await emitAck(guest, 'room:ready', { roomId });
 
-    const endedPromise = waitFor(guest, 'room:round-ended', () => true, 8000);
+    // The round now ends at countdown (5s) + the 1s window.
+    const endedPromise = waitFor(guest, 'room:round-ended', () => true, 15000);
     const started = await emitAck(host, 'room:start', { roomId });
     expect(started.success).toBe(true);
 
@@ -493,7 +515,7 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     const answers = ended.answers as Record<string, unknown>[];
     expect(answers).toHaveLength(2);
     expect(answers.every((a) => a.autoLocked === true)).toBe(true);
-  }, 20000);
+  }, 30000);
   it('room:list-public serves the lobby discovery list (Slice 5)', async () => {
     const host = await connect(tokenFor(HOST, 'host'));
     const guest = await connect(tokenFor(GUEST, 'guest'));

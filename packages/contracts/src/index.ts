@@ -806,6 +806,27 @@ export interface SoloAnswerRequest {
   answer: string | null;
 }
 
+/**
+ * Response of POST /quiz/solo/games/:gameId/playback-started.
+ *
+ * The solo answer window opens when the question's audio ACTUALLY
+ * starts playing, not when the question was drawn (owner report,
+ * 2026-11-10: load time was eating the player's 20s). The client
+ * calls the endpoint the moment playback begins — or the moment
+ * playback is known to be impossible (every candidate failed),
+ * which ends the media wait the same way. The server stamps the
+ * moment on its own clock (idempotent: the first call for the live
+ * question wins) and measures the answer from the draw time plus
+ * the load time, credited up to a cap (see the API's
+ * SOLO_LOAD_CREDIT_CAP_MS) so a stalled signal can't buy unlimited
+ * thinking time. A game whose client never calls it is measured
+ * from the draw, exactly as before.
+ */
+export interface SoloPlaybackStartedResponse {
+  /** ISO timestamp the server recorded for the playback start. */
+  playbackStartedAt: string;
+}
+
 /** Full theme reveal shown after answering (the web's post-answer reveal). */
 export interface SoloAnswerReveal {
   slug: string;
@@ -1006,6 +1027,19 @@ export interface PublicRoomRequest {
   maxPlayers?: number;
 }
 
+/**
+ * The pre-round countdown (owner design, 2026-11-10): every round
+ * opens with a 5-4-3-2-1 countdown while the clients preload the
+ * round's audio in the background; at 0 the audio starts and the
+ * answer window opens. The server stamps the round's `startedAt`
+ * this many seconds ahead, so the countdown is already inside the
+ * round timing — the server's answer window and round timer both
+ * run from `startedAt`, and answers submitted before it are
+ * refused. Clients derive the countdown from `startedAt` alone
+ * (no per-client drift).
+ */
+export const ROUND_COUNTDOWN_SECONDS = 5;
+
 /** Server → clients `room:round-started` (the web Pusher payload's shape). */
 export interface RoundStartedEvent {
   round: number;
@@ -1015,8 +1049,11 @@ export interface RoundStartedEvent {
     mediaCandidates: string[];
     options: string[];
   };
+  /** ISO timestamp the answer window opens (countdown end). */
   startedAt: string;
   timeLimitSeconds: number;
+  /** The pre-round countdown length (ROUND_COUNTDOWN_SECONDS). */
+  countdownSeconds: number;
 }
 
 /** Server → clients `room:player-answered`. */

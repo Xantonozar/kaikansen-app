@@ -6,13 +6,14 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import type { Model, Types } from 'mongoose';
-import type {
-  CreateRoomRequest,
-  PublicRoomListItem,
-  PublicRoomRequest,
-  QuizRoomAck,
-  QuizRoomPlayer,
-  QuizRoomState,
+import {
+  ROUND_COUNTDOWN_SECONDS,
+  type CreateRoomRequest,
+  type PublicRoomListItem,
+  type PublicRoomRequest,
+  type QuizRoomAck,
+  type QuizRoomPlayer,
+  type QuizRoomState,
 } from '@kaikansen/contracts';
 import { User, type UserDocument } from '../auth/user.schema';
 import { Favorite, type FavoriteDocument } from '../library/favorite.schema';
@@ -135,6 +136,17 @@ function intersectSets<T>(left: Set<T>, right: Set<T>): Set<T> {
  *   SERVER-side from the round's startedAt; correct →
  *   +secondsRemaining, wrong → −secondsRemaining; the first
  *   correct answer in a party round earns +10 × playerCount.
+ * - Pre-round countdown (owner design, 2026-11-10): every round
+ *   opens with a ROUND_COUNTDOWN_SECONDS (5) countdown while
+ *   the clients preload the round's audio; at 0 the audio and
+ *   the answer window start together. The round's startedAt is
+ *   stamped that far in the future, so the measurement above
+ *   and the server round timer both run from the countdown's
+ *   end with no extra bookkeeping — and an answer submitted
+ *   during the countdown is refused ('Round has not started
+ *   yet'), never scored. The web has no countdown; its clients
+ *   start the clip and the clock together at broadcast time
+ *   and eat the load latency (the owner's report).
  *   The all-but-one auto-lock (with the duel exception: the
  *   last duelist is only locked once a correct answer exists)
  *   is ported in both its pre-answer and post-answer forms.
@@ -1274,6 +1286,15 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       room.settings.guessType,
     );
 
+    // The answer window opens when the pre-round countdown ends
+    // (owner design, 2026-11-10): startedAt is stamped
+    // ROUND_COUNTDOWN_SECONDS ahead, and every consumer — the
+    // scoring measurement, the server round timer, the clients'
+    // countdown + ring — derives from that one timestamp.
+    const startedAt = new Date(
+      Date.now() + ROUND_COUNTDOWN_SECONDS * 1000,
+    );
+
     const round = {
       roundNumber,
       themeId: String(theme._id),
@@ -1285,7 +1306,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         ...(theme.animeTitleAlternative ?? []),
       ].filter((v): v is string => typeof v === 'string' && v.length > 0),
       options,
-      startedAt: new Date(),
+      startedAt,
       endedAt: null,
       animeTitle: theme.animeTitle ?? null,
       animeTitleEnglish: theme.animeTitleEnglish ?? null,
@@ -1321,9 +1342,16 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       },
       startedAt: round.startedAt.toISOString(),
       timeLimitSeconds: room.settings.timeLimitSeconds || 30,
+      countdownSeconds: ROUND_COUNTDOWN_SECONDS,
     });
 
-    this.armRoundTimer(String(room._id), room.settings.timeLimitSeconds || 30);
+    // The server timer covers the countdown PLUS the window:
+    // the round ends timeLimitSeconds after startedAt, not
+    // after the broadcast.
+    this.armRoundTimer(
+      String(room._id),
+      ROUND_COUNTDOWN_SECONDS + (room.settings.timeLimitSeconds || 30),
+    );
   }
 
   /**
@@ -1387,6 +1415,14 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       const round = room.rounds[room.currentRound - 1];
       if (!round || round.endedAt) {
         throw new RoomActionError('Round already ended');
+      }
+      // Pre-round countdown (owner, 2026-11-10): the answer
+      // window has not opened yet — the attempt is refused
+      // outright, never recorded, never auto-locked. Clients
+      // can't submit through the UI during the countdown; this
+      // is the enforcement behind it.
+      if (new Date(round.startedAt).getTime() > Date.now()) {
+        throw new RoomActionError('Round has not started yet');
       }
       if (round.answers.some((a) => a.userId === userId)) {
         throw new RoomActionError('Already answered');

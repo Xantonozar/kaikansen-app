@@ -164,6 +164,43 @@ export function secondsRemainingAt(
 }
 
 /* ------------------------------------------------------------------ */
+/* Solo playback-start timing (owner report, 2026-11-10): the solo    */
+/* question's audio loads async, and measuring from the draw made     */
+/* the load time eat the player's 20s on both clocks. The answer      */
+/* window now opens when playback ACTUALLY starts: the client         */
+/* signals that moment, the server stamps it on its own clock, and    */
+/* the measurement starts at draw + credited load. The credit is      */
+/* capped — a client that stalls its signal (the clip is already      */
+/* audible while it waits) can buy at most the cap, never an          */
+/* unbounded pause. No signal at all (older clients, a player who     */
+/* answers before the media resolves) keeps the draw-time             */
+/* measurement, exactly as before.                                    */
+/* ------------------------------------------------------------------ */
+
+/** Max load time credited to a solo question's answer window. */
+export const SOLO_LOAD_CREDIT_CAP_MS = 5000;
+
+/** The load time credited toward a solo question's start, in ms. */
+export function creditedLoadMs(
+  startedAt: Date,
+  playbackStartedAt: Date | null | undefined,
+): number {
+  if (!playbackStartedAt) return 0;
+  const raw = playbackStartedAt.getTime() - startedAt.getTime();
+  return Math.min(Math.max(0, raw), SOLO_LOAD_CREDIT_CAP_MS);
+}
+
+/** The moment a solo question's answer window effectively opened. */
+export function effectiveQuestionStart(
+  startedAt: Date,
+  playbackStartedAt: Date | null | undefined,
+): Date {
+  return new Date(
+    startedAt.getTime() + creditedLoadMs(startedAt, playbackStartedAt),
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Multiplayer scoring — app/api/quiz/room/answer/route.ts:            */
 /* correct → base = +secondsRemaining; wrong → base =                  */
 /* −secondsRemaining (negative scoring is real); party-only first-     */

@@ -16,6 +16,7 @@ import {
   type QuizLeaderboardResponse,
   type SoloAnswerResponse,
   type SoloGameState,
+  type SoloPlaybackStartedResponse,
   type SoloQuestion,
 } from '@kaikansen/contracts';
 import { User, type UserDocument } from '../auth/user.schema';
@@ -32,6 +33,7 @@ import { QuizAttempt, type QuizAttemptDocument } from './quiz-attempt.schema';
 import {
   buildSoloOptions,
   distractorFilterFor,
+  effectiveQuestionStart,
   getThemeValue,
   secondsRemainingAt,
   soloScoreFor,
@@ -76,6 +78,14 @@ interface SoloSession {
     options: string[];
     correctValue: string;
     startedAt: Date;
+    /**
+     * When the client reported the question's audio actually
+     * starting (or known-unplayable) — the answer window opens at
+     * startedAt + the credited load (see markPlaybackStarted).
+     * Null until signalled; the measurement then falls back to
+     * the draw time, as before this change.
+     */
+    playbackStartedAt: Date | null;
     index: number;
   } | null;
   lastTouchedAt: number;
@@ -145,6 +155,17 @@ interface SoloModels {
  * 4. Games require auth (the attempts and library pool are
  *    per-user; the web's anonymous attempts — userId null —
  *    remain possible only from the web).
+ * 5. The answer window opens at PLAYBACK start, not at the draw
+ *    (owner report, 2026-11-10: the async audio load was eating
+ *    the player's 20s on both the client's ring and this
+ *    measurement). The client signals the moment via
+ *    markPlaybackStarted; the stamp is taken on this server's
+ *    clock and the credited load is capped
+ *    (SOLO_LOAD_CREDIT_CAP_MS), so the change removes load
+ *    latency from the measurement without handing the client a
+ *    number to forge. No signal → measured from the draw, as
+ *    before. The web measures in the browser entirely, so it
+ *    has no equivalent either way.
  *
  * Models are OPTIONAL like everywhere else in this API: booted
  * without MONGODB_URI, every method answers 503.
@@ -305,6 +326,7 @@ export class SoloQuizService {
       options,
       correctValue: getThemeValue(correctTheme, session.quizType),
       startedAt: new Date(),
+      playbackStartedAt: null,
       index,
     };
     session.usedThemeIds.push(String(correctTheme._id));
@@ -395,8 +417,9 @@ export class SoloQuizService {
     if (!session.current) {
       return { ...this.toState(gameId, session), gameOver: true };
     }
-    // Re-serve the live question WITHOUT its start time changing:
-    // the countdown runs from the original draw.
+    // Re-serve the live question WITHOUT its stamps changing:
+    // the measurement keeps running from the original draw and
+    // the recorded playback start, exactly as first served.
     return {
       ...this.toState(gameId, session),
       gameOver: false,
@@ -421,6 +444,37 @@ export class SoloQuizService {
     };
   }
 
+  /**
+   * POST /quiz/solo/games/:gameId/playback-started — the client
+   * signals that the live question's media wait has ended: the
+   * audio actually started playing, or every candidate failed
+   * (the question is answerable either way; what ends is the
+   * load eating the clock — owner report, 2026-11-10).
+   *
+   * The stamp is the SERVER's clock at signal time — the client
+   * reports no number, so there is nothing to forge but the
+   * timing of the call itself, and the credited load is capped
+   * (SOLO_LOAD_CREDIT_CAP_MS in quiz-game.utils) so even that
+   * buys at most a few seconds. Idempotent per question: the
+   * first signal wins, repeats return the original stamp.
+   */
+  async markPlaybackStarted(
+    userId: string,
+    gameId: string,
+  ): Promise<SoloPlaybackStartedResponse> {
+    this.requireModels();
+    const session = this.findSession(userId, gameId);
+    const current = session.current;
+    if (!current) {
+      throw new BadRequestException('Game already finished');
+    }
+    if (!current.playbackStartedAt) {
+      current.playbackStartedAt = new Date();
+      session.lastTouchedAt = Date.now();
+    }
+    return { playbackStartedAt: current.playbackStartedAt.toISOString() };
+  }
+
   async submitAnswer(
     userId: string,
     gameId: string,
@@ -434,8 +488,11 @@ export class SoloQuizService {
     }
 
     const now = new Date();
+    // Measured from the moment the audio actually started (the
+    // draw + the credited load), not from the draw alone — the
+    // load no longer eats the player's window (owner, 2026-11-10).
     const secondsRemaining = secondsRemainingAt(
-      current.startedAt,
+      effectiveQuestionStart(current.startedAt, current.playbackStartedAt),
       SOLO_TIME_LIMIT_SECONDS,
       now,
     );

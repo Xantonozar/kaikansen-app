@@ -267,6 +267,15 @@ process.env.JWT_SECRET = E2E_SECRET;
     expect(JSON.stringify(created.body)).not.toContain('correctValue');
     const gameId = created.body.gameId as string;
 
+    // The playback-start signal (owner timing fix, 2026-11-10):
+    // the client reports the audio actually started; the answer
+    // window is measured from there, not the draw.
+    const signalled = await http
+      .post(`/quiz/solo/games/${gameId}/playback-started`)
+      .set(auth())
+      .expect(200);
+    expect(typeof signalled.body.playbackStartedAt).toBe('string');
+
     const answered = await http
       .post(`/quiz/solo/games/${gameId}/answers`)
       .set(auth())
@@ -302,6 +311,10 @@ process.env.JWT_SECRET = E2E_SECRET;
   it('404s unknown games', async () => {
     await request(app.getHttpServer())
       .get('/quiz/solo/games/nope')
+      .set(auth())
+      .expect(404);
+    await request(app.getHttpServer())
+      .post('/quiz/solo/games/nope/playback-started')
       .set(auth())
       .expect(404);
   });

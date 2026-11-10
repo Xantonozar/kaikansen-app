@@ -320,6 +320,9 @@ describe('QuizModule wiring — multiplayer rank application (Bug 2)', () => {
     const room = roomDocs.find((r) => String(r._id) === roomId)!;
     const round = (room.rounds as Record<string, unknown>[])[0];
     const correctAnswer = round.correctAnswer as string;
+    // The round opens with the 5s pre-round countdown (owner,
+    // 2026-11-10): move past it so answers are accepted.
+    round.startedAt = new Date();
 
     // Duel semantics: the host's correct first answer auto-locks
     // the guest and ends the (single-round) game immediately.

@@ -339,6 +339,88 @@ describe('SoloQuizService — game flow', () => {
   });
 });
 
+describe('SoloQuizService — playback-start timing (owner fix, 2026-11-10)', () => {
+  /** Reach the live session to rewind its draw stamp. */
+  function currentOf(service: SoloQuizService, gameId: string) {
+    const sessions = (
+      service as unknown as {
+        sessions: Map<
+          string,
+          { current: { startedAt: Date; playbackStartedAt: Date | null } | null }
+        >;
+      }
+    ).sessions;
+    return sessions.get(gameId)!.current!;
+  }
+
+  it('measures the answer from playback start, not the draw', async () => {
+    const { service, models } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    // The question was drawn 2s ago; the audio only started now —
+    // those 2s of load must not eat the player's window.
+    currentOf(service, state.gameId).startedAt = new Date(Date.now() - 2000);
+
+    const signal = await service.markPlaybackStarted(USER_1, state.gameId);
+    expect(Date.parse(signal.playbackStartedAt)).toBeGreaterThan(Date.now() - 1000);
+
+    const res = await service.submitAnswer(USER_1, state.gameId, 'Anime 1 EN');
+    expect(res.correct).toBe(true);
+    expect(res.secondsRemaining).toBe(20); // full window at playback start
+    expect(res.scoreGained).toBe(20);
+    expect(models.attempts[0]).toMatchObject({ timeTaken: 0, score: 20 });
+  });
+
+  it('caps the credited load at 5s, however slow the signal', async () => {
+    const { service, models } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    // Drawn 12s ago, playback starts now: only 5s is credited,
+    // so the measurement effectively began 7s ago.
+    currentOf(service, state.gameId).startedAt = new Date(Date.now() - 12_000);
+
+    await service.markPlaybackStarted(USER_1, state.gameId);
+    const res = await service.submitAnswer(USER_1, state.gameId, 'Anime 1 EN');
+    expect(res.secondsRemaining).toBe(13); // 20 − (12 − 5)
+    expect(res.scoreGained).toBe(13);
+    expect(models.attempts[0]).toMatchObject({ timeTaken: 7, score: 13 });
+  });
+
+  it('without a signal the measurement stays at the draw (legacy)', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    currentOf(service, state.gameId).startedAt = new Date(Date.now() - 10_000);
+
+    const res = await service.submitAnswer(USER_1, state.gameId, 'Anime 1 EN');
+    expect(res.secondsRemaining).toBe(10);
+    expect(res.scoreGained).toBe(10);
+  });
+
+  it('the first signal wins — repeats return the original stamp', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const first = await service.markPlaybackStarted(USER_1, state.gameId);
+    const second = await service.markPlaybackStarted(USER_1, state.gameId);
+    expect(second.playbackStartedAt).toBe(first.playbackStartedAt);
+    expect(currentOf(service, state.gameId).playbackStartedAt?.toISOString()).toBe(
+      first.playbackStartedAt,
+    );
+  });
+
+  it('refuses the signal for unknown and finished games', async () => {
+    const { service } = makeService();
+    await expect(
+      service.markPlaybackStarted(USER_1, 'solo-nope'),
+    ).rejects.toThrow(NotFoundException);
+
+    const state = await service.createGame(USER_1, { quizType: 'title' });
+    for (let i = 1; i <= 10; i++) {
+      await service.submitAnswer(USER_1, state.gameId, `Song ${i}`);
+    }
+    await expect(
+      service.markPlaybackStarted(USER_1, state.gameId),
+    ).rejects.toThrow('Game already finished');
+  });
+});
+
 describe('SoloQuizService — library pool (web question route)', () => {
   it('rejects an empty library with the web’s message', async () => {
     const { service } = makeService();

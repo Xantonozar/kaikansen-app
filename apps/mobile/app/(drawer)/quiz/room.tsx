@@ -46,6 +46,7 @@ import type {
   RoundEndedEvent,
   RoundStartedEvent,
 } from '@kaikansen/contracts';
+import { ROUND_COUNTDOWN_SECONDS } from '@kaikansen/contracts';
 import { useAuth } from '../../../src/auth';
 import { fetchPlayerRanks } from '../../../src/socialApi';
 import {
@@ -130,7 +131,14 @@ const QUESTION_PROMPT: Record<RoomGuessType, string> = {
  *   owner's ruling; no media card), the per-type question, the
  *   answer cards with lock-in on answer, and the Live
  *   standings card (top 3 + the viewer's own row when they sit
- *   outside it). The design's hint line under the question
+ *   outside it). Each round OPENS with the owner's pre-round
+ *   countdown (2026-11-10): the broadcast's startedAt sits
+ *   ROUND_COUNTDOWN_SECONDS in the future, so the screen first
+ *   shows a big 5→1 count while the round's audio loads HELD in
+ *   the background (QuizAudioOnly's playAtMs); at 0 the audio
+ *   starts and the ring + answer window open together — the
+ *   server refuses answers before startedAt, so the countdown
+ *   is inside nobody's window. The design's hint line under the question
  *   ("Opening Theme 1 • Released 1995") is NOT drawn: the
  *   round-started payload carries no theme type, sequence or
  *   year, and nothing else in the round state identifies the
@@ -249,6 +257,7 @@ export default function QuizRoomScreen() {
               },
               startedAt: round.startedAt,
               timeLimitSeconds: next.settings.timeLimitSeconds,
+              countdownSeconds: ROUND_COUNTDOWN_SECONDS,
             });
             setMediaMissing(true);
           }
@@ -491,6 +500,10 @@ export default function QuizRoomScreen() {
   const onAnswer = useCallback(
     (option: string) => {
       if (!liveRound || myAnswer !== null || roundEnded) return;
+      // Pre-round countdown (owner, 2026-11-10): the answer
+      // window opens at the server's startedAt — taps before it
+      // are ignored here and refused by the server besides.
+      if (Date.parse(liveRound.startedAt) > Date.now()) return;
       // Optimistic lock-in; a failed send unlocks so the player can
       // retry while the round is still live (the error shows above).
       setMyAnswer(option);
@@ -551,6 +564,30 @@ export default function QuizRoomScreen() {
   const deadlineMs = liveRound
     ? Date.parse(liveRound.startedAt) + liveRound.timeLimitSeconds * 1000
     : 0;
+
+  // Pre-round countdown display (owner design, 2026-11-10):
+  // whole seconds until the server's startedAt — derived from
+  // that one timestamp, so every client in the room counts the
+  // same countdown. 0 once the answer window is open.
+  const [countdownLeft, setCountdownLeft] = useState(0);
+  useEffect(() => {
+    if (!liveRound) {
+      setCountdownLeft(0);
+      return;
+    }
+    const opensAt = Date.parse(liveRound.startedAt);
+    const update = () => {
+      const left = Math.max(0, Math.ceil((opensAt - Date.now()) / 1000));
+      setCountdownLeft(left);
+      return left;
+    };
+    if (update() <= 0) return;
+    const id = setInterval(() => {
+      if (update() <= 0) clearInterval(id);
+    }, 200);
+    return () => clearInterval(id);
+  }, [liveRound]);
+  const inCountdown = countdownLeft > 0;
 
   // Owner rulings: quiz questions are AUDIO-ONLY (2026-11-09 — the
   // theme's video gives the anime away on sight, so no candidate is
@@ -1000,11 +1037,15 @@ export default function QuizRoomScreen() {
             <>
               {/* Hidden audio only (owner ruling): the clip
                   plays behind no surface at all — the ring and
-                  the Playing pill below report its state. */}
+                  the Playing pill below report its state. During
+                  the pre-round countdown it LOADS but is held
+                  (playAtMs = the server's startedAt) so the whole
+                  room hears it start at 0 together. */}
               <QuizAudioOnly
                 candidates={roundAudioCandidates}
                 mediaKey={`${roomId}:${liveRound.round}`}
                 onStateChange={handleRoomAudioState}
+                playAtMs={Date.parse(liveRound.startedAt)}
               />
               {/* Players strip card (Quiz Room in-game design):
                   Avatar + answered badge + name per player, with
@@ -1087,15 +1128,28 @@ export default function QuizRoomScreen() {
                   </Text>
                 </View>
               )}
-              {/* Countdown ring + Playing pill: the ring shows
-                  the round's real remaining time (the server's
-                  startedAt + limit, as before); the pill reports
-                  the hidden audio's phase. The mute toggle sits
-                  at the ring's lower-right — the solo screen's
-                  placement; the mock draws none, but muting the
-                  clip is an existing capability this phase
-                  keeps (flagged in the slice report). */}
+              {/* Countdown ring + Playing pill: during the
+                  pre-round countdown a big 5→1 number stands
+                  where the ring will be (the audio is loading
+                  held behind it); from 0 the ring shows the
+                  round's real remaining time (the server's
+                  startedAt + limit, as before) and the pill
+                  reports the hidden audio's phase. The mute
+                  toggle sits at the ring's lower-right — the
+                  solo screen's placement; the mock draws none,
+                  but muting the clip is an existing capability
+                  this phase keeps (flagged in the slice report). */}
               <View style={styles.ringBlock}>
+                {inCountdown ? (
+                  <View style={styles.countdownWrap}>
+                    <Text style={styles.countdownNumber}>
+                      {countdownLeft}
+                    </Text>
+                    <Text style={styles.countdownCaption}>
+                      Get ready
+                    </Text>
+                  </View>
+                ) : (
                 <View style={styles.ringWrap}>
                   <CountdownRing
                     variant="room"
@@ -1144,6 +1198,7 @@ export default function QuizRoomScreen() {
                       </Pressable>
                     )}
                 </View>
+                )}
                 <View style={styles.playingPill}>
                   <View style={styles.waveBars}>
                     <View style={[styles.waveBar, styles.waveBarA]} />
@@ -1166,7 +1221,7 @@ export default function QuizRoomScreen() {
                 variant="room"
                 options={liveRound.theme.options}
                 onSelect={onAnswer}
-                disabled={myAnswer !== null}
+                disabled={myAnswer !== null || inCountdown}
                 selected={myAnswer}
               />
               {/* The mock's submitted state carries no result
@@ -2293,6 +2348,27 @@ const createStyles = (theme: Theme) =>
     },
     ringWrap: {
       position: 'relative',
+    },
+    /* Pre-round countdown (owner, 2026-11-10): the big number
+       stands in the ring's footprint while the audio preloads. */
+    countdownWrap: {
+      height: 112,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    countdownNumber: {
+      fontFamily: fontFamilies.display,
+      fontSize: 64,
+      lineHeight: 68,
+      color: theme.accent,
+    },
+    countdownCaption: {
+      fontFamily: fontFamilies.bodyStrong,
+      fontSize: 10,
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+      color: theme.secondary,
+      marginTop: 2,
     },
     ringMute: {
       position: 'absolute',
