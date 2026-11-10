@@ -9,16 +9,16 @@ import type { ImageSourcePropType } from 'react-native';
  * surface and every device, with no server state.
  */
 export const DEFAULT_AVATARS: ImageSourcePropType[] = [
-  require('../assets/default-avatars/avatar-01.png'),
-  require('../assets/default-avatars/avatar-02.png'),
-  require('../assets/default-avatars/avatar-03.png'),
-  require('../assets/default-avatars/avatar-04.png'),
-  require('../assets/default-avatars/avatar-05.png'),
-  require('../assets/default-avatars/avatar-06.png'),
-  require('../assets/default-avatars/avatar-07.png'),
-  require('../assets/default-avatars/avatar-08.png'),
-  require('../assets/default-avatars/avatar-09.png'),
-  require('../assets/default-avatars/avatar-10.png'),
+  require('../assets/default-avatars/avatar-01.webp'),
+  require('../assets/default-avatars/avatar-02.webp'),
+  require('../assets/default-avatars/avatar-03.webp'),
+  require('../assets/default-avatars/avatar-04.webp'),
+  require('../assets/default-avatars/avatar-05.webp'),
+  require('../assets/default-avatars/avatar-06.webp'),
+  require('../assets/default-avatars/avatar-07.webp'),
+  require('../assets/default-avatars/avatar-08.webp'),
+  require('../assets/default-avatars/avatar-09.webp'),
+  require('../assets/default-avatars/avatar-10.webp'),
 ];
 
 /**

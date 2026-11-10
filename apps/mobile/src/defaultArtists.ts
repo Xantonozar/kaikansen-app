@@ -6,9 +6,10 @@ import type { ImageSourcePropType } from 'react-native';
  * order 2026-11-10: artists get real defaults like users do, not
  * an initial-letter disc). The images are hosted on Cloudinary
  * (cloud "chirkut", folder kaikansen/default-artists): the same
- * files as the bundled set they replaced (assets/default-artists/,
- * byte-identical to the hosted copies, verified 2026-11-10). The
- * bundled PNGs remain in the repo but are no longer referenced.
+ * files as the bundled set they replaced (byte-identical to the
+ * hosted copies, verified 2026-11-10). The bundled PNGs were
+ * deleted from the repo 2026-11-11 (perf problem 14) — the hosted
+ * copies are the only ones now.
  *
  * The pick is deterministic: an FNV-1a hash of the artist slug
  * modulo the set size, so the same artist always gets the same
