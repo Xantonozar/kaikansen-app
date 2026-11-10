@@ -29,6 +29,19 @@ export interface SearchReadinessProbe {
 }
 
 /**
+ * DI token for the readiness probe. Interfaces are erased at
+ * runtime, so a constructor param typed `SearchReadinessProbe`
+ * gives Nest NO token to resolve — the dependency silently
+ * arrives undefined under @Optional (the 2026-11-10 production
+ * hotfix: module-wired search ran probe-less and served empty
+ * 'atlas' answers while no indexes existed). ThemesService
+ * injects the probe through this token, and ThemesModule binds
+ * it to SearchIndexService with a NON-optional provider, so a
+ * missing binding fails boot instead of degrading silently.
+ */
+export const SEARCH_READINESS_PROBE = 'SEARCH_READINESS_PROBE';
+
+/**
  * One collection's search-index state, as `listSearchIndexes`
  * reports it (defensively normalised — see currentStatus).
  */

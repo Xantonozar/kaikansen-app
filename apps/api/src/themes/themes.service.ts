@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Inject,
   Injectable,
   NotFoundException,
   Optional,
@@ -37,6 +38,7 @@ import {
 } from '../sync/artist-cache.schema';
 import { ThemeCache, type ThemeCacheDocument } from './theme-cache.schema';
 import {
+  SEARCH_READINESS_PROBE,
   SearchIndexService,
   type SearchReadinessProbe,
 } from './search-index.service';
@@ -266,12 +268,24 @@ export class ThemesService {
     private readonly userModel?: Model<UserDocument>,
     /**
      * The Atlas Search readiness probe (index exists + queryable
-     * + READY, cached ~60s). Optional like the models: unit specs
-     * construct this service positionally without it, and "no
-     * probe" must behave exactly like "no index is ready" — the
-     * regex path — never like readiness.
+     * + READY, cached ~60s), bound via the SEARCH_READINESS_PROBE
+     * token: the param's type is an interface, which has NO
+     * runtime token — without the explicit @Inject the production
+     * module silently constructed this service probe-less
+     * (@Optional swallowed the unresolvable dependency) and
+     * search served empty 'atlas' answers with no indexes in
+     * existence (hotfix 2026-11-10; regression:
+     * test/search-probe-di.e2e-spec.ts). The token provider in
+     * ThemesModule is deliberately NOT optional: if the binding
+     * is ever dropped, boot fails loudly instead.
+     *
+     * @Optional stays for the POSITIONAL constructions only
+     * (unit specs pass a stub or nothing as the 5th argument);
+     * "no probe" there keeps the pre-probe behaviour the specs
+     * assert — see atlasReady.
      */
     @Optional()
+    @Inject(SEARCH_READINESS_PROBE)
     private readonly searchIndexes?: SearchReadinessProbe,
   ) {}
 

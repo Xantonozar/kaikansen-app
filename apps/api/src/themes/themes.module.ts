@@ -10,7 +10,10 @@ import {
   ArtistCacheSchema,
 } from '../sync/artist-cache.schema';
 import { ThemeCache, ThemeCacheSchema } from './theme-cache.schema';
-import { SearchIndexService } from './search-index.service';
+import {
+  SEARCH_READINESS_PROBE,
+  SearchIndexService,
+} from './search-index.service';
 import { ThemesController } from './themes.controller';
 import { ThemesService } from './themes.service';
 
@@ -43,7 +46,19 @@ export class ThemesModule {
           ]
         : [],
       controllers: [ThemesController],
-      providers: [ThemesService, SearchIndexService],
+      providers: [
+        ThemesService,
+        SearchIndexService,
+        // ThemesService's probe param is interface-typed, so it
+        // injects through this token (see search-index.service.ts
+        // for the probe-less production incident). Deliberately
+        // NOT optional: dropping this binding must fail boot
+        // loudly, never silently serve probe-less search again.
+        {
+          provide: SEARCH_READINESS_PROBE,
+          useExisting: SearchIndexService,
+        },
+      ],
       // ThemesService (the search readiness wiring) and
       // SearchIndexService (probe + ensure) are consumed by the
       // internal search-indexes module.
