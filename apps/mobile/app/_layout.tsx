@@ -23,6 +23,7 @@ import { JetBrainsMono_500Medium } from '@expo-google-fonts/jetbrains-mono';
 import { ThemeProvider, useTheme, useThemeMode } from '../src/theme-context';
 import { AuthProvider } from '../src/auth';
 import { PlaybackProvider } from '../src/playback-context';
+import { ConnectivityProvider } from '../src/connectivity';
 
 /**
  * Root layout. Loads the DESIGN.md font families (Outfit / Inter /
@@ -36,6 +37,14 @@ import { PlaybackProvider } from '../src/playback-context';
  * mini player can float over tab and pushed screens. The Shell below
  * consumes the theme so the navigator chrome and the status bar
  * re-skin with the mode.
+ *
+ * ConnectivityProvider (offline screen, 2026-11-11) sits inside the
+ * playback provider and owns the NetInfo subscription + the
+ * servability claims the OfflineGate in the drawer shell folds; it
+ * mounts at the root so the signed-in cold start (auth restore
+ * stuck behind a dead network) is covered too. Session restore is
+ * not gated on connectivity — the auth provider's own flow is
+ * untouched.
  */
 export default function RootLayout() {
   const [fontsLoaded, fontError] = useFonts({
@@ -63,7 +72,9 @@ export default function RootLayout() {
     <ThemeProvider>
       <AuthProvider>
         <PlaybackProvider>
-          <Shell />
+          <ConnectivityProvider>
+            <Shell />
+          </ConnectivityProvider>
         </PlaybackProvider>
       </AuthProvider>
     </ThemeProvider>

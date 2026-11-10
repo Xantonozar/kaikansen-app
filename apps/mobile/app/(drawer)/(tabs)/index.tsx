@@ -25,6 +25,7 @@ import {
   wasCacheServed,
 } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
+import { useServableClaim } from '../../../src/connectivity';
 import { useFavorites } from '../../../src/favoritesStore';
 import { fetchHistory } from '../../../src/libraryApi';
 import {
@@ -132,6 +133,22 @@ export default function HomeScreen() {
      this (not on home==null) so a cache paint never shows the
      full-screen gate, while a NETWORK first load still does. */
   const [homeServed, setHomeServed] = useState(false);
+  /* Offline screen (2026-11-11): while Home has real content on
+     screen — cache-served or network — it can serve the user
+     offline, so the takeover never covers it. The claim follows
+     focus (released on blur, so it never outlives this surface)
+     and the live homeServed flag: a COLD Home (nothing served,
+     e.g. launch while offline) claims nothing and the gate's
+     takeover is exactly its case. A network answer that lands
+     later (homeServed without cache) claims too — the content on
+     screen is honest either way. */
+  const servableClaim = useServableClaim();
+  useFocusEffect(
+    useCallback(() => {
+      servableClaim.claim(homeServed);
+      return () => servableClaim.release();
+    }, [servableClaim, homeServed]),
+  );
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('ALL');
   const [feed, setFeed] = useState<FriendsActivityItem[] | null>(null);
   const [feedFailed, setFeedFailed] = useState(false);

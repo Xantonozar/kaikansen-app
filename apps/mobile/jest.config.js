@@ -22,5 +22,9 @@ module.exports = {
     // through src/expoImage.ts. Pure-logic suites never render,
     // so the component maps to a stub (perf problem 11).
     '^expo-image$': '<rootDir>/jest.expo-image-stub.js',
+    // @react-native-community/netinfo is a native module reached
+    // through src/netInfo.ts by the connectivity provider. The
+    // stub keeps an "unknown" posture in suites (offline screen).
+    '^@react-native-community/netinfo$': '<rootDir>/jest.netinfo-stub.js',
   },
 };

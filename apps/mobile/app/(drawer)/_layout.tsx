@@ -2,6 +2,7 @@ import { StyleSheet, useWindowDimensions, View } from 'react-native';
 import { Drawer } from 'expo-router/drawer';
 import { AppDrawerContent } from '../../src/components/AppDrawerContent';
 import { MiniPlayer } from '../../src/components/MiniPlayer';
+import { OfflineGate } from '../../src/components/OfflineGate';
 import { useTheme } from '../../src/theme-context';
 
 /**
@@ -16,6 +17,12 @@ import { useTheme } from '../../src/theme-context';
  * The mini player (layout-fidelity Slice 1) overlays the bottom of
  * pushed screens from here; it gates itself off tab routes (the
  * TabBar mount covers those), the player route and quiz play.
+ *
+ * The offline gate (offline screen, 2026-11-11) overlays everything
+ * from here when the device is definitively offline and the
+ * current surface cannot serve — see src/components/OfflineGate.
+ * It lives in this shell (not the root stack) so the pre-auth
+ * surfaces stay structurally outside it.
  */
 export default function DrawerLayout() {
   const theme = useTheme();
@@ -89,6 +96,7 @@ export default function DrawerLayout() {
       />
     </Drawer>
     <MiniPlayer placement="overlay" />
+    <OfflineGate />
     </View>
   );
 }
