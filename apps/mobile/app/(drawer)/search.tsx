@@ -113,7 +113,10 @@ function ArtistRowAvatar({
  *   popular rail (fetchHome): the rows are that rail, and the
  *   chips are the anime titles and artist names those popular
  *   themes carry, deduped — real catalogue data, no invented
- *   trends. A section with no data simply doesn't render.
+ *   trends. A section with no data simply doesn't render. The
+ *   landing rows carry the mock's bare OP/ED tag beside the
+ *   title (ThemeRow's `titleChip` opt-in, from search.html —
+ *   badge audit 2026-11-10).
  * - Results: the groups GET /search serves, in the mock's order —
  *   Themes (ThemeRow's `search` variant: 48pt cover, one-line
  *   title, artist + OP/ED chip, play disc + ⋮ — the results mock
@@ -476,6 +479,7 @@ export default function SearchScreen() {
                   <ThemeRow
                     key={item.slug}
                     item={item}
+                    titleChip
                     onPress={() => router.push(`/theme/${item.slug}`)}
                     onPlay={() => playFromList(popular, index)}
                     saved={favorites.isFavorite(item.slug)}

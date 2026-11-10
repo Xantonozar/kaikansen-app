@@ -122,6 +122,26 @@ import { ThemeRowMenu } from './ThemeRowMenu';
  * a cluster of only the play disc (32pt, 19pt glyph) and the ⋮
  * (20pt in the secondary). The results mock draws no heart —
  * saving lives in the ⋮ menu, as on the Season/Anime/Artist rows.
+ *
+ * An eighth opt-in, `titleChip` (Search landing "Popular right
+ * now" rows, measured from search.html), keeps the default row
+ * but moves the OP/ED tag up beside the title — that mock draws
+ * the bare type ("OP", no sequence) as a small 6px-radius tag
+ * after the one-line title, with no chip in the meta line. The
+ * title truncates to one line beside the tag (the Season/Anime
+ * variants' recorded law-#9 deviation). Owner-ordered badge
+ * audit, 2026-11-10: every other badge surface was checked
+ * against its mock — Artist (bare tag in the cluster before the
+ * play disc), Anime ("OP 1" beside the title), Season (bare tag
+ * beside the title) and Search results ("OP 1" in the meta line)
+ * already match; the Library mocks (Saved/Recent/AniList),
+ * Playlist, Downloads, Theme Detail Similar, User Profile Top
+ * ratings, Home Popular and Social draw NO badge, and their rows
+ * correctly carry none. The same audit fixed the default chip's
+ * label: it printed the stored sequence unconditionally ("OP 0"
+ * for a sequence-0 theme) — it now falls back to the bare type
+ * when the sequence is 0, the convention the Anime/Search
+ * variants already follow.
  */
 export function ThemeRow({
   item,
@@ -142,6 +162,7 @@ export function ThemeRow({
   anime = false,
   artist = false,
   search = false,
+  titleChip = false,
 }: {
   item: ThemeSummary;
   onPress?: () => void;
@@ -172,6 +193,8 @@ export function ThemeRow({
   artist?: boolean;
   /** The Search typed-results rows' mock anatomy (see header). */
   search?: boolean;
+  /** Search landing anatomy: OP/ED tag beside the title (see header). */
+  titleChip?: boolean;
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -350,16 +373,35 @@ export function ThemeRow({
           </>
         ) : (
           <>
-            {/* Design law #9: long titles wrap (2 lines), never
-                ellipsis-truncate next to the row's chips/tiles. */}
-            <Text style={styles.song} numberOfLines={2}>
-              {item.songTitle}
-            </Text>
+            {titleChip ? (
+              <>
+                {/* Search landing anatomy (search.html): the bare
+                    OP/ED tag beside the one-line title, no chip in
+                    the meta line. */}
+                <View style={styles.titleLineDefault}>
+                  <Text
+                    style={[styles.song, styles.songTitleChip]}
+                    numberOfLines={1}
+                  >
+                    {item.songTitle}
+                  </Text>
+                  <View style={styles.typeChipTitle}>
+                    <Text style={styles.typeTitle}>{item.type}</Text>
+                  </View>
+                </View>
+              </>
+            ) : (
+              /* Design law #9: long titles wrap (2 lines), never
+                 ellipsis-truncate next to the row's chips/tiles. */
+              <Text style={styles.song} numberOfLines={2}>
+                {item.songTitle}
+              </Text>
+            )}
             <View style={styles.metaRow}>
               <Text style={styles.meta} numberOfLines={1}>
                 {metaText ?? artistText}
               </Text>
-              {typeChip && !playlist && (
+              {typeChip && !playlist && !titleChip && (
                 <View style={styles.typeChip}>
                   <Text
                     style={[
@@ -370,7 +412,9 @@ export function ThemeRow({
                       },
                     ]}
                   >
-                    {item.type} {item.sequence}
+                    {item.sequence > 0
+                      ? `${item.type} ${item.sequence}`
+                      : item.type}
                   </Text>
                 </View>
               )}
@@ -718,6 +762,29 @@ const createStyles = (theme: Theme) =>
     ...typeStyles.caption,
     color: theme.muted,
     marginRight: spacing.xs,
+  },
+  titleLineDefault: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  songTitleChip: {
+    flexShrink: 1,
+  },
+  typeChipTitle: {
+    backgroundColor: theme.accentContainer,
+    // search.html rounds the landing tag at 6px (rounded-md) —
+    // off the radii scale, a literal citing the screen's HTML.
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  typeTitle: {
+    // search.html: 10.5px bold in the deep mauve, for OP and ED
+    // alike (the Season/Anime tag convention).
+    fontFamily: fontFamilies.bodyStrong,
+    fontSize: 10.5,
+    color: theme.accent,
   },
   typeChip: {
     backgroundColor: theme.accentContainer,
