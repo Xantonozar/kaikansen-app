@@ -638,8 +638,8 @@ describe('Social flow with mocked models (e2e)', () => {
         ladder: {
           rank: 'academy-student',
           index: 0,
-          nextRank: 'mizunoto',
-          toNext: 250,
+          nextRank: 'scout',
+          toNext: 100,
           fraction: 0,
         },
       },
@@ -721,9 +721,9 @@ describe('Social flow with mocked models (e2e)', () => {
         ladder: {
           rank: 'genin',
           index: 3,
-          nextRank: 'shinobi',
-          toNext: 500,
-          fraction: 50 / 550,
+          nextRank: 'chunin',
+          toNext: 200,
+          fraction: 50 / 250,
         },
         isFollowing: true,
       },

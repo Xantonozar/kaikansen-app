@@ -4,23 +4,24 @@ import type {
 } from '@kaikansen/contracts';
 
 /**
- * The app's 24-rank ladder (owner spec 2026-11-10) — the ONLY
- * rank system the app displays. A pure function of RP with the
- * locked thresholds; the API derives the identical standing
- * server-side (ladderForRp in the API's quiz-game.utils — the
- * two tables and their boundary tests are mirrors, keep them in
- * step). The web's 6 tiers still arrive on rank payloads (the
- * shared database's legacy field) but no app surface phrases
- * them any more; divisions are gone from display entirely.
+ * The app's 24-rank ladder — the ONLY rank system the app
+ * displays. A pure function of RP with the owner's REAL
+ * thresholds (spec RANK-RP-PLAN-2026-11-11.md, "Curve B",
+ * decided 2026-11-11, replacing the design-stage placeholders);
+ * the API derives the identical standing server-side
+ * (ladderForRp in the API's quiz-game.utils — the two tables
+ * and their boundary tests are mirrors, keep them in step).
+ * The web's 6 tiers still arrive on rank payloads (the shared
+ * database's legacy field) but no app surface phrases them any
+ * more; divisions are gone from display entirely.
  *
- * ⚠️ PROGRESS TARGET — the approved designs' rule: the bar and
- * the "N RP to X" line aim at the rank AFTER next. Every
- * owner-approved rank surface draws the sample identity (Jonin,
- * 5,340 RP) as "1,660 RP to Shogun" with a 21% bar — fraction
- * (5340−4900)/(7000−4900) = 440/2100 — naming no other target,
- * even though Ronin (5,900) sits between. Locked by the spec's
- * worked example; if it was a design slip the fix is TARGET
- * OFFSET 2 → 1 here and in the API mirror.
+ * PROGRESS TARGET (owner decision 2026-11-11): the bar and the
+ * "N RP to X" line aim at the NEXT rank — progress is measured
+ * within the current step, [current threshold, next threshold).
+ *
+ * NO FLOOR (same decision): the standing derives from current
+ * RP alone, never from a peak — an RP drop below a threshold
+ * demotes the displayed rank.
  */
 
 export interface LadderRankInfo {
@@ -43,25 +44,25 @@ export const LADDER: LadderRankInfo[] = [
   { rank: 'mizunoto', label: 'Mizunoto', source: 'Demon Slayer', min: 250, iconUrl: `${CLOUD}/v1794313742/rank-03-mizunoto.webp`, iconAsset: require('../assets/ranks/rank-03-mizunoto.webp') },
   { rank: 'genin', label: 'Genin', source: 'Naruto', min: 450, iconUrl: `${CLOUD}/v1794313742/rank-04-genin.webp`, iconAsset: require('../assets/ranks/rank-04-genin.webp') },
   { rank: 'chunin', label: 'Chunin', source: 'Naruto', min: 700, iconUrl: `${CLOUD}/v1794313742/rank-05-chunin.webp`, iconAsset: require('../assets/ranks/rank-05-chunin.webp') },
-  { rank: 'shinobi', label: 'Shinobi', source: 'Naruto', min: 1000, iconUrl: `${CLOUD}/v1794313744/rank-06-shinobi.webp`, iconAsset: require('../assets/ranks/rank-06-shinobi.webp') },
-  { rank: 'assassin', label: 'Assassin', source: 'Fate', min: 1400, iconUrl: `${CLOUD}/v1794313745/rank-07-assassin.webp`, iconAsset: require('../assets/ranks/rank-07-assassin.webp') },
-  { rank: 'firebender', label: 'Firebender', source: 'Avatar', min: 1900, iconUrl: `${CLOUD}/v1794313746/rank-08-firebender.webp`, iconAsset: require('../assets/ranks/rank-08-firebender.webp') },
-  { rank: 'kitsune', label: 'Kitsune', source: 'Naruto / folklore', min: 2500, iconUrl: `${CLOUD}/v1794313747/rank-09-kitsune.webp`, iconAsset: require('../assets/ranks/rank-09-kitsune.webp') },
-  { rank: 'lone-wolf', label: 'Lone Wolf', source: 'Lone Wolf and Cub', min: 3200, iconUrl: `${CLOUD}/v1794313748/rank-10-lone-wolf.webp`, iconAsset: require('../assets/ranks/rank-10-lone-wolf.webp') },
-  { rank: 'karasu', label: 'Karasu', source: 'Naruto', min: 4000, iconUrl: `${CLOUD}/v1794313748/rank-11-karasu.webp`, iconAsset: require('../assets/ranks/rank-11-karasu.webp') },
-  { rank: 'jonin', label: 'Jonin', source: 'Naruto', min: 4900, iconUrl: `${CLOUD}/v1794313750/rank-12-jonin.webp`, iconAsset: require('../assets/ranks/rank-12-jonin.webp') },
-  { rank: 'ronin', label: 'Ronin', source: 'Rurouni Kenshin', min: 5900, iconUrl: `${CLOUD}/v1794313751/rank-13-ronin.webp`, iconAsset: require('../assets/ranks/rank-13-ronin.webp') },
-  { rank: 'shogun', label: 'Shogun', source: 'One Piece', min: 7000, iconUrl: `${CLOUD}/v1794313753/rank-14-shogun.webp`, iconAsset: require('../assets/ranks/rank-14-shogun.webp') },
-  { rank: 'anbu', label: 'ANBU', source: 'Naruto', min: 8200, iconUrl: `${CLOUD}/v1794313753/rank-15-anbu.webp`, iconAsset: require('../assets/ranks/rank-15-anbu.webp') },
-  { rank: 'pilot', label: 'Pilot', source: 'Evangelion', min: 9500, iconUrl: `${CLOUD}/v1794313754/rank-16-pilot.webp`, iconAsset: require('../assets/ranks/rank-16-pilot.webp') },
-  { rank: 'sannin', label: 'Sannin', source: 'Naruto', min: 14000, iconUrl: `${CLOUD}/v1794313755/rank-17-sannin.webp`, iconAsset: require('../assets/ranks/rank-17-sannin.webp') },
-  { rank: 'berserk', label: 'Berserk', source: 'Evangelion', min: 15700, iconUrl: `${CLOUD}/v1794313756/rank-18-berserk.webp`, iconAsset: require('../assets/ranks/rank-18-berserk.webp') },
-  { rank: 'wizard-king', label: 'Wizard King', source: 'Black Clover', min: 19400, iconUrl: `${CLOUD}/v1794313757/rank-19-wizard-king.webp`, iconAsset: require('../assets/ranks/rank-19-wizard-king.webp') },
-  { rank: 'jinchuriki', label: 'Jinchuriki', source: 'Naruto', min: 21400, iconUrl: `${CLOUD}/v1794313759/rank-20-jinchuriki.webp`, iconAsset: require('../assets/ranks/rank-20-jinchuriki.webp') },
-  { rank: 'newtype', label: 'Newtype', source: 'Gundam', min: 23500, iconUrl: `${CLOUD}/v1794313760/rank-21-newtype.webp`, iconAsset: require('../assets/ranks/rank-21-newtype.webp') },
-  { rank: 'overlord', label: 'Overlord', source: 'Overlord', min: 25700, iconUrl: `${CLOUD}/v1794313760/rank-22-overlord.webp`, iconAsset: require('../assets/ranks/rank-22-overlord.webp') },
-  { rank: 'shadow-monarch', label: 'Shadow Monarch', source: 'Solo Leveling', min: 28000, iconUrl: `${CLOUD}/v1794313761/rank-23-shadow-monarch.webp`, iconAsset: require('../assets/ranks/rank-23-shadow-monarch.webp') },
-  { rank: 'pirate-king', label: 'Pirate King', source: 'One Piece', min: 30000, iconUrl: `${CLOUD}/v1794313763/rank-24-pirate-king.webp`, iconAsset: require('../assets/ranks/rank-24-pirate-king.webp') },
+  { rank: 'shinobi', label: 'Shinobi', source: 'Naruto', min: 1100, iconUrl: `${CLOUD}/v1794313744/rank-06-shinobi.webp`, iconAsset: require('../assets/ranks/rank-06-shinobi.webp') },
+  { rank: 'assassin', label: 'Assassin', source: 'Fate', min: 1600, iconUrl: `${CLOUD}/v1794313745/rank-07-assassin.webp`, iconAsset: require('../assets/ranks/rank-07-assassin.webp') },
+  { rank: 'firebender', label: 'Firebender', source: 'Avatar', min: 2300, iconUrl: `${CLOUD}/v1794313746/rank-08-firebender.webp`, iconAsset: require('../assets/ranks/rank-08-firebender.webp') },
+  { rank: 'kitsune', label: 'Kitsune', source: 'Naruto / folklore', min: 3200, iconUrl: `${CLOUD}/v1794313747/rank-09-kitsune.webp`, iconAsset: require('../assets/ranks/rank-09-kitsune.webp') },
+  { rank: 'lone-wolf', label: 'Lone Wolf', source: 'Lone Wolf and Cub', min: 4200, iconUrl: `${CLOUD}/v1794313748/rank-10-lone-wolf.webp`, iconAsset: require('../assets/ranks/rank-10-lone-wolf.webp') },
+  { rank: 'karasu', label: 'Karasu', source: 'Naruto', min: 5400, iconUrl: `${CLOUD}/v1794313748/rank-11-karasu.webp`, iconAsset: require('../assets/ranks/rank-11-karasu.webp') },
+  { rank: 'jonin', label: 'Jonin', source: 'Naruto', min: 6800, iconUrl: `${CLOUD}/v1794313750/rank-12-jonin.webp`, iconAsset: require('../assets/ranks/rank-12-jonin.webp') },
+  { rank: 'ronin', label: 'Ronin', source: 'Rurouni Kenshin', min: 8400, iconUrl: `${CLOUD}/v1794313751/rank-13-ronin.webp`, iconAsset: require('../assets/ranks/rank-13-ronin.webp') },
+  { rank: 'shogun', label: 'Shogun', source: 'One Piece', min: 10200, iconUrl: `${CLOUD}/v1794313753/rank-14-shogun.webp`, iconAsset: require('../assets/ranks/rank-14-shogun.webp') },
+  { rank: 'anbu', label: 'ANBU', source: 'Naruto', min: 12200, iconUrl: `${CLOUD}/v1794313753/rank-15-anbu.webp`, iconAsset: require('../assets/ranks/rank-15-anbu.webp') },
+  { rank: 'pilot', label: 'Pilot', source: 'Evangelion', min: 14500, iconUrl: `${CLOUD}/v1794313754/rank-16-pilot.webp`, iconAsset: require('../assets/ranks/rank-16-pilot.webp') },
+  { rank: 'sannin', label: 'Sannin', source: 'Naruto', min: 17000, iconUrl: `${CLOUD}/v1794313755/rank-17-sannin.webp`, iconAsset: require('../assets/ranks/rank-17-sannin.webp') },
+  { rank: 'berserk', label: 'Berserk', source: 'Evangelion', min: 19800, iconUrl: `${CLOUD}/v1794313756/rank-18-berserk.webp`, iconAsset: require('../assets/ranks/rank-18-berserk.webp') },
+  { rank: 'wizard-king', label: 'Wizard King', source: 'Black Clover', min: 22800, iconUrl: `${CLOUD}/v1794313757/rank-19-wizard-king.webp`, iconAsset: require('../assets/ranks/rank-19-wizard-king.webp') },
+  { rank: 'jinchuriki', label: 'Jinchuriki', source: 'Naruto', min: 25800, iconUrl: `${CLOUD}/v1794313759/rank-20-jinchuriki.webp`, iconAsset: require('../assets/ranks/rank-20-jinchuriki.webp') },
+  { rank: 'newtype', label: 'Newtype', source: 'Gundam', min: 28800, iconUrl: `${CLOUD}/v1794313760/rank-21-newtype.webp`, iconAsset: require('../assets/ranks/rank-21-newtype.webp') },
+  { rank: 'overlord', label: 'Overlord', source: 'Overlord', min: 31800, iconUrl: `${CLOUD}/v1794313760/rank-22-overlord.webp`, iconAsset: require('../assets/ranks/rank-22-overlord.webp') },
+  { rank: 'shadow-monarch', label: 'Shadow Monarch', source: 'Solo Leveling', min: 33400, iconUrl: `${CLOUD}/v1794313761/rank-23-shadow-monarch.webp`, iconAsset: require('../assets/ranks/rank-23-shadow-monarch.webp') },
+  { rank: 'pirate-king', label: 'Pirate King', source: 'One Piece', min: 35000, iconUrl: `${CLOUD}/v1794313763/rank-24-pirate-king.webp`, iconAsset: require('../assets/ranks/rank-24-pirate-king.webp') },
 ];
 
 const BY_RANK = new Map(LADDER.map((info, index) => [info.rank, { info, index }]));
@@ -91,7 +92,7 @@ export function ladderForRp(rp: number): LadderStanding {
     else break;
   }
   const cur = LADDER[idx];
-  const target = LADDER[idx + 2] ?? LADDER[idx + 1] ?? null;
+  const target = LADDER[idx + 1] ?? null;
   if (!target) {
     return { rank: cur.rank, index: idx, nextRank: null, toNext: 0, fraction: 1 };
   }

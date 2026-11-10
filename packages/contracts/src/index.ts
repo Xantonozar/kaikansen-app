@@ -1666,14 +1666,18 @@ export type RankTier =
 /* written into the shared `tier` field — the live website runs        */
 /* its own 6-tier system on the same `userranks` documents, so the     */
 /* ladder exists only in served payloads and app display. Legacy       */
-/* tier/division/tierFloor writes and the RP clamp are unchanged.      */
-/* Thresholds (RP): academy-student 0 · scout 100 · mizunoto 250 ·     */
-/* genin 450 · chunin 700 · shinobi 1000 · assassin 1400 ·             */
-/* firebender 1900 · kitsune 2500 · lone-wolf 3200 · karasu 4000 ·     */
-/* jonin 4900 · ronin 5900 · shogun 7000 · anbu 8200 · pilot 9500 ·    */
-/* sannin 14000 · berserk 15700 · wizard-king 19400 ·                  */
-/* jinchuriki 21400 · newtype 23500 · overlord 25700 ·                 */
-/* shadow-monarch 28000 · pirate-king 30000 (top, open-ended).         */
+/* tier/division/tierFloor writes and the legacy RP clamp are          */
+/* unchanged — and the ladder has NO floor of its own: the             */
+/* standing derives from current RP alone, so an RP drop below a       */
+/* threshold demotes the derived rank (owner decision 2026-11-11,      */
+/* spec RANK-RP-PLAN-2026-11-11.md).                                   */
+/* Thresholds (RP, "Curve B" — owner 2026-11-11): academy-student 0 ·  */
+/* scout 100 · mizunoto 250 · genin 450 · chunin 700 · shinobi 1100 ·  */
+/* assassin 1600 · firebender 2300 · kitsune 3200 · lone-wolf 4200 ·   */
+/* karasu 5400 · jonin 6800 · ronin 8400 · shogun 10200 · anbu 12200 · */
+/* pilot 14500 · sannin 17000 · berserk 19800 · wizard-king 22800 ·    */
+/* jinchuriki 25800 · newtype 28800 · overlord 31800 ·                 */
+/* shadow-monarch 33400 · pirate-king 35000 (top, open-ended).         */
 /* ------------------------------------------------------------------ */
 
 /** The app's 24 ladder ranks, low to high. */
@@ -1717,12 +1721,11 @@ export interface LadderStanding {
   /** 0-based position on the ladder (0–23). */
   index: number;
   /**
-   * The progress target the rank cards aim at — per the
-   * owner-approved designs, the rank AFTER next (5,340 RP in
-   * Jonin reads "1,660 RP to Shogun", bar 440/2100 ≈ 21%;
-   * Ronin in between is never the named target). Null at
-   * Pirate King. See ladderForRp in the API / rankUtil in the
-   * app for the locked derivation.
+   * The progress target the rank cards aim at — the NEXT rank
+   * (owner decision 2026-11-11, spec RANK-RP-PLAN-2026-11-11.md):
+   * 710 RP in Chunin reads "390 RP to Shinobi", bar 10/400.
+   * Null at Pirate King. See ladderForRp in the API / rankUtil
+   * in the app for the locked derivation.
    */
   nextRank: LadderRank | null;
   /** RP still needed to reach `nextRank` (0 at the top). */

@@ -10,9 +10,9 @@ import {
 
 /**
  * The 24-rank ladder table + derivation (src/rankUtil.ts) — the
- * mirror of the API's ladderForRp suite: same thresholds, same
- * progress-target rule (the rank AFTER next, per the approved
- * designs' worked example).
+ * mirror of the API's ladderForRp suite: same thresholds (Curve B,
+ * spec RANK-RP-PLAN-2026-11-11.md), same progress-target rule
+ * (the NEXT rank).
  */
 
 describe('LADDER table', () => {
@@ -26,9 +26,9 @@ describe('LADDER table', () => {
       'shadow-monarch', 'pirate-king',
     ]);
     expect(LADDER.map((r) => r.min)).toEqual([
-      0, 100, 250, 450, 700, 1000, 1400, 1900, 2500, 3200, 4000, 4900,
-      5900, 7000, 8200, 9500, 14000, 15700, 19400, 21400, 23500, 25700,
-      28000, 30000,
+      0, 100, 250, 450, 700, 1100, 1600, 2300, 3200, 4200, 5400, 6800,
+      8400, 10200, 12200, 14500, 17000, 19800, 22800, 25800, 28800, 31800,
+      33400, 35000,
     ]);
   });
 
@@ -57,21 +57,43 @@ describe('LADDER table', () => {
 });
 
 describe('ladderForRp', () => {
-  it('matches the spec worked example: 5,340 RP -> Jonin', () => {
-    const s = ladderForRp(5340);
-    expect(s.rank).toBe('jonin');
-    expect(s.index).toBe(11);
-    expect(s.nextRank).toBe('shogun');
-    expect(s.toNext).toBe(1660);
-    expect(s.fraction).toBeCloseTo(440 / 2100, 10);
+  it('matches the plan worked examples (spec RANK-RP-PLAN-2026-11-11)', () => {
+    // 710 RP → Chunin, 390 to Shinobi, fraction (710−700)/(1100−700).
+    expect(ladderForRp(710)).toEqual({
+      rank: 'chunin',
+      index: 4,
+      nextRank: 'shinobi',
+      toNext: 390,
+      fraction: 10 / 400,
+    });
+    // 600 RP → Genin, 100 to Chunin — the NEXT rank (see the
+    // API mirror's note: the plan sketch's "500 to Shinobi" for
+    // 600 RP is the retired aim-ahead arithmetic).
+    const ddd = ladderForRp(600);
+    expect(ddd.rank).toBe('genin');
+    expect(ddd.nextRank).toBe('chunin');
+    expect(ddd.toNext).toBe(100);
+    // 195 RP → Scout, 55 to Mizunoto (the NEXT rank — see the
+    // API mirror's note on the sketch's aim-ahead slip).
+    const ccc = ladderForRp(195);
+    expect(ccc.rank).toBe('scout');
+    expect(ccc.nextRank).toBe('mizunoto');
+    expect(ccc.toNext).toBe(55);
+  });
+
+  it('has NO floor: an RP drop below a threshold demotes', () => {
+    expect(ladderForRp(710).rank).toBe('chunin');
+    expect(ladderForRp(690).rank).toBe('genin');
+    expect(ladderForRp(699).rank).toBe('genin');
+    expect(ladderForRp(700).rank).toBe('chunin');
   });
 
   it('handles the first-rank edges', () => {
     expect(ladderForRp(0)).toEqual({
       rank: 'academy-student',
       index: 0,
-      nextRank: 'mizunoto',
-      toNext: 250,
+      nextRank: 'scout',
+      toNext: 100,
       fraction: 0,
     });
     expect(ladderForRp(99).rank).toBe('academy-student');
@@ -80,17 +102,17 @@ describe('ladderForRp', () => {
   });
 
   it('handles the last-rank edges (Pirate King is open-ended)', () => {
-    expect(ladderForRp(29999).rank).toBe('shadow-monarch');
-    expect(ladderForRp(29999).nextRank).toBe('pirate-king');
-    expect(ladderForRp(29999).toNext).toBe(1);
-    expect(ladderForRp(30000)).toEqual({
+    expect(ladderForRp(34999).rank).toBe('shadow-monarch');
+    expect(ladderForRp(34999).nextRank).toBe('pirate-king');
+    expect(ladderForRp(34999).toNext).toBe(1);
+    expect(ladderForRp(35000)).toEqual({
       rank: 'pirate-king',
       index: 23,
       nextRank: null,
       toNext: 0,
       fraction: 1,
     });
-    expect(ladderForRp(31240).rank).toBe('pirate-king');
+    expect(ladderForRp(41240).rank).toBe('pirate-king');
     expect(ladderForRp(999999).fraction).toBe(1);
   });
 
@@ -110,12 +132,12 @@ describe('standingOf / formatRp', () => {
     const served = {
       rank: 'jonin' as const,
       index: 11,
-      nextRank: 'shogun' as const,
-      toNext: 1660,
-      fraction: 440 / 2100,
+      nextRank: 'ronin' as const,
+      toNext: 1400,
+      fraction: 440 / 1600,
     };
-    expect(standingOf({ rp: 5340, ladder: served })).toBe(served);
-    expect(standingOf({ rp: 5340 }).rank).toBe('jonin');
+    expect(standingOf({ rp: 7240, ladder: served })).toBe(served);
+    expect(standingOf({ rp: 7240 }).rank).toBe('jonin');
   });
 
   it('groups RP figures', () => {

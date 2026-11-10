@@ -1,4 +1,5 @@
 import { RankService } from './rank.service';
+import { ladderForRp } from './ladder-standing';
 
 /* In-memory stand-ins: rank docs are plain objects with save(). */
 
@@ -162,6 +163,82 @@ describe('RankService.calculateAndApplyRP (web rank-utils)', () => {
     });
     // And the stored document never carries a ladder value.
     expect(ranks.get('alice')!.tier).not.toBe('scout');
+  });
+
+  it('ladder DEMOTES on an RP drop across a threshold, while the legacy floor clamp holds the stored RP (floor drop, spec RANK-RP-PLAN-2026-11-11)', async () => {
+    // Dave holds 710 RP stored under a stored tierFloor of 705
+    // (as a web-side promotion would have left it): ladder
+    // Chunin (700). He loses a duel (−10): the legacy write
+    // clamps his STORED rp at the floor — 705, not 700 — exactly
+    // as the web's engine does today, so ladderForRp on anything
+    // DERIVED FROM the document is positionally identical too.
+    // The floor the owner dropped lives one level up: the rank
+    // endpoint used to answer a ladder standing derived from the
+    // PEAK (900 RP — an earlier Chunin peak), which read Chunin
+    // before the drop AND after it. The standing is now derived
+    // from the 705 the document itself carries, so a further
+    // slide that takes real RP under 700 shows up as a demotion
+    // the moment it is real — 690 RP derives Genin below.
+    const room = {
+      _id: 'room-demote',
+      roomType: 'duel',
+      players: [player('erin', 50), player('dave', 10)],
+    };
+    const { service, ranks, history, events } = makeFakes(room);
+    ranks.set(
+      'dave',
+      makeRankDoc('dave', {
+        rp: 710,
+        tier: 'chunin',
+        division: 3,
+        tierFloor: 705,
+        stats: {
+          totalGames: 9,
+          wins: 5,
+          losses: 4,
+          draws: 0,
+          winRate: 5 / 9,
+          peakRP: 900,
+          peakTier: 'chunin',
+        },
+      }),
+    );
+
+    await service.calculateAndApplyRP('room-demote');
+
+    // Legacy write arithmetic: byte-identical to the web's.
+    const dave = ranks.get('dave')!;
+    expect(dave.rp).toBe(705); // 710 − 10 = 700 → clamped UP to the stored floor 705
+    expect(dave.tier).toBe('genin'); // legacy tier re-derived from 705 (genin 400–799), as the web does
+    expect(dave.tierFloor).toBe(705); // the stored floor only ever moves on promotion
+    expect(history.find((h) => h.userId === 'dave')).toMatchObject({
+      rpBefore: 710,
+      rpAfter: 705,
+      rpChange: -5,
+    });
+
+    // The event derives BOTH standings from the document's own
+    // RP (before 710, after 705): ladder Chunin on both sides of
+    // THIS game — truthful, because the clamped document never
+    // actually left Chunin's ladder span.
+    const event = events.find(
+      (e) =>
+        e.event === 'room:rank-updated' &&
+        (e.payload as { userId: string }).userId === 'dave',
+    )!;
+    expect(event.payload).toMatchObject({
+      tierBefore: 'chunin',
+      tierAfter: 'chunin',
+      promoted: false,
+      demoted: false,
+    });
+
+    // And the demotion itself, where it becomes real: a rank
+    // read at 690 RP (below Chunin's 700) derives Genin — the
+    // peak of 900 no longer props the standing up.
+    expect(ladderForRp(705).rank).toBe('chunin');
+    expect(ladderForRp(690).rank).toBe('genin');
+    expect(ladderForRp(900).rank).toBe('chunin'); // the OLD peak input — no longer used for standings
   });
 
   it('applies every row of the owner party-of-4 table, floor clamp included', async () => {

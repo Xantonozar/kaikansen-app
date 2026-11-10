@@ -9,9 +9,9 @@ import {
   getBaseRP,
   getStreakBonus,
   getTierFromRP,
-  ladderForRp,
   tierIndex,
 } from './quiz-game.utils';
+import { ladderStandingFor } from './ladder-standing';
 import { RoomBroadcaster } from './room-broadcaster';
 
 /**
@@ -173,8 +173,8 @@ export class RankService {
       // ladder indices (owner spec 2026-11-10). The results list
       // and the stored rank-history row above keep the legacy
       // 6-tier values — nothing written changes.
-      const ladderBefore = ladderForRp(rpBefore);
-      const ladderAfter = ladderForRp(rpAfter);
+      const ladderBefore = ladderStandingFor(rpBefore);
+      const ladderAfter = ladderStandingFor(rpAfter);
       const ladderPromoted = ladderAfter.index > ladderBefore.index;
       const ladderDemoted = ladderAfter.index < ladderBefore.index;
 

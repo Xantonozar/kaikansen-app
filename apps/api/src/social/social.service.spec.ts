@@ -543,8 +543,8 @@ describe('SocialService — network lists', () => {
       ladder: {
         rank: 'academy-student',
         index: 0,
-        nextRank: 'mizunoto',
-        toNext: 250,
+        nextRank: 'scout',
+        toNext: 100,
         fraction: 0,
       },
     });
@@ -580,7 +580,7 @@ describe('SocialService — network lists', () => {
       username: 'carol',
       tier: 'chunin',
       // Carol's 900 RP derives the ladder Chunin standing.
-      ladder: { rank: 'chunin', index: 4, nextRank: 'assassin' },
+      ladder: { rank: 'chunin', index: 4, nextRank: 'shinobi' },
     });
     // The enrichment is a read: it never materialises rank docs.
     expect(models.userRankModel.docs).toHaveLength(1);

@@ -353,15 +353,25 @@ export function tierIndex(tier: string): number {
 }
 
 /* ------------------------------------------------------------------ */
-/* The app's 24-rank ladder (owner spec 2026-11-10) — a pure         */
-/* function of RP, derived at read time and served additively        */
-/* next to the legacy tier fields. It is NEVER written to the        */
-/* shared `userranks` documents (the website runs the 6-tier          */
-/* system on them): the only stored value it ever influences is      */
-/* none — even the rank-updated event's ladder slugs are derived     */
-/* in memory at emit time, while rank-history rows keep the          */
-/* legacy tiers. The mobile rankUtil mirrors this exact table;       */
-/* both sides carry the same boundary tests.                         */
+/* The app's 24-rank ladder — a pure function of RP, derived at     */
+/* read time and served additively next to the legacy tier fields.  */
+/* It is NEVER written to the shared `userranks` documents (the     */
+/* website runs the 6-tier system on them): the only stored value   */
+/* it ever influences is none — even the rank-updated event's       */
+/* ladder slugs are derived in memory at emit time, while           */
+/* rank-history rows keep the legacy tiers. The mobile rankUtil     */
+/* mirrors this exact table; both sides carry the same boundary     */
+/* tests.                                                           */
+/*                                                                  */
+/* Thresholds are the owner's REAL values, decided 2026-11-11       */
+/* (spec RANK-RP-PLAN-2026-11-11.md, "Curve B" — even stairs to a   */
+/* 35,000 RP Pirate King, a ~1-year grind), replacing the           */
+/* 2026-11-10 design-stage placeholders. The ladder has NO floor:   */
+/* there is deliberately no peak/clamp input — a standing derives   */
+/* from current RP alone, so an RP drop below a threshold demotes   */
+/* the derived rank (owner decision 2026-11-11; the legacy tier's   */
+/* tierFloor clamp in RankService is the web's write arithmetic     */
+/* and is untouched by this function).                             */
 /* ------------------------------------------------------------------ */
 
 export type LadderRankSlug =
@@ -396,25 +406,25 @@ export const LADDER_RANKS: { rank: LadderRankSlug; min: number }[] = [
   { rank: 'mizunoto', min: 250 },
   { rank: 'genin', min: 450 },
   { rank: 'chunin', min: 700 },
-  { rank: 'shinobi', min: 1000 },
-  { rank: 'assassin', min: 1400 },
-  { rank: 'firebender', min: 1900 },
-  { rank: 'kitsune', min: 2500 },
-  { rank: 'lone-wolf', min: 3200 },
-  { rank: 'karasu', min: 4000 },
-  { rank: 'jonin', min: 4900 },
-  { rank: 'ronin', min: 5900 },
-  { rank: 'shogun', min: 7000 },
-  { rank: 'anbu', min: 8200 },
-  { rank: 'pilot', min: 9500 },
-  { rank: 'sannin', min: 14000 },
-  { rank: 'berserk', min: 15700 },
-  { rank: 'wizard-king', min: 19400 },
-  { rank: 'jinchuriki', min: 21400 },
-  { rank: 'newtype', min: 23500 },
-  { rank: 'overlord', min: 25700 },
-  { rank: 'shadow-monarch', min: 28000 },
-  { rank: 'pirate-king', min: 30000 },
+  { rank: 'shinobi', min: 1100 },
+  { rank: 'assassin', min: 1600 },
+  { rank: 'firebender', min: 2300 },
+  { rank: 'kitsune', min: 3200 },
+  { rank: 'lone-wolf', min: 4200 },
+  { rank: 'karasu', min: 5400 },
+  { rank: 'jonin', min: 6800 },
+  { rank: 'ronin', min: 8400 },
+  { rank: 'shogun', min: 10200 },
+  { rank: 'anbu', min: 12200 },
+  { rank: 'pilot', min: 14500 },
+  { rank: 'sannin', min: 17000 },
+  { rank: 'berserk', min: 19800 },
+  { rank: 'wizard-king', min: 22800 },
+  { rank: 'jinchuriki', min: 25800 },
+  { rank: 'newtype', min: 28800 },
+  { rank: 'overlord', min: 31800 },
+  { rank: 'shadow-monarch', min: 33400 },
+  { rank: 'pirate-king', min: 35000 },
 ];
 
 export interface LadderStandingFacts {
@@ -422,8 +432,8 @@ export interface LadderStandingFacts {
   /** 0-based position on the ladder (0–23). */
   index: number;
   /**
-   * The PROGRESS TARGET rank (see ladderForRp — the approved
-   * designs aim the bar at the rank after next), or null at
+   * The PROGRESS TARGET rank (see ladderForRp — the NEXT rank,
+   * per spec RANK-RP-PLAN-2026-11-11.md), or null at
    * Pirate King.
    */
   nextRank: LadderRankSlug | null;
@@ -434,25 +444,23 @@ export interface LadderStandingFacts {
 }
 
 /**
- * The ladder standing for an RP total.
+ * The ladder standing for an RP total (spec
+ * RANK-RP-PLAN-2026-11-11.md).
  *
- * ⚠️ PROGRESS TARGET — the approved designs' rule, not the
- * obvious one. Every owner-approved rank surface (mockups +
- * Stitch screens, verified in their HTML) draws the sample
- * identity — Jonin at 5,340 RP — with the bar filled 21% and
- * the line "1,660 RP to Shogun", and names NO other target:
+ * PROGRESS TARGET — the NEXT rank (owner decision 2026-11-11):
  * progress is measured from the current rank's threshold to
- * the threshold of the rank AFTER next (Jonin 4,900 → Shogun
- * 7,000, skipping Ronin 5,900), i.e. fraction =
- * (5340−4900)/(7000−4900) = 440/2100 ≈ 0.21, exactly the bar
- * the designs draw. The spec's worked example locks the same
- * numbers, so the target here is LADDER_RANKS[idx + 2],
- * falling back to idx + 1 for Shadow Monarch (whose only
- * rank above is Pirate King). The ladder screen's rows are
- * unaffected — reached/locked there follows the thresholds
- * themselves. (Flagged in the wiring report: if the sample
- * was a design slip, the fix is idx + 2 → idx + 1 here and
- * in the mobile mirror.)
+ * the NEXT rank's threshold, i.e. fraction = (rp − cur.min) /
+ * (next.min − cur.min), and `toNext` is the RP still needed to
+ * reach that next rank. (This replaces the 2026-11-10 design
+ * stage's aim-ahead rule, which targeted the rank after next —
+ * its Jonin 5,340 → "1,660 RP to Shogun" worked example was
+ * drawn from placeholder thresholds and is retired with them.)
+ *
+ * NO FLOOR (owner decision 2026-11-11): the standing is a pure
+ * function of the RP handed in. A player whose RP falls below
+ * their rank's threshold derives the lower rank — demotion is
+ * real. Callers must pass CURRENT rp, never stats.peakRP
+ * (peakRank is a separate, historical fact).
  *
  * Negative RP reads as the bottom rank; Pirate King is
  * open-ended (fraction 1).
@@ -465,7 +473,7 @@ export function ladderForRp(rp: number): LadderStandingFacts {
     else break;
   }
   const cur = LADDER_RANKS[idx];
-  const target = LADDER_RANKS[idx + 2] ?? LADDER_RANKS[idx + 1] ?? null;
+  const target = LADDER_RANKS[idx + 1] ?? null;
   if (!target) {
     return { rank: cur.rank, index: idx, nextRank: null, toNext: 0, fraction: 1 };
   }

@@ -313,14 +313,15 @@ describe('Rank with mocked models (e2e)', () => {
       tier: 'genin',
       division: 3,
       tierFloor: 400,
-      // The additive ladder standing (app ladder 2026-11-10):
-      // 900 RP → Chunin, target Assassin, peak = the same rank.
+      // The additive ladder standing (app ladder, Curve B
+      // 2026-11-11): 900 RP → Chunin, target Shinobi (the NEXT
+      // rank), peak = the same rank.
       ladder: {
         rank: 'chunin',
         index: 4,
-        nextRank: 'assassin',
-        toNext: 500,
-        fraction: 200 / 700,
+        nextRank: 'shinobi',
+        toNext: 200,
+        fraction: 200 / 400,
         peakRank: 'chunin',
       },
       currentWinStreak: 1,
@@ -393,9 +394,9 @@ describe('Rank with mocked models (e2e)', () => {
       ladder: {
         rank: 'chunin',
         index: 4,
-        nextRank: 'assassin',
-        toNext: 500,
-        fraction: 200 / 700,
+        nextRank: 'shinobi',
+        toNext: 200,
+        fraction: 200 / 400,
       },
       wins: 6,
       winRate: 0.6,
@@ -436,13 +437,13 @@ describe('Rank with mocked models (e2e)', () => {
         rp: 950,
         tier: 'genin',
         division: 3,
-        // 950 RP derives the same Chunin standing, 450 to Assassin.
+        // 950 RP derives the same Chunin standing, 150 to Shinobi.
         ladder: {
           rank: 'chunin',
           index: 4,
-          nextRank: 'assassin',
-          toNext: 450,
-          fraction: 250 / 700,
+          nextRank: 'shinobi',
+          toNext: 150,
+          fraction: 250 / 400,
         },
         wins: 7,
         winRate: 0.7,

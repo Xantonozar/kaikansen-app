@@ -28,6 +28,7 @@ import type {
 import { AuthService } from '../auth/auth.service';
 import { User, type UserDocument } from '../auth/user.schema';
 import { ladderForRp } from '../quiz/quiz-game.utils';
+import { ladderStandingFor } from '../quiz/ladder-standing';
 import {
   UserRank,
   type UserRankDocument,
@@ -596,7 +597,7 @@ export class SocialService {
         // The app ladder standing, from the same document's RP
         // (additive; a missing document defaults to 0 RP).
         const rp = rps.get(row.id);
-        row.ladder = ladderForRp(typeof rp === 'number' ? rp : 0);
+        row.ladder = ladderStandingFor(typeof rp === 'number' ? rp : 0);
       }
     }
 

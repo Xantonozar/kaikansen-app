@@ -208,34 +208,34 @@ function makeService(world: ReturnType<typeof makeWorld>) {
 }
 
 /* The additive ladder standings the reads derive (ladderForRp).   */
-/* Target = the rank after next (the approved designs' rule).      */
+/* Target = the NEXT rank (spec RANK-RP-PLAN-2026-11-11.md).       */
 const LADDER_0 = {
   rank: 'academy-student',
   index: 0,
-  nextRank: 'mizunoto',
-  toNext: 250,
+  nextRank: 'scout',
+  toNext: 100,
   fraction: 0,
 } as const;
 const LADDER_100 = {
   rank: 'scout',
   index: 1,
-  nextRank: 'genin',
-  toNext: 350,
+  nextRank: 'mizunoto',
+  toNext: 150,
   fraction: 0,
 } as const;
 const LADDER_500 = {
   rank: 'genin',
   index: 3,
-  nextRank: 'shinobi',
-  toNext: 500,
-  fraction: 50 / 550,
+  nextRank: 'chunin',
+  toNext: 200,
+  fraction: 50 / 250,
 } as const;
 const LADDER_900 = {
   rank: 'chunin',
   index: 4,
-  nextRank: 'assassin',
-  toNext: 500,
-  fraction: 200 / 700,
+  nextRank: 'shinobi',
+  toNext: 200,
+  fraction: 200 / 400,
 } as const;
 
 /* ------------------------------------------------------------------ */
@@ -278,6 +278,42 @@ describe('RankReadService.getRank', () => {
       createdAt: at(0).toISOString(),
       updatedAt: at(10).toISOString(),
     });
+  });
+
+  it('serves the standing from CURRENT RP — a fallen player demotes, the peak stays a labelled fact (floor drop, spec RANK-RP-PLAN-2026-11-11)', async () => {
+    const world = makeWorld();
+    // A document whose RP has FALLEN to 690 while its peak
+    // still records the 900 high-water mark. Under a peak-fed
+    // standing this profile would still read Chunin; with the
+    // floor dropped (2026-11-11) the standing derives from the
+    // 690 the document carries NOW — Genin — while peakRank /
+    // peakLadderRank keep reporting the historical Chunin.
+    world.ranks.push(
+      rankDoc('507f1f77bcf86cd7994390a5', 690, {
+        stats: {
+          totalGames: 12,
+          wins: 6,
+          losses: 5,
+          draws: 1,
+          winRate: 0.5,
+          peakRP: 900,
+          peakTier: 'genin',
+        },
+      }),
+    );
+    const service = makeService(world);
+    const profile = await service.getRank('507f1f77bcf86cd7994390a5');
+    expect(profile.rp).toBe(690);
+    expect(profile.ladder).toEqual({
+      rank: 'genin',
+      index: 3,
+      nextRank: 'chunin',
+      toNext: 10,
+      fraction: 240 / 250,
+      peakRank: 'chunin',
+    });
+    expect(profile.stats.peakRP).toBe(900);
+    expect(profile.stats.peakLadderRank).toBe('chunin');
   });
 
   it('CREATES the default rank document when none exists (the web’s getUserRank write)', async () => {

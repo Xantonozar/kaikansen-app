@@ -16,6 +16,7 @@ import type {
 } from '@kaikansen/contracts';
 import { User, type UserDocument } from '../auth/user.schema';
 import { ladderForRp } from '../quiz/quiz-game.utils';
+import { ladderStandingFor } from '../quiz/ladder-standing';
 import { UserRank, type UserRankDocument } from '../quiz/user-rank.schema';
 import {
   LeaderboardSnapshot,
@@ -145,7 +146,7 @@ export class RankReadService {
       // (additive — the stored document is never touched; the
       // peak standing rides along on the same object).
       ladder: {
-        ...ladderForRp(rp),
+        ...ladderStandingFor(rp),
         peakRank: ladderForRp(peakRP).rank,
       } satisfies LadderStanding,
       currentWinStreak: doc.currentWinStreak ?? 0,
@@ -219,7 +220,7 @@ export class RankReadService {
           userId: String(d.userId),
           tier: (d.tier ?? 'academy') as RankTier,
           rp: d.rp ?? 0,
-          ladder: ladderForRp(d.rp ?? 0),
+          ladder: ladderStandingFor(d.rp ?? 0),
         } satisfies PlayerRankSummary,
       ]),
     );
@@ -230,7 +231,7 @@ export class RankReadService {
             userId: id,
             tier: 'academy',
             rp: 0,
-            ladder: ladderForRp(0),
+            ladder: ladderStandingFor(0),
           },
       ),
     };
@@ -278,7 +279,7 @@ export class RankReadService {
           rp: entry.rp,
           tier: entry.tier as RankTier,
           division: entry.division ?? null,
-          ladder: ladderForRp(entry.rp ?? 0),
+          ladder: ladderStandingFor(entry.rp ?? 0),
           username: entry.username,
           // The web's snapshot map serves the username as the
           // displayName. Mirrored quirk.
@@ -331,7 +332,7 @@ export class RankReadService {
         rp: rank.rp ?? 0,
         tier: (rank.tier ?? 'academy') as RankTier,
         division: rank.division ?? null,
-        ladder: ladderForRp(rank.rp ?? 0),
+        ladder: ladderStandingFor(rank.rp ?? 0),
         username: user.username,
         displayName: user.displayName,
         avatarUrl: user.avatarUrl ?? null,

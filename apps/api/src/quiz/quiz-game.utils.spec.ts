@@ -348,13 +348,13 @@ describe('rank math (web lib/rank-utils.ts)', () => {
   });
 });
 
-describe('ladderForRp (app 24-rank ladder, owner spec 2026-11-10)', () => {
+describe('ladderForRp (app 24-rank ladder, spec RANK-RP-PLAN-2026-11-11)', () => {
   it('has the locked 24 thresholds in ascending order', () => {
     expect(LADDER_RANKS).toHaveLength(24);
     expect(LADDER_RANKS.map((r) => r.min)).toEqual([
-      0, 100, 250, 450, 700, 1000, 1400, 1900, 2500, 3200, 4000, 4900,
-      5900, 7000, 8200, 9500, 14000, 15700, 19400, 21400, 23500, 25700,
-      28000, 30000,
+      0, 100, 250, 450, 700, 1100, 1600, 2300, 3200, 4200, 5400, 6800,
+      8400, 10200, 12200, 14500, 17000, 19800, 22800, 25800, 28800, 31800,
+      33400, 35000,
     ]);
     expect(LADDER_RANKS.map((r) => r.rank)).toEqual([
       'academy-student', 'scout', 'mizunoto', 'genin', 'chunin',
@@ -366,11 +366,10 @@ describe('ladderForRp (app 24-rank ladder, owner spec 2026-11-10)', () => {
   });
 
   it('derives the rank at every threshold boundary (min-1, min, min+1)', () => {
-    // The progress target is the rank AFTER next (the approved
-    // designs' rule — see ladderForRp): target(i) = LADDER[i+2],
-    // falling back to LADDER[i+1] for Shadow Monarch.
-    const targetOf = (i: number) =>
-      LADDER_RANKS[i + 2] ?? LADDER_RANKS[i + 1] ?? null;
+    // The progress target is the NEXT rank (owner decision
+    // 2026-11-11 — spec RANK-RP-PLAN-2026-11-11.md):
+    // target(i) = LADDER[i+1].
+    const targetOf = (i: number) => LADDER_RANKS[i + 1] ?? null;
     LADDER_RANKS.forEach((entry, i) => {
       const at = ladderForRp(entry.min);
       expect(at.rank).toBe(entry.rank);
@@ -393,8 +392,8 @@ describe('ladderForRp (app 24-rank ladder, owner spec 2026-11-10)', () => {
       }
       if (i > 0) {
         // One below the threshold: the previous rank, whose
-        // target is the rank after IT (targetOf(i-1)); at the
-        // top that target is Pirate King itself.
+        // target is THIS rank (targetOf(i-1)); at the top that
+        // target is Pirate King itself.
         const belowTarget = targetOf(i - 1)!;
         const below = ladderForRp(entry.min - 1);
         expect(below.rank).toBe(LADDER_RANKS[i - 1].rank);
@@ -405,17 +404,50 @@ describe('ladderForRp (app 24-rank ladder, owner spec 2026-11-10)', () => {
     });
   });
 
-  it('matches the spec worked example: 5,340 RP -> Jonin', () => {
-    const s = ladderForRp(5340);
-    expect(s.rank).toBe('jonin');
-    expect(s.index).toBe(11);
-    expect(s.nextRank).toBe('shogun');
-    expect(s.toNext).toBe(1660);
-    expect(s.fraction).toBeCloseTo(440 / 2100, 10);
+  it('matches the plan worked examples (spec RANK-RP-PLAN-2026-11-11)', () => {
+    // 710 RP → Chunin, 390 to Shinobi, fraction (710−700)/(1100−700).
+    const zadid = ladderForRp(710);
+    expect(zadid.rank).toBe('chunin');
+    expect(zadid.index).toBe(4);
+    expect(zadid.nextRank).toBe('shinobi');
+    expect(zadid.toNext).toBe(390);
+    expect(zadid.fraction).toBeCloseTo(10 / 400, 10);
+    // 600 RP → Genin, 100 to Chunin (the NEXT rank), fraction
+    // (600−450)/(700−450). NOTE: the plan spec's sketch says
+    // "toNext 500, next Shinobi" for 600 RP — that pair belongs
+    // to the retired aim-ahead rule (Shinobi at 1,100 is the rank
+    // after next from Genin); under the plan's own Decision 6
+    // (progress target = NEXT rank) the values are Chunin / 100.
+    const ddd = ladderForRp(600);
+    expect(ddd.rank).toBe('genin');
+    expect(ddd.index).toBe(3);
+    expect(ddd.nextRank).toBe('chunin');
+    expect(ddd.toNext).toBe(100);
+    expect(ddd.fraction).toBeCloseTo(150 / 250, 10);
+    // 195 RP → Scout, 55 to Mizunoto (the NEXT rank; the plan
+    // sketch's "255 to Genin" is the same aim-ahead slip as the
+    // 600 RP line — Genin at 450 is two steps from Scout).
+    const ccc = ladderForRp(195);
+    expect(ccc.rank).toBe('scout');
+    expect(ccc.index).toBe(1);
+    expect(ccc.nextRank).toBe('mizunoto');
+    expect(ccc.toNext).toBe(55);
+    expect(ccc.fraction).toBeCloseTo(95 / 150, 10);
+  });
+
+  it('has NO floor: an RP drop below a threshold demotes the derived rank', () => {
+    // The owner dropped the rank floor (2026-11-11): the
+    // derivation is a pure function of CURRENT RP — nothing
+    // remembers that 710 was once Chunin.
+    expect(ladderForRp(710).rank).toBe('chunin');
+    expect(ladderForRp(690).rank).toBe('genin');
+    expect(ladderForRp(690).index).toBe(3);
+    expect(ladderForRp(699).rank).toBe('genin');
+    expect(ladderForRp(700).rank).toBe('chunin');
   });
 
   it('treats Pirate King as open-ended', () => {
-    for (const rp of [30000, 30001, 31240, 999999]) {
+    for (const rp of [35000, 35001, 41240, 999999]) {
       const s = ladderForRp(rp);
       expect(s.rank).toBe('pirate-king');
       expect(s.index).toBe(23);
@@ -423,7 +455,7 @@ describe('ladderForRp (app 24-rank ladder, owner spec 2026-11-10)', () => {
       expect(s.toNext).toBe(0);
       expect(s.fraction).toBe(1);
     }
-    const belowTop = ladderForRp(29999);
+    const belowTop = ladderForRp(34999);
     expect(belowTop.rank).toBe('shadow-monarch');
     expect(belowTop.toNext).toBe(1);
   });
@@ -433,9 +465,9 @@ describe('ladderForRp (app 24-rank ladder, owner spec 2026-11-10)', () => {
       const s = ladderForRp(rp);
       expect(s.rank).toBe('academy-student');
       expect(s.index).toBe(0);
-      // Target is Mizunoto (250) — the rank after next.
-      expect(s.nextRank).toBe('mizunoto');
-      expect(s.toNext).toBe(250 - Math.max(0, rp));
+      // Target is Scout (100) — the next rank.
+      expect(s.nextRank).toBe('scout');
+      expect(s.toNext).toBe(100 - Math.max(0, rp));
     }
   });
 });
