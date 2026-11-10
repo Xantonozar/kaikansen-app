@@ -24,6 +24,7 @@ import type {
   ThemeSummary,
 } from '@kaikansen/contracts';
 import { fetchHome, searchThemes } from '../../src/api';
+import { pickDefaultArtist } from '../../src/defaultArtists';
 import { useFavorites } from '../../src/favoritesStore';
 import {
   queueItemsFromSummaries,
@@ -45,6 +46,61 @@ const RECENTS_KEY = 'kaikansen.recentSearches.v1';
 const RECENTS_CAP = 8;
 
 /**
+ * The artist row's avatar: the catalogue photo when it is usable
+ * (present, not an .svg), else the artist's default chibi, else
+ * the initial-letter disc — owner ruling 2026-11-10, superseding
+ * the results mock, which drew the letter disc unconditionally.
+ * The per-row error state lives here so each row swaps
+ * independently, mirroring the artist page's hero swap.
+ */
+function ArtistRowAvatar({
+  imageUrl,
+  slug,
+  name,
+  styles,
+}: {
+  imageUrl: string | null;
+  slug: string;
+  name: string;
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const [photoFailed, setPhotoFailed] = useState(false);
+  const [chibiFailed, setChibiFailed] = useState(false);
+
+  if (
+    imageUrl &&
+    !imageUrl.toLowerCase().includes('.svg') &&
+    !photoFailed
+  ) {
+    return (
+      <Image
+        source={{ uri: imageUrl }}
+        style={styles.entityDisc}
+        onError={() => setPhotoFailed(true)}
+        accessibilityLabel={`${name}'s image`}
+      />
+    );
+  }
+  if (!chibiFailed) {
+    return (
+      <Image
+        source={pickDefaultArtist(slug)}
+        style={styles.entityDisc}
+        onError={() => setChibiFailed(true)}
+        accessibilityLabel={`${name}'s image`}
+      />
+    );
+  }
+  return (
+    <View style={[styles.entityDisc, styles.discFallback]}>
+      <Text style={styles.discInitial}>
+        {name.charAt(0).toUpperCase()}
+      </Text>
+    </View>
+  );
+}
+
+/**
  * Search (DESIGN.md §6.6, Lavender Dusk finals — idle
  * `131adb5343294f038e68a7c53b65a68a`, results
  * `d2802dbad2654b6dbe168928ec4aec6d`): reached from the header
@@ -62,9 +118,10 @@ const RECENTS_CAP = 8;
  *   Themes (ThemeRow's `search` variant: 48pt cover, one-line
  *   title, artist + OP/ED chip, play disc + ⋮ — the results mock
  *   draws no heart), Anime (portrait cover, title, year · theme
- *   count, chevron → the anime page), Artists (the initial-letter
- *   disc the mock draws — never the artist's image here — name,
- *   theme count, chevron → the artist page). Empty groups are
+ *   count, chevron → the anime page), Artists (catalogue photo,
+ *   else the artist's default chibi, else the initial-letter disc
+ *   — owner ruling 2026-11-10 — name, theme count, chevron → the
+ *   artist page). Empty groups are
  *   omitted; fixture mode honestly serves empty anime/artist
  *   groups, so it renders Themes alone. The anime subline omits
  *   the mock's "TV ·" format word: the catalogue stores no format
@@ -266,14 +323,12 @@ export default function SearchScreen() {
       accessibilityLabel={`Open ${ar.name}`}
       style={({ pressed }) => [styles.entityRow, pressed && styles.pressed]}
     >
-      {/* The results mock draws the initial-letter disc for every
-          artist row — never the artist's image (that lives on the
-          artist page) — so the disc is unconditional here. */}
-      <View style={[styles.entityDisc, styles.discFallback]}>
-        <Text style={styles.discInitial}>
-          {ar.name.charAt(0).toUpperCase()}
-        </Text>
-      </View>
+      <ArtistRowAvatar
+        imageUrl={ar.imageUrl}
+        slug={ar.slug}
+        name={ar.name}
+        styles={styles}
+      />
       <View style={styles.entityMain}>
         <Text style={styles.entityTitle} numberOfLines={1}>
           {ar.name}
