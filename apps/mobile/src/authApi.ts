@@ -13,7 +13,7 @@ import type {
   ResetPasswordResponse,
   UserProfile,
 } from '@kaikansen/contracts';
-import { apiBaseUrl } from './api';
+import { apiBaseUrl, fetchWithDeadline, REQUEST_DEADLINE_MS } from './api';
 
 /**
  * Plain-fetch client for the API's /auth endpoints (Slice 2). These
@@ -22,6 +22,12 @@ import { apiBaseUrl } from './api';
  * what the 401-retry path itself calls — routing it through the retry
  * would recurse. Error bodies are the API's ApiErrorResponse; the
  * server message (the web-parity string) is surfaced verbatim.
+ *
+ * Perf problem 13B: every call here rides api.ts's fetchWithDeadline
+ * at the LONG class — these are the calls that legitimately ride a
+ * waking server (boot-time session restore = refresh + /auth/me)
+ * and the refresh inside apiFetch's 401 retry gets its own clock
+ * here, separate from either attempt's.
  */
 
 export class ApiError extends Error {
@@ -52,11 +58,15 @@ async function toApiError(res: Response): Promise<ApiError> {
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${apiBaseUrl}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  const res = await fetchWithDeadline(
+    `${apiBaseUrl}${path}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+    REQUEST_DEADLINE_MS.LONG,
+  );
   if (!res.ok) throw await toApiError(res);
   return (await res.json()) as T;
 }
@@ -82,10 +92,14 @@ export function refreshTokens(refreshToken: string): Promise<AuthTokens> {
  * the user in a half-logged-in state, so callers swallow errors.
  */
 export async function logoutSession(accessToken: string): Promise<void> {
-  const res = await fetch(`${apiBaseUrl}/auth/logout`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const res = await fetchWithDeadline(
+    `${apiBaseUrl}/auth/logout`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+    REQUEST_DEADLINE_MS.LONG,
+  );
   if (!res.ok) throw await toApiError(res);
 }
 
@@ -118,9 +132,13 @@ export function resetPasswordWithCode(
 }
 
 export async function fetchMe(accessToken: string): Promise<UserProfile> {
-  const res = await fetch(`${apiBaseUrl}/auth/me`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const res = await fetchWithDeadline(
+    `${apiBaseUrl}/auth/me`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+    REQUEST_DEADLINE_MS.LONG,
+  );
   if (!res.ok) throw await toApiError(res);
   return (await res.json()) as UserProfile;
 }
@@ -139,8 +157,10 @@ export async function fetchMe(accessToken: string): Promise<UserProfile> {
 export async function fetchAnilistAuthorizeUrl(
   state: 'login' | 'link',
 ): Promise<string> {
-  const res = await fetch(
+  const res = await fetchWithDeadline(
     `${apiBaseUrl}/auth/anilist/url?state=${state}`,
+    undefined,
+    REQUEST_DEADLINE_MS.LONG,
   );
   if (!res.ok) throw await toApiError(res);
   const body = (await res.json()) as AnilistUrlResponse;
@@ -159,14 +179,18 @@ export async function linkAnilistAccount(
   accessToken: string,
 ): Promise<AnilistLinkResponse> {
   const body: AnilistLinkRequest = { code };
-  const res = await fetch(`${apiBaseUrl}/auth/anilist/link`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
+  const res = await fetchWithDeadline(
+    `${apiBaseUrl}/auth/anilist/link`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+    REQUEST_DEADLINE_MS.LONG,
+  );
   if (!res.ok) throw await toApiError(res);
   return (await res.json()) as AnilistLinkResponse;
 }

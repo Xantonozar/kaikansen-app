@@ -119,9 +119,13 @@ export async function fetchLibraryThemes(
   if (fixtureMode) return { themes: [], total: 0, page: 1, limit: 100 };
   const PAGE_LIMIT = 100;
   const MAX_PAGES = 25;
+  // Perf problem 13B: page 1 rides the LONG deadline — for a
+  // freshly linked account this read is the FIRST AniList library
+  // sync, which the spec classes as a heavy first sync. Later
+  // pages are plain paged reads (STANDARD default).
   const first = await apiJson<LibraryThemesResponse>(
     `/library/themes?page=1&limit=${PAGE_LIMIT}`,
-    { cache: opts },
+    { cache: opts, deadline: 'LONG' },
   );
   const themes = [...first.themes];
   let page = 1;
@@ -170,9 +174,13 @@ export async function fetchAnilistThemesPage(
     };
   }
   const typeParam = type ? `&type=${type}` : '';
+  // Perf problem 13B: page 1 rides the LONG deadline — the first
+  // read of this segment is the first AniList library sync for a
+  // freshly linked account (spec's heavy-first-sync class). Later
+  // group pages are plain paged reads (STANDARD default).
   return apiJson<LibraryThemesResponse>(
     `/library/themes?source=anilist&page=${page}&limit=${limit}${typeParam}`,
-    { cache: opts },
+    { cache: opts, ...(page === 1 ? { deadline: 'LONG' as const } : {}) },
   );
 }
 

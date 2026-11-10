@@ -47,31 +47,121 @@ export const fixtureMode = !apiUrl;
 export const apiBaseUrl: string | undefined = apiUrl;
 
 /**
+ * Request deadlines (perf problem 13B — audit C3: no fetch timeout).
+ *
+ * Every REST attempt gets its own AbortController clock; when it
+ * fires, the attempt rejects with ApiTimeoutError, which extends
+ * TypeError — the exact class a dead network rejects with today —
+ * so a timeout settles through the same error/retry states a
+ * connection failure already uses. No new UI states anywhere.
+ *
+ * Two named classes and no others:
+ *  - STANDARD: catalogue / feed / library / social / quiz reads and
+ *    writes (default 25s).
+ *  - LONG: the calls that legitimately ride a waking server or a
+ *    heavy first sync — the auth session calls (authApi.ts) and the
+ *    first AniList library sync (45s).
+ *
+ * The clock covers ONE attempt: apiFetch's 401 retry re-enters the
+ * timed send and gets a fresh clock of its own (the refresh call in
+ * between carries its own deadline inside authApi.ts).
+ */
+export const REQUEST_DEADLINE_MS = {
+  /** Default ceiling for one REST attempt. */
+  STANDARD: 25_000,
+  /** Waking-server / heavy-first-sync calls (auth, first AniList sync). */
+  LONG: 45_000,
+} as const;
+
+export type RequestDeadlineClass = keyof typeof REQUEST_DEADLINE_MS;
+
+/**
+ * A request that hit its deadline. Extends TypeError so it is
+ * indistinguishable in class from fetch's own network-failure
+ * rejection — existing error handling needs no new branch.
+ */
+export class ApiTimeoutError extends TypeError {
+  constructor(deadlineMs: number) {
+    super(`Request timed out after ${Math.round(deadlineMs / 1000)}s`);
+    this.name = 'ApiTimeoutError';
+  }
+}
+
+/**
+ * fetch() under a deadline: aborts the attempt when its clock runs
+ * out and converts that abort into an ApiTimeoutError. An abort
+ * that is NOT ours (the caller passed their own signal and it
+ * fired) rethrows verbatim — it is not a timeout.
+ */
+export async function fetchWithDeadline(
+  url: string,
+  init: (RequestInit & { deadlineMs?: number }) | undefined,
+  deadlineMs: number = REQUEST_DEADLINE_MS.STANDARD,
+): Promise<Response> {
+  const { deadlineMs: _initDeadline, ...fetchInit } = init ?? {};
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), deadlineMs);
+  // A caller-supplied signal stays honoured: it is LINKED into our
+  // controller (fetch only ever sees ours), so a foreign abort
+  // still cancels the attempt — and the catch below can tell it
+  // apart from our deadline by checking which signal fired.
+  const callerSignal = fetchInit.signal;
+  const onCallerAbort = () => controller.abort();
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort();
+    else callerSignal.addEventListener('abort', onCallerAbort);
+  }
+  try {
+    return await fetch(url, { ...fetchInit, signal: controller.signal });
+  } catch (e) {
+    if (controller.signal.aborted && !(callerSignal?.aborted ?? false)) {
+      throw new ApiTimeoutError(deadlineMs);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener('abort', onCallerAbort);
+  }
+}
+
+/**
  * Authenticated fetch (Slice 2): attaches the in-memory access token
  * when a session exists, and on a 401 makes ONE silent refresh attempt
  * (via the AuthProvider's registered handler, session.ts) and retries
  * once. If the refresh fails the provider is told the session expired
  * (it signs out) and the 401 response stands. Requests made signed-out
  * never trigger a refresh.
+ *
+ * Perf problem 13B: each attempt rides fetchWithDeadline — the
+ * first send and the post-refresh retry each get a FRESH clock of
+ * the call's deadline class; the clock never spans both attempts.
  */
 interface ApiFetchInit {
   method?: string;
   /** JSON-serialisable body; sets Content-Type: application/json. */
   body?: unknown;
+  /** Deadline class for this call (default STANDARD). */
+  deadline?: RequestDeadlineClass;
 }
 
 async function apiFetch(path: string, init?: ApiFetchInit): Promise<Response> {
+  const deadlineMs =
+    REQUEST_DEADLINE_MS[init?.deadline ?? 'STANDARD'];
   const send = (token: string | null) =>
-    fetch(`${apiUrl}${path}`, {
-      method: init?.method ?? 'GET',
-      headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(init?.body !== undefined
-          ? { 'Content-Type': 'application/json' }
-          : {}),
+    fetchWithDeadline(
+      `${apiUrl}${path}`,
+      {
+        method: init?.method ?? 'GET',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(init?.body !== undefined
+            ? { 'Content-Type': 'application/json' }
+            : {}),
+        },
+        body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
       },
-      body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
-    });
+      deadlineMs,
+    );
 
   const token = getAccessToken();
   let res = await send(token);
@@ -215,9 +305,13 @@ export class ApiRequestError extends Error {
  * own plain-fetch client because its calls create the session this
  * one relies on.
  */
+export interface ApiJsonInit extends ApiFetchInit {
+  cache?: CacheReadOptions;
+}
+
 export async function apiJson<T>(
   path: string,
-  init?: ApiFetchInit & { cache?: CacheReadOptions },
+  init?: ApiJsonInit,
 ): Promise<T> {
   const method = (init?.method ?? 'GET').toUpperCase();
   if (method === 'GET') {
@@ -247,7 +341,7 @@ export async function apiJson<T>(
 /** The raw apiJson request (no cache) — apiJson's network leg. */
 async function apiJsonNetwork<T>(
   path: string,
-  init?: ApiFetchInit,
+  init?: ApiJsonInit,
 ): Promise<T> {
   const res = await apiFetch(path, init);
   if (!res.ok) {
@@ -519,6 +613,8 @@ export async function fetchThemeBySlug(
   if (fixtureMode) {
     return popularThemesFixture.find((t) => t.slug === slug) ?? null;
   }
+  // Playback candidate resolution (perf problem 5: deliberately
+  // uncached) — STANDARD deadline like every catalogue read.
   const res = await apiFetch(`/themes/${encodeURIComponent(slug)}`);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`API /themes/${slug} answered ${res.status}`);
