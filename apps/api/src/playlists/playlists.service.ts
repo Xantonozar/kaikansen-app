@@ -22,6 +22,7 @@ import {
   type ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
 import { toThemeSummary, type ThemeDoc } from '../themes/theme.mapper';
+import { THEME_SUMMARY_PROJECTION } from '../themes/theme-projections';
 import { Playlist, type PlaylistDocument } from './playlist.schema';
 import {
   PlaylistActivity,
@@ -207,7 +208,11 @@ export class PlaylistsService {
       return new Map();
     }
     const filter: Record<string, unknown> = { _id: { $in: ids } };
-    const docs = await models.themes.find(filter).lean().exec();
+    const docs = await models.themes
+      .find(filter)
+      .select(THEME_SUMMARY_PROJECTION)
+      .lean()
+      .exec();
     return new Map(
       (docs as ThemeDoc[]).map((t) => [String(t._id), t]),
     );

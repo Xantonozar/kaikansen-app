@@ -186,6 +186,8 @@ describe('ThemesService.getHome', () => {
     const chainFor = (docs: unknown[]) => {
       const chain: Record<string, unknown> = {};
       chain.sort = () => chain;
+      // Perf problem 10: the rails query through a projection.
+      chain.select = () => chain;
       chain.limit = (n: number) => {
         limits.push(n);
         return chain;
@@ -349,6 +351,8 @@ describe('ThemesService.getSeasonThemes', () => {
       sorts.push(spec);
       return chain;
     };
+    // Perf problem 10: the season page queries through a projection.
+    chain.select = () => chain;
     chain.skip = (n: number) => {
       skips.push(n);
       return chain;

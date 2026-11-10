@@ -42,6 +42,10 @@ import {
   type ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
 import { toThemeSummary, type ThemeDoc } from '../themes/theme.mapper';
+import {
+  THEME_FEED_PROJECTION,
+  THEME_SUMMARY_PROJECTION,
+} from '../themes/theme-projections';
 import { Follow, type FollowDocument } from './follow.schema';
 import {
   Notification,
@@ -800,6 +804,7 @@ export class SocialService {
         ? []
         : ((await models.themes
             .find({ _id: { $in: uniqueThemeIds } })
+            .select(THEME_SUMMARY_PROJECTION)
             .lean()
             .exec()) as ThemeDoc[]);
     const themesById = new Map(
@@ -924,6 +929,9 @@ export class SocialService {
         ? []
         : ((await models.themes
             .find({ _id: { $in: uniqueThemeIds } })
+            // The feed's item mapper reads six theme fields —
+            // the dedicated feed projection (perf problem 10).
+            .select(THEME_FEED_PROJECTION)
             .lean()
             .exec()) as ThemeDoc[]);
     const themesById = new Map(

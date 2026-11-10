@@ -2,9 +2,13 @@ import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { applyHttpSetup } from './http/http-setup';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  // Compression + Cache-Control policy (perf problem 10). Applied
+  // here AND in the e2e harness via the same helper.
+  applyHttpSetup(app);
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Kaikansen API')

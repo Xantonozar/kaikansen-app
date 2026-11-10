@@ -21,6 +21,10 @@ function queryOf(result: unknown) {
   const q: Record<string, unknown> = {};
   q.sort = () => q;
   q.limit = () => q;
+  // Perf problem 10: the rails query through a field projection —
+  // the stand-in accepts .select like the real query (the fixture
+  // docs already carry exactly the summary fields).
+  q.select = () => q;
   q.lean = () => q;
   q.exec = async () => result;
   return q;

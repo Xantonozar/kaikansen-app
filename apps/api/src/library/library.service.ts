@@ -31,6 +31,7 @@ import {
   type ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
 import { toThemeSummary, type ThemeDoc } from '../themes/theme.mapper';
+import { THEME_SUMMARY_PROJECTION } from '../themes/theme-projections';
 import {
   AnilistLibraryClient,
   type AnilistLibraryEntry,
@@ -427,6 +428,7 @@ export class LibraryService {
       docs.length > 0
         ? await models.themes
             .find({ _id: { $in: docs.map((d) => d.themeId) } })
+            .select(THEME_SUMMARY_PROJECTION)
             .lean()
             .exec()
         : [];

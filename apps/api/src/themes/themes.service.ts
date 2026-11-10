@@ -45,6 +45,10 @@ import {
 import { currentSeason, previousSeason, SEASON_ORDER } from './season';
 import { toRelatedAnime, type AnimeDoc } from './anime.mapper';
 import { toThemeDetail, toThemeSummary, type ThemeDoc } from './theme.mapper';
+import {
+  ANIME_RELATED_PROJECTION,
+  THEME_SUMMARY_PROJECTION,
+} from './theme-projections';
 
 const RAIL_LIMIT = 20;
 /** The web seasonal endpoint's page size (app/api/themes/seasonal). */
@@ -360,9 +364,14 @@ export class ThemesService {
     const model = this.requireModel();
     const current = currentSeason(now);
 
+    // Both rails serve ThemeSummary rows only — the projection
+    // fetches exactly the mapper's fields (perf problem 10); the
+    // filters/sorts read stored fields, not returned ones, so the
+    // query plan is unchanged.
     const fetchRail = (s: typeof current.season, y: number) =>
       model
         .find({ animeSeason: s, animeSeasonYear: y })
+        .select(THEME_SUMMARY_PROJECTION)
         .sort({ totalWatches: -1 })
         .limit(RAIL_LIMIT)
         .lean()
@@ -372,6 +381,7 @@ export class ThemesService {
       fetchRail(current.season, current.year),
       model
         .find({ isPopular: true })
+        .select(THEME_SUMMARY_PROJECTION)
         .sort({ popularRank: 1 })
         .limit(POPULAR_LIMIT)
         .lean()
@@ -448,6 +458,7 @@ export class ThemesService {
     const page = Number.isNaN(parsedPage) || parsedPage < 1 ? 1 : parsedPage;
     const docs = (await model
       .find(filter)
+      .select(THEME_SUMMARY_PROJECTION)
       .sort({ sequence: 1, avgRating: -1 })
       .skip((page - 1) * SEASON_PAGE_SIZE)
       .limit(SEASON_PAGE_SIZE)
@@ -1359,6 +1370,9 @@ export class ThemesService {
    */
   async getSimilarThemes(slug: string): Promise<SimilarThemesResponse> {
     const model = this.requireModel();
+    // The source theme stays a FULL read: its mood list and first
+    // entry's tags build the match filter (perf problem 10 leaves
+    // filter-source reads alone).
     const theme = (await model
       .findOne({ slug })
       .lean()
@@ -1385,6 +1399,7 @@ export class ThemesService {
           },
         ],
       })
+      .select(THEME_SUMMARY_PROJECTION)
       .sort({ totalRatings: -1, avgRating: -1 })
       .limit(20)
       .lean()
@@ -1437,6 +1452,7 @@ export class ThemesService {
           { series: { $in: seriesNames } },
         ],
       })
+      .select(ANIME_RELATED_PROJECTION)
       .sort({ seasonYear: 1 })
       .limit(10)
       .lean()
@@ -1469,7 +1485,12 @@ export class ThemesService {
       animeModel.findOne({ anilistId: animeId }).lean().exec(),
       themeModel
         .find({ anilistId: animeId })
-        .select('-embedding -__v')
+        // The summary projection PLUS the two fields the header
+        // synthesis below reads when no cache document exists
+        // (animeStudios / animeSeries) — narrower than the old
+        // '-embedding -__v' full read, and the synthesis keeps
+        // working on cache-less anime (perf problem 10).
+        .select(`${THEME_SUMMARY_PROJECTION} animeStudios animeSeries`)
         .lean()
         .exec(),
     ]);
@@ -1527,7 +1548,11 @@ export class ThemesService {
       artistModel.findOne({ slug }).lean().exec(),
       themeModel
         .find({ artistSlugs: slug })
-        .select('-embedding -__v')
+        // The summary projection PLUS artistSlugs: the synthesis
+        // below locates the requested slug's index in the first
+        // theme's slug list to pick its display name (perf
+        // problem 10 — the filter field is not auto-included).
+        .select(`${THEME_SUMMARY_PROJECTION} artistSlugs`)
         .lean()
         .exec(),
     ]);
