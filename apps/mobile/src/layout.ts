@@ -14,8 +14,10 @@ export const FORM_MAX_WIDTH = 480;
  * Home mock's cards measure ≈315px of the 780px-wide mock — ≈40% of
  * the window (layout-fidelity design pass, measured from
  * kaikansen-home-v3-realimg.png) — clamped to stay sane off-phone.
+ * The rendered width is that size ×1.3 (owner's order, 2026-11-10);
+ * the card's height follows through its fixed aspect ratio.
  */
 export function usePosterCardWidth(): number {
   const { width } = useWindowDimensions();
-  return Math.round(Math.min(176, Math.max(132, width * 0.4)));
+  return Math.round(Math.min(176, Math.max(132, width * 0.4)) * 1.3);
 }

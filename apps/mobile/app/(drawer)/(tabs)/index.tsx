@@ -417,7 +417,6 @@ export default function HomeScreen() {
               key={item.slug}
               item={item}
               onPress={() => openTheme(item.slug)}
-              chipLabel={`${home.season.season} '${String(home.season.year).slice(2)} ${item.type}`}
             />
           ))}
           {home.seasonRail.length === 0 && (
