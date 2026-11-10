@@ -7,6 +7,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { ChevronLeft, Medal } from 'lucide-react-native';
 import type {
@@ -113,8 +114,15 @@ export default function LeaderboardScreen() {
     ? tierProgress(myRank.rp, myRank.tier)
     : null;
 
+  // The drawer navigator shows no header, so the screen clears the
+  // status bar / notch itself — the sibling drawer screens' pattern
+  // (season, anime, artist): SafeAreaView with the top edge. This
+  // screen shipped with a plain View root, so its header collided
+  // with the status bar — the same defect Search had (owner report
+  // 2026-11-10). Bottom needs no edge: the scroll content already
+  // pads itself (styles.content).
   return (
-    <View style={styles.screen}>
+    <SafeAreaView style={styles.screen} edges={['top']}>
       <View style={styles.header}>
         <Pressable
           onPress={() => router.back()}
@@ -222,7 +230,7 @@ export default function LeaderboardScreen() {
           </View>
         </View>
       )}
-    </View>
+    </SafeAreaView>
   );
 }
 
