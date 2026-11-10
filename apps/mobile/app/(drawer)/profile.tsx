@@ -18,7 +18,7 @@ import {
   Settings as SettingsIcon,
   Star,
 } from 'lucide-react-native';
-import type { UserRankProfile } from '@kaikansen/contracts';
+import type { ProfileStats, UserRankProfile } from '@kaikansen/contracts';
 import { fixtureMode } from '../../src/api';
 import { useAuth } from '../../src/auth';
 import { fetchMe } from '../../src/authApi';
@@ -26,6 +26,13 @@ import { Avatar } from '../../src/components/Avatar';
 import { RankProfileCard } from '../../src/components/RankCard';
 import { getAccessToken } from '../../src/session';
 import { fetchMyRank } from '../../src/socialApi';
+import {
+  hasPaintableStats,
+  paintableNumbers,
+  readProfileStatsCache,
+  writeProfileStatsCache,
+  type CachedProfileStatsNumbers,
+} from '../../src/profileStatsCache';
 import {
   formatCount,
   formatHoursListened,
@@ -66,6 +73,16 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * (and its pencil badge) and the Edit Profile pill all open the
  * Edit Profile screen, where the avatar picker lives.
  *
+ * Instant paint (perf problem 4): the last stats the app saved
+ * for this account (src/profileStatsCache) paint the moment the
+ * screen opens; the /auth/me refresh behind them swaps the fresh
+ * values in silently and re-saves them. A record the app's own
+ * listen/rate actions marked dirty paints only its follow
+ * counts — the stats wait for the fetch rather than show
+ * numbers the app knows are stale. A cold open (no record)
+ * behaves exactly as before: dashes until the session profile
+ * carries stats.
+ *
  * Menu targets (unchanged): Listening History opens the Library
  * on its Recent segment, My Ratings the public own-profile
  * screen (where the ratings list lives), AniList Sync the
@@ -82,8 +99,13 @@ export default function OwnProfileScreen() {
 
   const [rank, setRank] = useState<UserRankProfile | null>(null);
   const [rankLoading, setRankLoading] = useState(false);
+  /** The instant-paint cache snapshot for this account (perf 4). */
+  const [cachedNumbers, setCachedNumbers] =
+    useState<CachedProfileStatsNumbers | null>(null);
+  const [cachedHasStats, setCachedHasStats] = useState(false);
 
   const userId = user?.id;
+  const username = user?.username;
   useEffect(() => {
     if (!signedIn) return;
     let live = true;
@@ -92,6 +114,17 @@ export default function OwnProfileScreen() {
       .then((r) => live && setRank(r))
       .catch(() => live && setRank(null))
       .finally(() => live && setRankLoading(false));
+    // Instant paint: load the saved stats for this account. The
+    // refresh below swaps the fresh values in when they land.
+    if (username) {
+      readProfileStatsCache(username)
+        .then((entry) => {
+          if (!live) return;
+          setCachedNumbers(paintableNumbers(entry));
+          setCachedHasStats(hasPaintableStats(entry));
+        })
+        .catch(() => {});
+    }
     // Refresh the session profile so the hero counts and the
     // listening stats are current (the login payload predates
     // them). A failure keeps the session copy — the stats just
@@ -110,6 +143,15 @@ export default function OwnProfileScreen() {
     // Re-read when the signed-in account changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
+
+  // Keep the cache current: every session profile that carries
+  // stats re-saves them (and un-dirties the record after the
+  // app's own listen/rate actions marked it).
+  const sessionStats = user?.stats;
+  useEffect(() => {
+    if (!username || !sessionStats) return;
+    void writeProfileStatsCache(username, sessionStats);
+  }, [username, sessionStats]);
 
   const onLogout = async () => {
     await logout();
@@ -148,8 +190,25 @@ export default function OwnProfileScreen() {
   );
 
   const stats = user?.stats;
-  const followers = stats?.followersCount ?? user?.totalFollowers ?? 0;
-  const following = stats?.followingCount ?? user?.totalFollowing ?? 0;
+  const followers =
+    stats?.followersCount ??
+    cachedNumbers?.followersCount ??
+    user?.totalFollowers ??
+    0;
+  const following =
+    stats?.followingCount ??
+    cachedNumbers?.followingCount ??
+    user?.totalFollowing ??
+    0;
+  // The stats card's display source: the fresh session stats
+  // when they exist, else the cache paint (only when the record
+  // carries paintable stats — a dirty record's stats are
+  // known-stale and keep the dash state until the fetch lands).
+  const statsForCard: ProfileStats | undefined =
+    stats ??
+    (cachedHasStats && cachedNumbers
+      ? { ...cachedNumbers }
+      : undefined);
 
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -264,16 +323,16 @@ export default function OwnProfileScreen() {
             <View style={styles.statsCard}>
               {stat(
                 'Mean Rating',
-                stats ? formatMeanRating(stats) : '—',
+                statsForCard ? formatMeanRating(statsForCard) : '—',
               )}
               {stat(
                 'Themes Listened',
-                stats ? formatThemesListened(stats) : '—',
+                statsForCard ? formatThemesListened(statsForCard) : '—',
                 true,
               )}
               {stat(
                 'Hours Listened',
-                stats ? formatHoursListened(stats) : '—',
+                statsForCard ? formatHoursListened(statsForCard) : '—',
                 true,
               )}
             </View>

@@ -12,6 +12,7 @@ import type {
 } from '@kaikansen/contracts';
 import { ApiRequestError, apiJson, fixtureMode } from './api';
 import { getAccessToken } from './session';
+import { markOwnProfileStatsDirty } from './profileStatsCache';
 
 /**
  * Library client (Slice M2) — favorites, watch history, theme ratings
@@ -181,19 +182,26 @@ export async function setRating(
   score: number,
 ): Promise<ThemeRatingState> {
   guardWrite();
-  return apiJson<ThemeRatingState>(`/themes/${enc(slug)}/rating`, {
+  const state = await apiJson<ThemeRatingState>(`/themes/${enc(slug)}/rating`, {
     method: 'PUT',
     body: { score },
   });
+  // Perf problem 4: the account's saved profile stats are stale
+  // by this rating — dirty the cache entry (fire-and-forget).
+  void markOwnProfileStatsDirty();
+  return state;
 }
 
 export async function clearRating(
   slug: string,
 ): Promise<ThemeRatingState> {
   guardWrite();
-  return apiJson<ThemeRatingState>(`/themes/${enc(slug)}/rating`, {
+  const state = await apiJson<ThemeRatingState>(`/themes/${enc(slug)}/rating`, {
     method: 'DELETE',
   });
+  // Perf problem 4: same dirty marking as setRating.
+  void markOwnProfileStatsDirty();
+  return state;
 }
 
 /* ------------------------------------------------------------------ */

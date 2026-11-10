@@ -16,6 +16,7 @@ import type {
   ThemeEntry,
 } from '@kaikansen/contracts';
 import { recordWatch } from './api';
+import { markOwnProfileStatsDirty } from './profileStatsCache';
 import {
   adoptPreloadedPlayer,
   discardPreload,
@@ -789,10 +790,18 @@ export function usePlayback(args: {
       slug: detail.slug,
       atEntryId: entry.atEntryId,
       mode,
-    }).catch(() => {
-      // History is best-effort — a failed record never interrupts
-      // playback (recordWatch already no-ops for fixture/signed-out).
-    });
+    })
+      .then(() => {
+        // Perf problem 4: the account's saved profile stats are
+        // now stale by this play — dirty the cache entry so the
+        // next profile paint waits for the fetch instead of
+        // showing numbers the app knows moved.
+        void markOwnProfileStatsDirty();
+      })
+      .catch(() => {
+        // History is best-effort — a failed record never interrupts
+        // playback (recordWatch already no-ops for fixture/signed-out).
+      });
   }, [isPlaying, detail, entry, mode]);
 
   // Stop sound the moment the consumer unmounts; the hook releases

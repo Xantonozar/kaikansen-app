@@ -51,7 +51,10 @@ import {
   PlaylistActivity,
   type PlaylistActivityDocument,
 } from '../playlists/playlist-activity.schema';
-import { computeProfileStats } from '../users/profile-stats';
+import {
+  computeProfileStats,
+  readStoredProfileStats,
+} from '../users/profile-stats';
 
 /** The web's notification list cap (GET /api/notifications). */
 const NOTIFICATION_LIST_LIMIT = 50;
@@ -397,14 +400,29 @@ export class SocialService {
    * usernames 404 (the web's own message).
    *
    * App addition (owner-ordered for the Profile design): `stats`
-   * carries the listening aggregates (computeProfileStats — the
-   * same routine GET /auth/me uses, so both surfaces agree).
+   * carries the listening aggregates. Perf problem 4: the three
+   * aggregates are read from the user record's stored `stats*`
+   * fields (maintained on the write paths) — one small read, no
+   * counting at view time — with followers/following still
+   * counted LIVE from the follows collection (audit S3). A
+   * document the write paths have never maintained (and the
+   * recount has not backfilled) falls back to computeProfileStats
+   * for this serve — never zeros, and the fallback does NOT
+   * backfill (repair is the recount's job). Both surfaces
+   * (GET /auth/me too) share this exact policy, so they agree.
    * Aggregates only: no history or rating rows, and none of the
    * private fields the projection above already withholds.
    */
   async getProfile(username: string): Promise<UserPublicProfile> {
     const models = this.requireModels();
     const user = await this.findUserOr404(models, username);
+    const [followersCount, followingCount] = await Promise.all([
+      models.follows.countDocuments({ followeeId: user._id }).exec(),
+      models.follows.countDocuments({ followerId: user._id }).exec(),
+    ]);
+    const stats =
+      readStoredProfileStats(user, followersCount, followingCount) ??
+      (await computeProfileStats(models, user));
     return {
       id: String(user._id),
       username: user.username,
@@ -415,7 +433,7 @@ export class SocialService {
       totalFollowers: user.totalFollowers ?? 0,
       totalFollowing: user.totalFollowing ?? 0,
       createdAt: iso(user.createdAt),
-      stats: await computeProfileStats(models, user),
+      stats,
     };
   }
 

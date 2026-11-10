@@ -34,7 +34,11 @@ import {
  * The response reports how many users were checked, how many
  * were corrected, and every field that changed (from → to).
  * Nothing runs this automatically — it is a deliberate repair
- * action for when drift is suspected (audit S3).
+ * action for when drift is suspected (audit S3). Since perf
+ * problem 4 it also backfills the stored profile-stats fields
+ * (statsListenedThemes / statsListenedSeconds / statsRatingSum /
+ * statsRatingCount) for users whose documents predate them —
+ * the one-time backfill after that deploy is this same call.
  */
 @Controller('internal/users')
 @UseGuards(SyncSecretGuard)

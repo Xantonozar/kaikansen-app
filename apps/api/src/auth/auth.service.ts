@@ -49,7 +49,10 @@ import {
   type ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
 import { Follow, type FollowDocument } from '../social/follow.schema';
-import { computeProfileStats } from '../users/profile-stats';
+import {
+  computeProfileStats,
+  readStoredProfileStats,
+} from '../users/profile-stats';
 
 /**
  * Password-login is impossible for AniList-created accounts: the web
@@ -736,22 +739,41 @@ export class AuthService {
   /**
    * The profile WITH its listening stats attached (GET /auth/me
    * and PATCH /auth/me — the reads the own-Profile screen
-   * consumes). The aggregates come from the shared routine
-   * (computeProfileStats — the same one GET /users/:username
-   * uses, so both surfaces agree). When this instance was built
-   * without the stats models the profile answers without `stats`
-   * rather than failing — the field is optional in the contract
-   * for exactly that case (and for the register/login payloads,
-   * which never attach it).
+   * consumes). Perf problem 4: the three aggregates are read
+   * from the user record's stored `stats*` fields (maintained on
+   * the write paths) — one small read, no counting at view
+   * time — with followers/following still counted LIVE from the
+   * follows collection (audit S3). A document the write paths
+   * have never maintained (and the recount has not backfilled)
+   * falls back to computeProfileStats for this serve — never
+   * zeros, and the fallback does NOT backfill (repair is the
+   * recount's job). GET /users/:username applies the identical
+   * policy, so both surfaces agree. When this instance was built
+   * without the follows model the live counts cannot be read, so
+   * the profile answers without `stats` rather than failing —
+   * the field is optional in the contract for exactly that case
+   * (and for the register/login payloads, which never attach
+   * it). A stored read additionally needs no rating/history/
+   * theme models at all: only the fallback path does.
    */
   private async withStats(user: UserDocument): Promise<UserProfile> {
     const profile = this.toProfile(user);
-    if (
-      !this.ratingModel ||
-      !this.historyModel ||
-      !this.themeModel ||
-      !this.followModel
-    ) {
+    if (!this.followModel) {
+      return profile;
+    }
+    const [followersCount, followingCount] = await Promise.all([
+      this.followModel.countDocuments({ followeeId: user._id }).exec(),
+      this.followModel.countDocuments({ followerId: user._id }).exec(),
+    ]);
+    const stored = readStoredProfileStats(
+      user,
+      followersCount,
+      followingCount,
+    );
+    if (stored) {
+      return { ...profile, stats: stored };
+    }
+    if (!this.ratingModel || !this.historyModel || !this.themeModel) {
       return profile;
     }
     return {

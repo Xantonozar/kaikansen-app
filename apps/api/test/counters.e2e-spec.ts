@@ -58,6 +58,12 @@ function makeFakeModels() {
       totalFollowing: 98,
       totalRatings: 42,
       totalTime: 7,
+      // The stored profile stats drifted too (perf problem 4):
+      // the one rating row below says sum 9 over count 1.
+      statsListenedThemes: 5,
+      statsListenedSeconds: 7,
+      statsRatingSum: 3,
+      statsRatingCount: 4,
     },
   ];
   const follows: Record<string, unknown>[] = [
@@ -157,11 +163,18 @@ describe('POST /internal/users/recount-counters (e2e)', () => {
       .expect(200);
     expect(res.body.checked).toBe(1);
     expect(res.body.corrected).toBe(1);
-    expect(res.body.corrections).toHaveLength(4);
+    // 4 legacy counters + the 4 stored profile-stats fields
+    // (perf problem 4) — history is empty, so the listening
+    // stats recount to 0; the single rating (9) sets sum/count.
+    expect(res.body.corrections).toHaveLength(8);
     const stored = models.userModel.docs[0];
     expect(stored.totalFollowers).toBe(1);
     expect(stored.totalFollowing).toBe(1);
     expect(stored.totalRatings).toBe(1);
     expect(stored.totalTime).toBe(0);
+    expect(stored.statsListenedThemes).toBe(0);
+    expect(stored.statsListenedSeconds).toBe(0);
+    expect(stored.statsRatingSum).toBe(9);
+    expect(stored.statsRatingCount).toBe(1);
   });
 });

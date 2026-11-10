@@ -26,6 +26,11 @@ import { SocialService } from './../src/social/social.service';
  * played-entry durations — and the public profile must expose
  * aggregates ONLY (no email, no hash, no AniList token, no
  * history/rating rows).
+ *
+ * Perf problem 4: the seeds below predate the stored stats, so
+ * these serves exercise the FALLBACK (computeProfileStats over
+ * the rows). The stored path — and the proof that stored and
+ * fallback agree — lives in profile-stats-stored.e2e-spec.ts.
  */
 
 function valueEquals(a: unknown, b: unknown): boolean {

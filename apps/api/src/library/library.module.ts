@@ -8,6 +8,7 @@ import {
   ThemeCache,
   ThemeCacheSchema,
 } from '../themes/theme-cache.schema';
+import { ProfileStatsMaintenance } from '../users/profile-stats-maintenance';
 import { AnilistLibraryClient } from './anilist-library.client';
 import { Favorite, FavoriteSchema } from './favorite.schema';
 import { Follow, FollowSchema } from '../social/follow.schema';
@@ -75,6 +76,9 @@ export class LibraryModule {
         AnilistClient,
         AnilistLibraryClient,
         FollowerActivityService,
+        // Perf problem 4: maintains the user record's stored
+        // profile stats on this module's history/rating writes.
+        ProfileStatsMaintenance,
       ],
     };
   }

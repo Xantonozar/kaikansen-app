@@ -62,6 +62,11 @@ function makeModels() {
       totalFollowing: 98,
       totalRatings: 42,
       totalTime: 7,
+      // The perf-problem-4 stored stats drifted too.
+      statsListenedThemes: 12,
+      statsListenedSeconds: 7,
+      statsRatingSum: 1,
+      statsRatingCount: 9,
     },
     {
       _id: OTHER,
@@ -70,6 +75,10 @@ function makeModels() {
       totalFollowing: 1,
       totalRatings: 0,
       totalTime: 0,
+      statsListenedThemes: 0,
+      statsListenedSeconds: 0,
+      statsRatingSum: 0,
+      statsRatingCount: 0,
     },
   ];
   const follows: Record<string, unknown>[] = [
@@ -145,12 +154,47 @@ describe('CountersService — recountCounters', () => {
       { userId: USER, username: 'drifty', field: 'totalFollowing', from: 98, to: 1 },
       { userId: USER, username: 'drifty', field: 'totalRatings', from: 42, to: 3 },
       { userId: USER, username: 'drifty', field: 'totalTime', from: 7, to: 100 },
+      // Perf problem 4: the stored stats are part of the repair
+      // set — drifty's rows say 1 distinct theme, 100 seconds,
+      // and ratings 8+9+10 (sum 27 over 3).
+      { userId: USER, username: 'drifty', field: 'statsListenedThemes', from: 12, to: 1 },
+      { userId: USER, username: 'drifty', field: 'statsListenedSeconds', from: 7, to: 100 },
+      { userId: USER, username: 'drifty', field: 'statsRatingSum', from: 1, to: 27 },
+      { userId: USER, username: 'drifty', field: 'statsRatingCount', from: 9, to: 3 },
     ]);
     const stored = models.userModel.docs[0];
     expect(stored.totalFollowers).toBe(2);
     expect(stored.totalFollowing).toBe(1);
     expect(stored.totalRatings).toBe(3);
     expect(stored.totalTime).toBe(100);
+    expect(stored.statsListenedThemes).toBe(1);
+    expect(stored.statsListenedSeconds).toBe(100);
+    expect(stored.statsRatingSum).toBe(27);
+    expect(stored.statsRatingCount).toBe(3);
+  });
+
+  it('backfills a user whose document predates the stored stats (perf problem 4)', async () => {
+    const { service, models } = makeService();
+    // Strip the stats fields: the pre-backfill state. The legacy
+    // counters are left TRUE so the report isolates the backfill.
+    const legacy = models.userModel.docs[0];
+    delete legacy.statsListenedThemes;
+    delete legacy.statsListenedSeconds;
+    delete legacy.statsRatingSum;
+    delete legacy.statsRatingCount;
+    legacy.totalFollowers = 2;
+    legacy.totalFollowing = 1;
+    legacy.totalRatings = 3;
+    legacy.totalTime = 100;
+    const report = await service.recountCounters(USER);
+    expect(report.corrected).toBe(1);
+    expect(report.corrections).toEqual([
+      { userId: USER, username: 'drifty', field: 'statsListenedThemes', from: 0, to: 1 },
+      { userId: USER, username: 'drifty', field: 'statsListenedSeconds', from: 0, to: 100 },
+      { userId: USER, username: 'drifty', field: 'statsRatingSum', from: 0, to: 27 },
+      { userId: USER, username: 'drifty', field: 'statsRatingCount', from: 0, to: 3 },
+    ]);
+    expect(models.userModel.docs[0].statsRatingCount).toBe(3);
   });
 
   it('is a no-op once the counters are true', async () => {

@@ -14,6 +14,8 @@ import { User } from './../src/auth/user.schema';
 import { ThemeCache } from './../src/themes/theme-cache.schema';
 import { LibraryController } from './../src/library/library.controller';
 import { LibraryService } from './../src/library/library.service';
+import { ProfileStatsMaintenance } from './../src/users/profile-stats-maintenance';
+import { computeProfileStats } from './../src/users/profile-stats';
 import { AnilistLibraryClient } from './../src/library/anilist-library.client';
 import { Favorite } from './../src/library/favorite.schema';
 import { Rating } from './../src/library/rating.schema';
@@ -298,6 +300,27 @@ function makeFakeModels() {
       if (doc) applyUpdate(doc, update);
       return queryOf(doc ?? null);
     },
+    // The stored profile-stats maintenance's marker-filtered
+    // update (perf problem 4): a doc without statsRatingCount
+    // never matches; returns the PRE-update doc like Mongoose.
+    findOneAndUpdate: (
+      filter: Record<string, unknown>,
+      update: Record<string, unknown>,
+    ) => {
+      const requiresMarker = Boolean(
+        (filter as { statsRatingCount?: unknown }).statsRatingCount,
+      );
+      const doc = users.find(
+        (u) =>
+          String(u._id) === String(filter._id) &&
+          (!requiresMarker ||
+            (u as { statsRatingCount?: unknown }).statsRatingCount !==
+              undefined),
+      );
+      const before = doc ? { ...doc } : null;
+      if (doc) applyUpdate(doc, update);
+      return queryOf(before);
+    },
     create: async (data: Record<string, unknown>) => {
       const doc = { _id: `user-new-${++seq}`, ...data };
       users.push(doc);
@@ -408,6 +431,13 @@ function makeFakeModels() {
       const idx = ratings.findIndex((r) => String(r._id) === String(id));
       return queryOf(idx >= 0 ? ratings.splice(idx, 1)[0] : null);
     },
+    // The stored profile-stats maintenance counts a user's rows
+    // through countDocuments (perf problem 4).
+    countDocuments: (filter: Record<string, unknown>) =>
+      queryOf(
+        ratings.filter((r) => String(r.userId) === String(filter.userId))
+          .length,
+      ),
     aggregate: async (pipeline: Record<string, unknown>[]) => {
       const match = (pipeline[0] as { $match: { themeId: unknown } }).$match;
       const rows = ratings.filter(
@@ -441,6 +471,18 @@ function makeFakeModels() {
             .map((h) => h[field]),
         ),
       ]),
+    // The stored profile-stats maintenance's distinct-theme
+    // lookup counts rows for (userId, themeId) — and, with no
+    // themeId in the filter, all of a user's rows (perf problem 4).
+    countDocuments: (filter: Record<string, unknown>) =>
+      queryOf(
+        history.filter(
+          (h) =>
+            String(h.userId) === String(filter.userId) &&
+            (filter.themeId === undefined ||
+              String(h.themeId) === String(filter.themeId)),
+        ).length,
+      ),
   };
 
   // user-2 follows user-1 — the seed Suite 3's notification
@@ -471,6 +513,10 @@ function makeFakeModels() {
     docs: follows,
     find: (filter: Record<string, unknown>) =>
       chain(follows.filter((f) => rowMatches(f, filter))),
+    // computeProfileStats counts the follow truth live through
+    // countDocuments (audit S3 / perf problem 4 helper).
+    countDocuments: (filter: Record<string, unknown>) =>
+      queryOf(follows.filter((f) => rowMatches(f, filter)).length),
   };
 
   const notificationModel = {
@@ -1299,5 +1345,176 @@ describe('Library follower notifications with mocked models (e2e)', () => {
     }
     // The failed insert added no unread row.
     expect(rowsOf('theme_rated').filter((n) => !n.read)).toHaveLength(0);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+/**
+ * Suite 4 — stored profile stats over real HTTP (perf problem 4):
+ * LibraryService composed WITH ProfileStatsMaintenance (the
+ * LibraryModule wiring) over the shared fake stores. user-1's
+ * document starts MAINTAINED (the recount-backfill state), and
+ * after each write the stored stats* are asserted EQUAL to
+ * computeProfileStats over the same rows — the write-path proof
+ * end to end. GET /auth/me then serves those stored values.
+ */
+describe('Stored profile stats with mocked models (e2e)', () => {
+  let app: INestApplication;
+  const models = makeFakeModels();
+
+  /* The same AniList stub Suite 2 uses (its const lives in that
+     describe's scope): no test ever touches the live API. */
+  const anilistClientStub = {
+    fetchLibraryMediaIds: jest.fn(async () => null),
+    fetchLibraryEntries: jest.fn(async () => []),
+  };
+
+  const tokenFor = (userId: string) =>
+    jwt.sign(
+      {
+        userId,
+        username: userId,
+        email: `${userId}@example.com`,
+        tokenType: 'access',
+      },
+      E2E_SECRET,
+      { expiresIn: '15m' },
+    );
+  const asUser1 = () => ({
+    Authorization: `Bearer ${tokenFor('user-1')}`,
+  });
+
+  async function expectStoredEqualsComputed() {
+    const computed = await computeProfileStats(
+      {
+        ratings: models.ratingModel as never,
+        history: models.historyModel as never,
+        themes: models.themeModel as never,
+        follows: models.followModel as never,
+      },
+      { _id: 'user-1' },
+    );
+    const user = models.userModel.docs[0];
+    expect(user.statsListenedThemes).toBe(computed.themesListened);
+    expect(user.statsListenedSeconds).toBe(computed.totalListenedSeconds);
+    expect(user.totalTime).toBe(computed.totalListenedSeconds);
+    const rows = models.ratingModel.docs.filter(
+      (r) => r.userId === 'user-1',
+    );
+    expect(user.statsRatingCount).toBe(rows.length);
+    expect(user.statsRatingSum).toBe(
+      rows.reduce((sum, r) => sum + (r.score as number), 0),
+    );
+    return computed;
+  }
+
+  beforeAll(async () => {
+    process.env.JWT_SECRET = E2E_SECRET;
+    process.env.JWT_REFRESH_SECRET = E2E_REFRESH_SECRET;
+    // user-1 starts maintained — as the recount backfill leaves
+    // every pre-existing user after the deploy.
+    Object.assign(models.userModel.docs[0], {
+      statsListenedThemes: 0,
+      statsListenedSeconds: 0,
+      statsRatingSum: 0,
+      statsRatingCount: 0,
+    });
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [ConfigModule.forRoot({ isGlobal: true })],
+      controllers: [LibraryController, AuthController],
+      providers: [
+        LibraryService,
+        ProfileStatsMaintenance,
+        AuthService,
+        AccessTokenGuard,
+        AnilistClient,
+        { provide: AnilistLibraryClient, useValue: anilistClientStub },
+        { provide: getModelToken(User.name), useValue: models.userModel },
+        {
+          provide: getModelToken(ThemeCache.name),
+          useValue: models.themeModel,
+        },
+        {
+          provide: getModelToken(Favorite.name),
+          useValue: models.favoriteModel,
+        },
+        { provide: getModelToken(Rating.name), useValue: models.ratingModel },
+        {
+          provide: getModelToken(WatchHistory.name),
+          useValue: models.historyModel,
+        },
+        { provide: getModelToken(Follow.name), useValue: models.followModel },
+        {
+          provide: getModelToken(Notification.name),
+          useValue: models.notificationModel,
+        },
+      ],
+    })
+      .overrideGuard(ThrottlerGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+    app = moduleFixture.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    delete process.env.JWT_SECRET;
+    delete process.env.JWT_REFRESH_SECRET;
+  });
+
+  it('maintains the stored stats through watch → rate → re-rate → clear over HTTP', async () => {
+    const http = request(app.getHttpServer());
+    const slug = 'test_anime-op1-1';
+
+    await http
+      .post('/library/history')
+      .set(asUser1())
+      .send({ slug, atEntryId: 11, mode: 'watch' })
+      .expect(200);
+    await http
+      .post('/library/history')
+      .set(asUser1())
+      .send({ slug, atEntryId: 11, mode: 'listen' })
+      .expect(200);
+    // Two plays, one theme: distinct 1, seconds 60 + 60.
+    let computed = await expectStoredEqualsComputed();
+    expect(computed.themesListened).toBe(1);
+    expect(computed.totalListenedSeconds).toBe(120);
+
+    await http
+      .put(`/themes/${slug}/rating`)
+      .set(asUser1())
+      .send({ score: 8 })
+      .expect(200);
+    await expectStoredEqualsComputed();
+
+    await http
+      .put(`/themes/${slug}/rating`)
+      .set(asUser1())
+      .send({ score: 10 })
+      .expect(200);
+    computed = await expectStoredEqualsComputed();
+    expect(computed.meanRating).toBe(10);
+
+    // The own profile serves the stored values (followers counted
+    // live: user-2 follows user-1 in the seed).
+    const me = await http.get('/auth/me').set(asUser1()).expect(200);
+    expect(me.body.stats).toEqual({
+      meanRating: 10,
+      themesListened: 1,
+      totalListenedSeconds: 120,
+      followersCount: 1,
+      followingCount: 0,
+    });
+
+    await http
+      .delete(`/themes/${slug}/rating`)
+      .set(asUser1())
+      .expect(200);
+    computed = await expectStoredEqualsComputed();
+    expect(computed.meanRating).toBeNull();
+    expect(models.userModel.docs[0].statsRatingCount).toBe(0);
   });
 });

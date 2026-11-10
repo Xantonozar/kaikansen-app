@@ -42,10 +42,13 @@ import { HydratedDocument } from 'mongoose';
  * (GET /library/anilist-entries — the web stores only the merged
  * media ids, never per-entry rows). A FOURTH, `refreshSessions`,
  * exists only for this API's refresh-token reuse detection and
- * server-side logout (owner-ordered 2026-11-10, audit S1). They
- * follow the same additive pattern as the AniList sub-document:
- * the web's models neither read nor write them, and its delta
- * saves leave them untouched.
+ * server-side logout (owner-ordered 2026-11-10, audit S1). A
+ * FIFTH set, the `stats*` profile-stats fields (owner-ordered
+ * 2026-11-10, perf problem 4), stores the profile listening
+ * aggregates on the record so profile reads never count at view
+ * time. They follow the same additive pattern as the AniList
+ * sub-document: the web's models neither read nor write them,
+ * and its delta saves leave them untouched.
  */
 
 export type UserDocument = HydratedDocument<User>;
@@ -270,6 +273,36 @@ export class User {
     select: false,
   })
   refreshSessions?: RefreshSession[];
+
+  /**
+   * Stored profile listening stats (perf problem 4 — see
+   * users/profile-stats.ts ProfileStatsStoredFields): the
+   * profile aggregates maintained on the history/rating write
+   * paths by ProfileStatsMaintenance, so GET /auth/me and
+   * GET /users/:username serve them from this document instead
+   * of counting at view time. Additive and API-only, like the
+   * fields above — except `statsRatingCount`, whose ABSENCE is
+   * load-bearing: a document with no count has never been
+   * maintained nor backfilled, and the serve path falls back to
+   * computeProfileStats for it rather than showing zeros. The
+   * recount backstop (CountersService) fills all four in.
+   * `statsListenedSeconds` duplicates the legacy `totalTime`
+   * counter by design — both are the same definition (the summed
+   * played seconds), and the recount keeps them equal.
+   */
+  @Prop({ type: Number })
+  statsListenedThemes?: number;
+
+  @Prop({ type: Number })
+  statsListenedSeconds?: number;
+
+  /** Sum of the scores in the ratings this user GAVE. */
+  @Prop({ type: Number })
+  statsRatingSum?: number;
+
+  /** Count of the ratings this user GAVE (the mean's denominator). */
+  @Prop({ type: Number })
+  statsRatingCount?: number;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

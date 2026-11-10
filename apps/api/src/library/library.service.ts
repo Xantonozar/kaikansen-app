@@ -24,6 +24,8 @@ import type {
   WatchHistoryResponse,
 } from '@kaikansen/contracts';
 import { User, type UserDocument } from '../auth/user.schema';
+import { ProfileStatsMaintenance } from '../users/profile-stats-maintenance';
+import { resolvePlaySeconds } from '../users/profile-stats';
 import {
   ThemeCache,
   type ThemeCacheDocument,
@@ -116,6 +118,15 @@ export class LibraryService {
      */
     @Optional()
     private readonly followerActivity?: FollowerActivityService,
+    /**
+     * The stored profile-stats maintenance (perf problem 4):
+     * keeps the user record's `stats*` aggregates in step with
+     * the history/rating writes below. Optional for the same
+     * reason as the two services above — without it, the writes
+     * simply leave the stored stats to the recount backstop.
+     */
+    @Optional()
+    private readonly profileStats?: ProfileStatsMaintenance,
   ) {}
 
   private requireModels(): LibraryModels {
@@ -351,6 +362,14 @@ export class LibraryService {
    *      and $inc the user's totalTime by its duration (default 90).
    * The web hook swallows its own errors (try/catch + console) so a
    * counter failure never fails the history write — mirrored here.
+   *
+   * Perf problem 4 adds step 3: the stored profile-stats
+   * maintenance applies the same play to the user record's
+   * `stats*` fields (seconds via the SAME resolvePlaySeconds
+   * rule; distinct-theme +1 on the user's first row for the
+   * theme). It runs inside this same try/catch, and the
+   * maintenance itself is failure-tolerant too — a stats failure
+   * never fails the listen, exactly like the counters above.
    */
   private async applyWatchCounters(
     models: LibraryModels,
@@ -368,16 +387,22 @@ export class LibraryService {
         .findByIdAndUpdate(event.theme._id, { $inc: { [field]: 1 } })
         .exec();
 
-      const entry =
-        event.theme.entries?.find((e) => e.atEntryId === event.atEntryId) ??
-        event.theme.entries?.[0];
-      const entryDuration = Number(entry?.duration) || 90;
+      const entryDuration = resolvePlaySeconds(
+        event.theme,
+        event.atEntryId,
+      );
 
       await models.users
         .findByIdAndUpdate(event.userId, {
           $inc: { totalTime: entryDuration },
         })
         .exec();
+
+      await this.profileStats?.applyWatchDelta({
+        userId: event.userId,
+        theme: event.theme,
+        atEntryId: event.atEntryId,
+      });
     } catch (err) {
       console.error('[Library] watch counter update failed:', err);
     }
@@ -1056,6 +1081,11 @@ export class LibraryService {
       userId,
       isNew,
     );
+    // Perf problem 4: refresh the rater's stored rating stats
+    // (sum + count) from the settled rows — a recompute, so the
+    // create / update / lost-race branches above all land on the
+    // same truth. Failure-tolerant: never fails the rating.
+    await this.profileStats?.refreshRatingStats(userId);
     // Read the stored row back so the response is the state of record
     // even when the create above lost the unique-index race.
     const stored = await models.ratings
@@ -1130,6 +1160,9 @@ export class LibraryService {
     await models.users
       .findByIdAndUpdate(userId, { $inc: { totalRatings: -1 } })
       .exec();
+    // Perf problem 4: the stored rating stats follow the delete
+    // (the recompute now sees one fewer row). Failure-tolerant.
+    await this.profileStats?.refreshRatingStats(userId);
 
     return {
       slug: theme.slug,

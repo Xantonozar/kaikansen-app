@@ -53,6 +53,7 @@ import {
   setAccessToken,
 } from './session';
 import { secureGet, secureRemove, secureSet } from './storage';
+import { setSessionUsername } from './profileStatsCache';
 
 /**
  * Session state for the app (Slice 2).
@@ -150,6 +151,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     refreshTokenRef.current = res.refreshToken;
     setAccessToken(res.accessToken);
     await secureSet(REFRESH_KEY, res.refreshToken);
+    // Perf problem 4: remember whose stats cache the app's own
+    // listen/rate actions must dirty (profileStatsCache).
+    await setSessionUsername(res.user.username);
     setUser(res.user);
     setStatus('signedIn');
   }, []);
@@ -158,6 +162,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     refreshTokenRef.current = null;
     setAccessToken(null);
     await secureRemove(REFRESH_KEY);
+    await setSessionUsername(null);
     setUser(null);
     setAnilistUsername(null);
     setStatus('signedOut');
@@ -214,6 +219,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         if (profile) {
           setAccessToken(DEMO_ACCESS_TOKEN);
+          await setSessionUsername(profile.username);
           setUser(profile);
           setStatus('signedIn');
         } else {
@@ -228,6 +234,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           const profile = await fetchMe(fresh);
           if (cancelled) return;
+          await setSessionUsername(profile.username);
           setUser(profile);
           setStatus('signedIn');
           return;

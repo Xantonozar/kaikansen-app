@@ -4,6 +4,8 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { LibraryService } from './library.service';
+import { ProfileStatsMaintenance } from '../users/profile-stats-maintenance';
+import { computeProfileStats } from '../users/profile-stats';
 
 /**
  * LibraryService unit tests. All five models are in-memory fakes (no
@@ -206,6 +208,24 @@ function makeModels() {
         return queryOf(doc ?? null);
       },
     ),
+    // The profile-stats maintenance's marker-filtered update
+    // (perf problem 4): a doc without statsRatingCount never
+    // matches; returns the PRE-update doc like Mongoose.
+    findOneAndUpdate: jest.fn(
+      (filter: Record<string, unknown>, update: Record<string, unknown>) => {
+        const requiresMarker = Boolean(
+          (filter as { statsRatingCount?: unknown }).statsRatingCount,
+        );
+        const doc = users.find(
+          (u) =>
+            String(u._id) === String(filter._id) &&
+            (!requiresMarker || u.statsRatingCount !== undefined),
+        );
+        const before = doc ? { ...doc } : null;
+        if (doc) applyUpdate(doc, update);
+        return queryOf(before);
+      },
+    ),
   };
 
   const favoriteModel = {
@@ -290,6 +310,13 @@ function makeModels() {
       const removed = idx >= 0 ? ratings.splice(idx, 1)[0] : null;
       return queryOf(removed);
     }),
+    // The profile-stats maintenance's rating recompute reads a
+    // user's rows through find (perf problem 4).
+    find: jest.fn((filter: Record<string, unknown>) =>
+      queryOf(
+        ratings.filter((r) => String(r.userId) === String(filter.userId)),
+      ),
+    ),
     aggregate: jest.fn(async (pipeline: Record<string, unknown>[]) => {
       const match = (pipeline[0] as { $match: { themeId: unknown } }).$match;
       const rows = ratings.filter(
@@ -313,6 +340,17 @@ function makeModels() {
       history.push(doc);
       return doc;
     }),
+    // The profile-stats maintenance's distinct-theme lookup
+    // (perf problem 4): rows for (userId, themeId).
+    countDocuments: jest.fn((filter: Record<string, unknown>) =>
+      queryOf(
+        history.filter(
+          (h) =>
+            String(h.userId) === String(filter.userId) &&
+            String(h.themeId) === String(filter.themeId),
+        ).length,
+      ),
+    ),
     find: jest.fn((filter: Record<string, unknown>) =>
       chain(
         history.filter((h) => String(h.userId) === String(filter.userId)),
@@ -349,6 +387,32 @@ function makeService() {
     models.favoriteModel as never,
     models.ratingModel as never,
     models.historyModel as never,
+  );
+  return { models, service };
+}
+
+/**
+ * The service WITH the profile-stats maintenance wired (perf
+ * problem 4) — the LibraryModule composition. The maintenance
+ * runs over the same fake stores, so the stored end-states are
+ * asserted for real.
+ */
+function makeServiceWithStats() {
+  const models = makeModels();
+  const maintenance = new ProfileStatsMaintenance(
+    models.userModel as never,
+    models.historyModel as never,
+    models.ratingModel as never,
+  );
+  const service = new LibraryService(
+    models.themeModel as never,
+    models.userModel as never,
+    models.favoriteModel as never,
+    models.ratingModel as never,
+    models.historyModel as never,
+    undefined,
+    undefined,
+    maintenance as never,
   );
   return { models, service };
 }
@@ -986,6 +1050,111 @@ describe('LibraryService — ratings', () => {
     await expect(service.clearRating('user-1', 'nope')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Perf problem 4 — the stored profile stats ride the write paths.    */
+/* The core proof is EQUALITY: after each write sequence the user     */
+/* record's stored stats* equal computeProfileStats over the same     */
+/* rows. The fake user docs start MAINTAINED (the recount-backfill    */
+/* state); the unmaintained case is covered in the maintenance's      */
+/* own spec.                                                          */
+/* ------------------------------------------------------------------ */
+
+describe('LibraryService — stored profile stats (perf problem 4)', () => {
+  /** Stamp the fake world's user-1 into the maintained state. */
+  function markMaintained(models: ReturnType<typeof makeModels>) {
+    Object.assign(models.userModel.docs[0], {
+      statsListenedThemes: 0,
+      statsListenedSeconds: 0,
+      statsRatingSum: 0,
+      statsRatingCount: 0,
+    });
+  }
+
+  async function expectStatsEqualComputed(
+    models: ReturnType<typeof makeModels>,
+  ) {
+    const computed = await computeProfileStats(
+      {
+        ratings: models.ratingModel as never,
+        history: models.historyModel as never,
+        themes: models.themeModel as never,
+        follows: { countDocuments: () => queryOf(0) } as never,
+      },
+      { _id: 'user-1' },
+    );
+    const user = models.userModel.docs[0];
+    expect(user.statsListenedThemes).toBe(computed.themesListened);
+    expect(user.statsListenedSeconds).toBe(computed.totalListenedSeconds);
+    // The legacy totalTime counter and the stored seconds are the
+    // same definition — both write paths must agree.
+    expect(user.totalTime).toBe(computed.totalListenedSeconds);
+    const rows = models.ratingModel.docs.filter(
+      (r) => r.userId === 'user-1',
+    );
+    expect(user.statsRatingCount).toBe(rows.length);
+    expect(user.statsRatingSum).toBe(
+      rows.reduce((sum, r) => sum + (r.score as number), 0),
+    );
+  }
+
+  it('maintains the stored stats across listen + rate + update + clear', async () => {
+    const { models, service } = makeServiceWithStats();
+    markMaintained(models);
+
+    await service.recordWatch('user-1', {
+      slug: 'test_anime-op1-1',
+      atEntryId: 22,
+      mode: 'watch',
+    }); // 30s, first play of theme-1
+    await service.recordWatch('user-1', {
+      slug: 'test_anime-op1-1',
+      atEntryId: 11,
+      mode: 'listen',
+    }); // 60s, replay — distinct stays 1
+    await expectStatsEqualComputed(models);
+    expect(models.userModel.docs[0].statsListenedThemes).toBe(1);
+    expect(models.userModel.docs[0].statsListenedSeconds).toBe(90);
+
+    await service.setRating('user-1', 'test_anime-op1-1', { score: 8 });
+    await expectStatsEqualComputed(models);
+    await service.setRating('user-1', 'test_anime-op1-1', { score: 10 });
+    await expectStatsEqualComputed(models);
+    expect(models.userModel.docs[0].statsRatingSum).toBe(10);
+    expect(models.userModel.docs[0].statsRatingCount).toBe(1);
+
+    await service.clearRating('user-1', 'test_anime-op1-1');
+    await expectStatsEqualComputed(models);
+    expect(models.userModel.docs[0].statsRatingCount).toBe(0);
+  });
+
+  it('a stats-store failure never fails the listen or the rating', async () => {
+    const { models, service } = makeServiceWithStats();
+    markMaintained(models);
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    // Break ONLY the maintenance's marker-filtered user update.
+    models.userModel.findOneAndUpdate.mockImplementation(() => {
+      throw new Error('stats store down');
+    });
+    await expect(
+      service.recordWatch('user-1', {
+        slug: 'test_anime-op1-1',
+        mode: 'watch',
+      }),
+    ).resolves.toEqual({ recorded: true });
+    await expect(
+      service.setRating('user-1', 'test_anime-op1-1', { score: 8 }),
+    ).resolves.toMatchObject({ myScore: 8 });
+    await expect(
+      service.clearRating('user-1', 'test_anime-op1-1'),
+    ).resolves.toMatchObject({ myScore: null });
+    // The underlying writes themselves landed — only the stored
+    // stats lag (the recount backstop repairs them).
+    expect(models.historyModel.docs).toHaveLength(1);
+    expect(models.ratingModel.docs).toHaveLength(0);
+    spy.mockRestore();
   });
 });
 

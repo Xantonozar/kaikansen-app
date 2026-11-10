@@ -26,6 +26,7 @@ import {
 } from 'lucide-react-native';
 import type {
   PlaylistSummary,
+  ProfileStats,
   UserHistoryResponse,
   UserPublicProfile,
   UserRankProfile,
@@ -58,6 +59,13 @@ import {
   formatMeanRating,
   formatThemesListened,
 } from '../../../src/profileStats';
+import {
+  hasPaintableStats,
+  paintableNumbers,
+  readProfileStatsCache,
+  writeProfileStatsCache,
+  type CachedProfileStatsNumbers,
+} from '../../../src/profileStatsCache';
 import { relativeTime } from '../../../src/time';
 import {
   fontFamilies,
@@ -139,6 +147,15 @@ const TOP_COUNT = 3;
  * Follow/unfollow is optimistic (state + follower count flip
  * immediately, the response reconciles, an error reverts and shows
  * the server's message verbatim).
+ *
+ * Instant paint (perf problem 4): while the profile loads, a
+ * shell carrying the last saved stats for this username
+ * (src/profileStatsCache) renders in place of the bare spinner,
+ * and the loaded profile re-saves its stats for the next open.
+ * The shell is honest about what it is: cached aggregates only —
+ * no identity, no rank, no follow state is ever fabricated from
+ * the cache — and it yields the moment the fetch settles (the
+ * error state included).
  */
 export default function UserProfileScreen() {
   const theme = useTheme();
@@ -150,6 +167,10 @@ export default function UserProfileScreen() {
 
   const [profile, setProfile] = useState<UserPublicProfile | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** The instant-paint cache snapshot for this username (perf 4). */
+  const [cachedNumbers, setCachedNumbers] =
+    useState<CachedProfileStatsNumbers | null>(null);
+  const [cachedHasStats, setCachedHasStats] = useState(false);
   const [rank, setRank] = useState<UserRankProfile | null>(null);
   const [profilePlaylists, setProfilePlaylists] = useState<
     PlaylistSummary[] | null
@@ -182,11 +203,24 @@ export default function UserProfileScreen() {
     setMenuOpen(false);
     setIsFollowing(false);
     setFollowError(null);
+    setCachedNumbers(null);
+    setCachedHasStats(false);
+    // Instant paint (perf problem 4): pull the saved stats for
+    // this username; they render in the loading shell below and
+    // are re-saved from the fresh payload when it lands.
+    readProfileStatsCache(username)
+      .then((entry) => {
+        if (!live) return;
+        setCachedNumbers(paintableNumbers(entry));
+        setCachedHasStats(hasPaintableStats(entry));
+      })
+      .catch(() => {});
     fetchUserProfile(username)
       .then((p) => {
         if (!live) return;
         setProfile(p);
         setFollowersCount(p.totalFollowers);
+        void writeProfileStatsCache(p.username, p.stats);
         // Satellites — each settles on its own.
         fetchUserRank(p.id)
           .then((r) => live && setRank(r))
@@ -454,9 +488,57 @@ export default function UserProfileScreen() {
           <Text style={styles.message}>{loadError}</Text>
         </View>
       ) : !profile ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={theme.accent} />
-        </View>
+        cachedNumbers ? (
+          /* The instant-paint shell (perf problem 4): while the
+             profile fetch runs, the saved stats for this username
+             render in the loaded screen's own card anatomy (the
+             count line needs only the cached counts; the stats
+             card only a clean record's stats — a dirty record
+             paints counts alone). Nothing else is drawn: the
+             cache holds no identity to show. */
+          <ScrollView contentContainerStyle={styles.content}>
+            <View style={styles.socialRow}>
+              <Text style={styles.socialText}>
+                <Text style={styles.socialNumber}>
+                  {formatCount(cachedNumbers.followersCount)}
+                </Text>{' '}
+                Followers
+              </Text>
+              <Text style={styles.socialDot}>·</Text>
+              <Text style={styles.socialText}>
+                <Text style={styles.socialNumber}>
+                  {formatCount(cachedNumbers.followingCount)}
+                </Text>{' '}
+                Following
+              </Text>
+            </View>
+            {cachedHasStats ? (
+              <View style={styles.statsCard}>
+                {stat(
+                  'Mean Rating',
+                  formatMeanRating(cachedNumbers as ProfileStats),
+                )}
+                {stat(
+                  'Themes Listened',
+                  formatThemesListened(cachedNumbers as ProfileStats),
+                  true,
+                )}
+                {stat(
+                  'Hours Listened',
+                  formatHoursListened(cachedNumbers as ProfileStats),
+                  true,
+                )}
+              </View>
+            ) : null}
+            <View style={styles.center}>
+              <ActivityIndicator color={theme.accent} />
+            </View>
+          </ScrollView>
+        ) : (
+          <View style={styles.center}>
+            <ActivityIndicator color={theme.accent} />
+          </View>
+        )
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
           {/* Identity card: centred avatar, name, @handle, the rank
