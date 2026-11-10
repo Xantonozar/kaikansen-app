@@ -482,7 +482,7 @@ export default function HomeScreen() {
               },
             ]}
           >
-            <Shuffle size={20} color={theme.onAccent} strokeWidth={2} />
+            <Shuffle size={28} color={theme.onAccent} strokeWidth={2} />
           </View>
         </Pressable>
 
@@ -1016,14 +1016,20 @@ const createStyles = (theme: Theme) =>
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: spacing.md,
+    // Owner tweak (2026-11-10): the banner renders at 1.4× its
+    // original size — the metrics here are the originals × 1.4
+    // (gap 12 → 17, paddingHorizontal 20 → 28, paddingVertical
+    // 12 → 17, minHeight 44 → 62), with the title/subtitle sizes
+    // and the shuffle disc scaled to match (see below), so the
+    // box stands ≈101pt tall against the previous ≈72pt.
+    gap: 17,
     marginHorizontal: spacing.screenEdge,
     marginTop: spacing.lg,
     backgroundColor: theme.accentContainer,
     borderRadius: radii.cardLg,
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.md,
-    minHeight: 44,
+    paddingHorizontal: 28,
+    paddingVertical: 17,
+    minHeight: 62,
     overflow: 'hidden',
   },
   surpriseArtWrap: {
@@ -1053,19 +1059,24 @@ const createStyles = (theme: Theme) =>
   },
   surpriseTextBlock: {
     flex: 1,
-    gap: 2,
+    gap: 3,
   },
   surpriseTitle: {
     ...typeStyles.heading,
+    // × 1.4 with the banner (2026-11-10): 18 → 25.
+    fontSize: 25,
     color: theme.text,
   },
   surpriseSubtitle: {
     ...typeStyles.bodySmall,
+    // × 1.4 with the banner (2026-11-10): 12 → 17.
+    fontSize: 17,
     color: theme.muted,
   },
   surpriseButton: {
-    width: 48,
-    height: 48,
+    // × 1.4 with the banner (2026-11-10): 48 → 67.
+    width: 67,
+    height: 67,
     borderRadius: radii.pill,
     backgroundColor: theme.accent,
     alignItems: 'center',
