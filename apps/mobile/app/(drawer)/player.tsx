@@ -46,10 +46,26 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
 
 /**
  * Player route — full-screen Watch/Listen playback on expo-video,
- * opened from the Library (Offline rows) and playlist screens with
- * { slug, mode, entry (atEntryId) }. The theme detail screen no
- * longer comes here: it plays INLINE on the page, like the website
- * and the design (the hero card is the player).
+ * opened from the Library (Offline rows), the Downloads screen and
+ * playlist screens with { slug, mode, entry (atEntryId) }. The
+ * theme detail screen no longer comes here: it plays INLINE on the
+ * page, like the website and the design (the hero card is the
+ * player).
+ *
+ * OWNER RULING (2026-11-10) — who may open this route: ONLY
+ * playback started from a Playlist (playlist detail's Play All /
+ * shuffle / row plays) or from Offline/Downloads (the Downloads
+ * screen and the Library's Offline segment). EVERY other play
+ * entry point — Home rails and Continue Listening, Search, Season
+ * browse, Anime/Artist detail, Library Saved/Recent/AniList,
+ * Favourites — claims its queue exactly as before but navigates
+ * to the theme detail route (/theme/<slug>) instead; the detail
+ * hero renders the claimed session inline, so nothing is lost.
+ * Do not add new pushes to this route outside the two allowed
+ * origins. One known exception stands unresolved: the mini player
+ * still reopens this route for ANY session, because the playback
+ * queue carries no origin (see src/components/MiniPlayer.tsx) —
+ * fixing that needs queue-origin tracking, a separate decision.
  *
  * Composition follows the Lavender Dusk player mock (design
  * polish pass): NO header bar — the media carries two dark-glass

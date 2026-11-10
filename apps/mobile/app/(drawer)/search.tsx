@@ -262,10 +262,9 @@ export default function SearchScreen() {
     const item = items[index];
     if (!item) return;
     startQueue(queueItemsFromSummaries(items), index, 'watch');
-    router.push({
-      pathname: '/player',
-      params: { slug: item.slug, mode: 'watch' },
-    });
+    // Theme detail, not the player route — the player route is
+    // playlist/offline-only (owner ruling 2026-11-10).
+    router.push(`/theme/${item.slug}`);
   };
 
   const openTheme = (slug: string) => {

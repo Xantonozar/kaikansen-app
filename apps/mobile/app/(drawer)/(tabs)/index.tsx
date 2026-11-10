@@ -184,7 +184,11 @@ export default function HomeScreen() {
       if (!entry.theme) return;
       // The rail is the queue (Slice 2.5): the shown history, in
       // order, claimed in the tapped entry's mode — Next walks
-      // back through what you were listening to.
+      // back through what you were listening to. Navigation goes
+      // to the theme detail, NOT the player route: the player
+      // route is playlist/offline-only (owner ruling 2026-11-10,
+      // recorded in app/(drawer)/player.tsx). The detail hero
+      // renders the claimed session inline.
       if (history) {
         const playable = history.filter((e) => e.theme !== null);
         const items = playable.map((e) => ({
@@ -194,16 +198,7 @@ export default function HomeScreen() {
         const index = playable.findIndex((e) => e.id === entry.id);
         if (index >= 0) startQueue(items, index, entry.mode);
       }
-      router.push({
-        pathname: '/player',
-        params: {
-          slug: entry.theme.slug,
-          mode: entry.mode,
-          ...(entry.atEntryId != null
-            ? { entry: String(entry.atEntryId) }
-            : {}),
-        },
-      });
+      router.push(`/theme/${entry.theme.slug}`);
     },
     [router, history, startQueue],
   );
@@ -880,13 +875,12 @@ export default function HomeScreen() {
               onPlay={() => {
                 // The shown (type-filtered) Popular list is the
                 // queue (Slice 2.5): the play disc claims it at
-                // this row, then opens the player — the row body
-                // still opens the theme detail as before.
+                // this row, then opens the theme detail — the
+                // player route is playlist/offline-only (owner
+                // ruling 2026-11-10), and the detail hero renders
+                // the claimed session inline.
                 startQueue(queueItemsFromSummaries(popular), index, 'watch');
-                router.push({
-                  pathname: '/player',
-                  params: { slug: item.slug, mode: 'watch' },
-                });
+                openTheme(item.slug);
               }}
               saved={favorites.isFavorite(item.slug)}
               savePending={favorites.isPending(item.slug)}

@@ -353,7 +353,7 @@ export default function LibraryScreen() {
   }, [signedIn, anilistLinked]);
 
   /* Refetch on focus — the tab stays mounted, so freshness is
-     focus-driven (returning from the player shows the new history
+     focus-driven (returning from a play shows the new history
      entry; an unsave elsewhere drops out of Saved). Downloads are
      local store state, but a focus pass re-verifies their files so
      an externally deleted file flips to broken here, not at play. */
@@ -369,23 +369,41 @@ export default function LibraryScreen() {
     [router],
   );
 
+  /* Where a claimed play navigates (owner ruling 2026-11-10,
+     recorded in app/(drawer)/player.tsx): the player route opens
+     ONLY for Offline (downloads) playback in this screen — every
+     other segment lands on the theme detail, whose hero renders
+     the claimed session inline. */
+  type PlayDestination = 'theme' | 'player';
+
   const playTheme = useCallback(
-    (slug: string, mode: 'watch' | 'listen', atEntryId?: number | null) =>
-      router.push({
-        pathname: '/player',
-        params: {
-          slug,
-          mode,
-          ...(atEntryId != null ? { entry: String(atEntryId) } : {}),
-        },
-      }),
+    (
+      slug: string,
+      mode: 'watch' | 'listen',
+      atEntryId?: number | null,
+      destination: PlayDestination = 'theme',
+    ) => {
+      if (destination === 'player') {
+        router.push({
+          pathname: '/player',
+          params: {
+            slug,
+            mode,
+            ...(atEntryId != null ? { entry: String(atEntryId) } : {}),
+          },
+        });
+      } else {
+        router.push(`/theme/${slug}`);
+      }
+    },
     [router],
   );
 
   /* Queue claims (Slice 2.5): a segment's rows play as a queue —
      the segment's loaded list becomes the provider queue at the
-     tapped row, then the player opens exactly as before. The mode
-     claimed is the mode that row would have opened with. */
+     tapped row, then navigation follows the ruling above (theme
+     detail by default; the Offline segment passes 'player'). The
+     mode claimed is the mode that row would have opened with. */
   const { session, playback, startQueue } = usePlaybackSession();
   const playWithQueue = useCallback(
     (
@@ -394,11 +412,12 @@ export default function LibraryScreen() {
       slug: string,
       mode: 'watch' | 'listen',
       atEntryId?: number | null,
+      destination?: PlayDestination,
     ) => {
       if (items.length > 0 && index >= 0) {
         startQueue(items, index, mode);
       }
-      playTheme(slug, mode, atEntryId);
+      playTheme(slug, mode, atEntryId, destination);
     },
     [startQueue, playTheme],
   );
@@ -1388,12 +1407,16 @@ export default function LibraryScreen() {
                   const index = playable.findIndex(
                     (r) => r.id === record.id,
                   );
+                  // 'player' destination: Offline playback is one
+                  // of the two surfaces allowed to open the player
+                  // route (owner ruling 2026-11-10).
                   playWithQueue(
                     queueItems,
                     index,
                     record.slug,
                     record.mode,
                     record.atEntryId,
+                    'player',
                   );
                 }}
                 accessibilityRole="button"

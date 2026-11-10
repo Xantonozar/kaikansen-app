@@ -120,10 +120,9 @@ export default function FavouritesScreen() {
       if (fav && fav.themes.length > 0) {
         startQueue(queueItemsFromSummaries(fav.themes), index, 'watch');
       }
-      router.push({
-        pathname: '/player',
-        params: { slug, mode: 'watch' },
-      });
+      // Theme detail, not the player route — the player route is
+      // playlist/offline-only (owner ruling 2026-11-10).
+      router.push(`/theme/${slug}`);
     },
     [fav, router, startQueue],
   );

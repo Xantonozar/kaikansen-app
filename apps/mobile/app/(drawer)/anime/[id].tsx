@@ -98,7 +98,9 @@ export default function AnimeDetailScreen() {
     (slug: string) => {
       // The queue is the page's rows in display order: Openings
       // (by sequence), then Endings (by sequence) — the same order
-      // renderRows draws them.
+      // renderRows draws them. Navigation goes to the theme
+      // detail, not the player route — the player route is
+      // playlist/offline-only (owner ruling 2026-11-10).
       if (data) {
         const ordered = (['OP', 'ED'] as const).flatMap((type) =>
           data.themes
@@ -110,9 +112,9 @@ export default function AnimeDetailScreen() {
           startQueue(queueItemsFromSummaries(ordered), index, 'watch');
         }
       }
-      router.push({ pathname: '/player', params: { slug, mode: 'watch' } });
+      openTheme(slug);
     },
-    [router, data, startQueue],
+    [openTheme, data, startQueue],
   );
 
   const renderRows = (rows: ThemeSummary[]) =>

@@ -92,13 +92,16 @@ export default function ArtistDetailScreen() {
   const playTheme = useCallback(
     (themeSlug: string, list: ThemeSummary[]) => {
       // The artist's shown list (most-watched first) is the queue.
+      // Navigation goes to the theme detail, not the player route
+      // — the player route is playlist/offline-only (owner ruling
+      // 2026-11-10).
       const index = list.findIndex((t) => t.slug === themeSlug);
       if (index >= 0) {
         startQueue(queueItemsFromSummaries(list), index, 'watch');
       }
-      router.push({ pathname: '/player', params: { slug: themeSlug, mode: 'watch' } });
+      openTheme(themeSlug);
     },
-    [router, startQueue],
+    [openTheme, startQueue],
   );
 
   const themes = useMemo(

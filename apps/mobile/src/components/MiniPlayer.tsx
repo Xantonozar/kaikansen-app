@@ -76,6 +76,15 @@ export function MiniPlayer({
 
   const openPlayer = () => {
     if (!session.slug) return;
+    // KNOWN EXCEPTION to the owner ruling of 2026-11-10 (the
+    // player route is playlist/offline-only; every other entry
+    // point now lands on the theme detail): the bar still reopens
+    // the player route for any session because the playback queue
+    // carries NO origin — PlaybackQueue is { items, index } and
+    // startQueue records nothing about which surface claimed it,
+    // so a playlist-born session cannot be told apart from a
+    // Home-born one here. Left as is deliberately; resolving it
+    // needs queue-origin tracking, a separate owner decision.
     router.push({
       pathname: '/player',
       params: {

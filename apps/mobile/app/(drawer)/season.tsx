@@ -140,14 +140,16 @@ export default function SeasonScreen() {
   const { startQueue } = usePlaybackSession();
   const playTheme = useCallback(
     (slug: string, list: ThemeSummary[]) => {
-      // The shown list is the queue.
+      // The shown list is the queue. Navigation goes to the theme
+      // detail, not the player route — the player route is
+      // playlist/offline-only (owner ruling 2026-11-10).
       const index = list.findIndex((t) => t.slug === slug);
       if (index >= 0) {
         startQueue(queueItemsFromSummaries(list), index, 'watch');
       }
-      router.push({ pathname: '/player', params: { slug, mode: 'watch' } });
+      openTheme(slug);
     },
-    [router, startQueue],
+    [openTheme, startQueue],
   );
 
   const themes = data?.themes ?? [];
