@@ -13,6 +13,7 @@ import { SearchIndexesModule } from './search-indexes/search-indexes.module';
 import { SocialModule } from './social/social.module';
 import { StatsModule } from './stats/stats.module';
 import { SyncModule } from './sync/sync.module';
+import { SyncHealthModule } from './sync-health/sync-health.module';
 import { UsersModule } from './users/users.module';
 
 /**
@@ -41,6 +42,8 @@ const hasDatabase = typeof mongodbUri === 'string' && mongodbUri.length > 0;
     StatsModule.register(hasDatabase),
     SyncModule.register(hasDatabase),
     SearchIndexesModule.register(hasDatabase),
+    // TEMP DIAGNOSTIC (SYNC_SECRET 401 investigation, 2026-11-10): remove with the module.
+    SyncHealthModule,
   ],
   controllers: [HealthController],
 })
