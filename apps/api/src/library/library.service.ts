@@ -48,6 +48,14 @@ const HISTORY_LIMIT = 50;
 const FAVORITES_DEFAULT_PAGE = 1;
 const FAVORITES_DEFAULT_LIMIT = 50;
 
+/**
+ * The AniList source's GROUP-page defaults (owner's lazy-loading
+ * order, 2026-11-10): a page holds this many anime groups when the
+ * caller passes no limit, and never more than the cap.
+ */
+const ANILIST_GROUP_DEFAULT_LIMIT = 10;
+const ANILIST_GROUP_LIMIT_CAP = 50;
+
 interface LibraryModels {
   themes: Model<ThemeCacheDocument>;
   users: Model<UserDocument>;
@@ -509,10 +517,21 @@ export class LibraryService {
    * themes from the caller's AniList anime, never their watch
    * history, so the history clause is dropped entirely — the query
    * is only `anilistId ∈ stored ids`, with the same cache dance,
-   * ordering, paging and meta as the union. An unlinked caller (or
+   * ordering and meta as the union. An unlinked caller (or
    * a linked one whose ids never landed) gets the same plain early
    * return the union gives an empty library. Any other `source`
    * value (or none) keeps the union byte-identical.
+   *
+   * The AniList source's paging unit is the ANIME GROUP, not the
+   * theme (owner's lazy-loading order, 2026-11-10 — the segment
+   * froze rendering ~950 themes at once): page/limit count groups
+   * (default 10, capped at 50), a group never splits across pages,
+   * and the response carries totalGroups / totalThemes / hasMore.
+   * Group order is the order the groups' first themes take in the
+   * served sort (year desc, title asc) — the same order the client
+   * has always grouped by — computed from ONE projected pass over
+   * the matching set (anilistId only), so the totals cost no full
+   * serialisation; only the page's own themes are read whole.
    *
    * Not-found: the caller's document being gone is the web's 404
    * 'User not found'; kept, in this module's style.
@@ -520,14 +539,21 @@ export class LibraryService {
   async listLibraryThemes(
     userId: string,
     page = FAVORITES_DEFAULT_PAGE,
-    limit = FAVORITES_DEFAULT_LIMIT,
+    limit?: number,
     type?: string,
     source?: string,
   ): Promise<LibraryThemesResponse> {
     const models = this.requireModels();
     const safePage = Number.isFinite(page) && page > 0 ? page : 1;
-    const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 50;
+    const safeLimit =
+      limit !== undefined && Number.isFinite(limit) && limit > 0
+        ? Math.trunc(limit)
+        : FAVORITES_DEFAULT_LIMIT;
     const anilistOnly = source === 'anilist';
+    const groupLimit =
+      limit !== undefined && Number.isFinite(limit) && limit > 0
+        ? Math.min(Math.trunc(limit), ANILIST_GROUP_LIMIT_CAP)
+        : ANILIST_GROUP_DEFAULT_LIMIT;
 
     const user = await models.users.findById(userId).exec();
     if (!user) {
@@ -599,6 +625,19 @@ export class LibraryService {
 
     if (watchedThemeIds.length === 0 && anilistMediaIds.length === 0) {
       // The web's early return — no AniList meta fields at all.
+      // The AniList source still carries its group-pagination meta
+      // (zeros), the shape its client pages against.
+      if (anilistOnly) {
+        return {
+          themes: [],
+          total: 0,
+          totalThemes: 0,
+          totalGroups: 0,
+          page: safePage,
+          limit: groupLimit,
+          hasMore: false,
+        };
+      }
       return { themes: [], total: 0, page: safePage, limit: safeLimit };
     }
 
@@ -614,6 +653,59 @@ export class LibraryService {
     const filter: Record<string, unknown> = { $or: queryConditions };
     if (type) {
       filter.type = type;
+    }
+
+    if (anilistOnly) {
+      // Group pagination: one projected pass over the matching set
+      // in the served order fixes the group order (first appearance
+      // in that order) and the per-group counts; the page then reads
+      // ONLY its own groups' themes, whole.
+      const idRows = (await models.themes
+        .find(filter)
+        .sort({ animeSeasonYear: -1, animeTitle: 1 })
+        .select('anilistId')
+        .lean()
+        .exec()) as unknown as { anilistId: number }[];
+      const groupOrder: number[] = [];
+      const seenGroups = new Set<number>();
+      for (const row of idRows) {
+        if (!seenGroups.has(row.anilistId)) {
+          seenGroups.add(row.anilistId);
+          groupOrder.push(row.anilistId);
+        }
+      }
+      const totalGroups = groupOrder.length;
+      const totalThemes = idRows.length;
+      const pageIds = groupOrder.slice(
+        (safePage - 1) * groupLimit,
+        safePage * groupLimit,
+      );
+      const pageFilter: Record<string, unknown> = {
+        $or: [{ anilistId: { $in: pageIds } }],
+      };
+      if (type) {
+        pageFilter.type = type;
+      }
+      const pageDocs =
+        pageIds.length > 0
+          ? await models.themes
+              .find(pageFilter)
+              .sort({ animeSeasonYear: -1, animeTitle: 1 })
+              .lean()
+              .exec()
+          : [];
+      return {
+        themes: (pageDocs as ThemeDoc[]).map(toThemeSummary),
+        total: totalThemes,
+        totalThemes,
+        totalGroups,
+        page: safePage,
+        limit: groupLimit,
+        hasMore: safePage * groupLimit < totalGroups,
+        anilistUser: user.anilist?.username || null,
+        anilistSyncDeferred,
+        anilistDataStale,
+      };
     }
 
     const total = await models.themes.countDocuments(filter).exec();

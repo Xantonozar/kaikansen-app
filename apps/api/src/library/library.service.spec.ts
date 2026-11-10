@@ -1432,7 +1432,7 @@ describe('LibraryService.listLibraryThemes', () => {
     expect(res.anilistUser).toBe('AniThree');
   });
 
-  it('source=anilist answers the plain early return for an unlinked caller, history notwithstanding', async () => {
+  it('source=anilist answers the early return for an unlinked caller, history notwithstanding', async () => {
     const { models, service } = makeServiceWithClient();
     models.historyModel.docs.push(
       { userId: 'user-1', themeId: 'theme-1', themeSlug: 'test_anime-op1-1' },
@@ -1443,7 +1443,8 @@ describe('LibraryService.listLibraryThemes', () => {
     expect(union.total).toBe(1);
 
     // …but an unlinked caller has no AniList side to serve — the
-    // endpoint's early-return shape, with no AniList meta at all.
+    // endpoint's early-return shape: no AniList meta, but the
+    // group-pagination meta is present (zeros) for that source.
     const res = await service.listLibraryThemes(
       'user-1',
       1,
@@ -1451,10 +1452,179 @@ describe('LibraryService.listLibraryThemes', () => {
       undefined,
       'anilist',
     );
-    expect(res).toEqual({ themes: [], total: 0, page: 1, limit: 50 });
+    expect(res).toEqual({
+      themes: [],
+      total: 0,
+      totalThemes: 0,
+      totalGroups: 0,
+      page: 1,
+      limit: 50,
+      hasMore: false,
+    });
     expect(res).not.toHaveProperty('anilistUser');
     expect(res).not.toHaveProperty('anilistSyncDeferred');
     expect(res).not.toHaveProperty('anilistDataStale');
+  });
+
+  it('source=anilist pages by anime GROUP: whole groups per page, exact totals, hasMore flips on the last page', async () => {
+    const { models, service } = makeServiceWithClient();
+    models.userModel.docs.push({
+      _id: 'user-9',
+      username: 'nine',
+      totalRatings: 0,
+      totalTime: 0,
+      anilist: {
+        accessToken: 'token-9',
+        userId: 99,
+        username: 'AniNine',
+        syncedAt: new Date(), // fresh — the stored ids serve as-is
+        completedMediaIds: [101, 102, 103],
+      },
+    });
+    // Three groups in served order (year desc, then title asc):
+    // Alpha (101, 2026, OP+OP+ED), Beta (102, 2026, OP+ED),
+    // Gamma (103, 2024, OP). Six themes in total.
+    models.themeModel.docs.push(
+      makeTheme({
+        _id: 'g1-op1',
+        slug: 'alpha-op1',
+        animeTitle: 'Alpha Anime',
+        animeSeasonYear: 2026,
+        anilistId: 101,
+        type: 'OP',
+        sequence: 1,
+      }),
+      makeTheme({
+        _id: 'g1-op2',
+        slug: 'alpha-op2',
+        animeTitle: 'Alpha Anime',
+        animeSeasonYear: 2026,
+        anilistId: 101,
+        type: 'OP',
+        sequence: 2,
+      }),
+      makeTheme({
+        _id: 'g1-ed1',
+        slug: 'alpha-ed1',
+        animeTitle: 'Alpha Anime',
+        animeSeasonYear: 2026,
+        anilistId: 101,
+        type: 'ED',
+        sequence: 1,
+      }),
+      makeTheme({
+        _id: 'g2-op1',
+        slug: 'beta-op1',
+        animeTitle: 'Beta Anime',
+        animeSeasonYear: 2026,
+        anilistId: 102,
+        type: 'OP',
+        sequence: 1,
+      }),
+      makeTheme({
+        _id: 'g2-ed1',
+        slug: 'beta-ed1',
+        animeTitle: 'Beta Anime',
+        animeSeasonYear: 2026,
+        anilistId: 102,
+        type: 'ED',
+        sequence: 1,
+      }),
+      makeTheme({
+        _id: 'g3-op1',
+        slug: 'gamma-op1',
+        animeTitle: 'Gamma Anime',
+        animeSeasonYear: 2024,
+        anilistId: 103,
+        type: 'OP',
+        sequence: 1,
+      }),
+    );
+
+    // Page 1 at two groups a page: Alpha + Beta, whole — the ED
+    // that theme-paging would have stranded on page 2 rides along.
+    const page1 = await service.listLibraryThemes(
+      'user-9',
+      1,
+      2,
+      undefined,
+      'anilist',
+    );
+    expect(page1.total).toBe(6);
+    expect(page1.totalThemes).toBe(6);
+    expect(page1.totalGroups).toBe(3);
+    expect(page1.limit).toBe(2);
+    expect(page1.hasMore).toBe(true);
+    expect(new Set(page1.themes.map((t) => t.anilistId))).toEqual(
+      new Set([101, 102]),
+    );
+    expect(page1.themes).toHaveLength(5);
+
+    // Page 2: Gamma alone, and hasMore flips off.
+    const page2 = await service.listLibraryThemes(
+      'user-9',
+      2,
+      2,
+      undefined,
+      'anilist',
+    );
+    expect(page2.themes.map((t) => t.slug)).toEqual(['gamma-op1']);
+    expect(page2.hasMore).toBe(false);
+    expect(page2.totalGroups).toBe(3);
+    expect(page2.totalThemes).toBe(6);
+
+    // Past the end: an empty page, totals still exact.
+    const page3 = await service.listLibraryThemes(
+      'user-9',
+      3,
+      2,
+      undefined,
+      'anilist',
+    );
+    expect(page3.themes).toEqual([]);
+    expect(page3.hasMore).toBe(false);
+    expect(page3.totalThemes).toBe(6);
+
+    // No limit: the group default (10) applies — all three groups
+    // land on page 1.
+    const defaulted = await service.listLibraryThemes(
+      'user-9',
+      1,
+      undefined,
+      undefined,
+      'anilist',
+    );
+    expect(defaulted.limit).toBe(10);
+    expect(defaulted.themes).toHaveLength(6);
+    expect(defaulted.hasMore).toBe(false);
+
+    // An over-cap limit clamps to 50 groups.
+    const capped = await service.listLibraryThemes(
+      'user-9',
+      1,
+      500,
+      undefined,
+      'anilist',
+    );
+    expect(capped.limit).toBe(50);
+
+    // The type filter regroups over the filtered set: OP-only
+    // groups still never split (Alpha keeps both its OPs), and
+    // the totals count OPs alone.
+    const ops1 = await service.listLibraryThemes(
+      'user-9',
+      1,
+      1,
+      'OP',
+      'anilist',
+    );
+    expect(ops1.totalThemes).toBe(4);
+    expect(ops1.totalGroups).toBe(3);
+    expect(ops1.themes.map((t) => t.slug)).toEqual([
+      'alpha-op1',
+      'alpha-op2',
+    ]);
+    expect(ops1.hasMore).toBe(true);
   });
 
   it('an unrecognised source value keeps the default union (byte-compatible)', async () => {

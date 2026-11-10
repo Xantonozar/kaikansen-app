@@ -4,13 +4,16 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import {
   ActivityIndicator,
   Image,
   Modal,
   Pressable,
+  RefreshControl,
   ScrollView,
+  SectionList,
   StyleSheet,
   Text,
   TextInput,
@@ -36,7 +39,6 @@ import {
 } from 'lucide-react-native';
 import type {
   FavoritesResponse,
-  LibraryThemesResponse,
   PlaylistDetail,
   PlaylistSummary,
   ThemeSummary,
@@ -49,14 +51,19 @@ import {
   useFavorites,
 } from '../../../src/favoritesStore';
 import {
+  ANILIST_GROUP_PAGE_SIZE,
   createPlaylist,
   deletePlaylist,
+  fetchAnilistThemesPage,
   fetchFavorites,
   fetchHistory,
-  fetchLibraryThemes,
   fetchPlaylists,
   updatePlaylist,
 } from '../../../src/libraryApi';
+import {
+  SkeletonBlock,
+  SkeletonThemeRow,
+} from '../../../src/components/Skeleton';
 import {
   downloadsSupported,
   formatBytes,
@@ -123,6 +130,42 @@ function relativeTime(iso: string): string {
  * timestamp is unparseable — the row then omits the line rather
  * than inventing one.
  */
+/**
+ * Count-up for the AniList segment's header total (owner's
+ * lazy-loading order, 2026-11-10): when a page-1 response lands
+ * with the REAL total, the displayed number animates toward it
+ * over ~1s with an ease-out (big early steps, +1 at the end) —
+ * it never overshoots and never invents a number: the target is
+ * always the server's own totalThemes. A null target (nothing
+ * loaded) leaves the display where it was; the header shows its
+ * skeleton then, not the number.
+ */
+function useCountUp(target: number | null, durationMs = 1000): number {
+  const [value, setValue] = useState(0);
+  const valueRef = useRef(0);
+  useEffect(() => {
+    if (target === null) return;
+    const from = valueRef.current;
+    if (from === target) {
+      setValue(target);
+      return;
+    }
+    let raf = 0;
+    const start = Date.now();
+    const tick = () => {
+      const t = Math.min(1, (Date.now() - start) / durationMs);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const next = Math.round(from + (target - from) * eased);
+      valueRef.current = next;
+      setValue(next);
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, durationMs]);
+  return value;
+}
+
 function playedAgo(iso: string): string | null {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return null;
@@ -161,7 +204,11 @@ function playedAgo(iso: string): string | null {
  * the API widens the web's completed-only read) — grouped
  * per-anime by the summary's real anilistId, with an All / OP /
  * ED filter, and group headers that open the anime's detail
- * screen. No watch-history themes are mixed in. Signed-in but
+ * screen. No watch-history themes are mixed in. The segment
+ * pages by GROUP (owner's lazy-loading order, 2026-11-10):
+ * ten groups at a time into a virtualised SectionList, with
+ * skeleton groups while a page is in flight and the header
+ * total counting up to the server's real totalThemes. Signed-in but
  * unlinked gets a prompt to link AniList in Settings; the link
  * state comes from the session profile's `anilist` field (with
  * the session-local link username as a fallback for a link made
@@ -246,11 +293,35 @@ export default function LibraryScreen() {
   const [playlists, setPlaylists] = useState<PlaylistSummary[] | null>(null);
   const [playlistsError, setPlaylistsError] = useState<string | null>(null);
 
-  const [libThemes, setLibThemes] = useState<LibraryThemesResponse | null>(
+  /* AniList segment paging state (owner's lazy-loading order,
+     2026-11-10): the segment accumulates GROUP pages — themes
+     from whole anime groups, appended on scroll — instead of the
+     old pull-everything read that froze the screen. null themes =
+     page 1 has not landed yet (the segment shows skeletons). */
+  const [anilistThemes, setAnilistThemes] = useState<ThemeSummary[] | null>(
     null,
   );
+  const [anilistMeta, setAnilistMeta] = useState<{
+    totalThemes: number;
+    totalGroups: number;
+    hasMore: boolean;
+    anilistUser: string | null;
+  } | null>(null);
   const [libError, setLibError] = useState<string | null>(null);
+  const [anilistPageError, setAnilistPageError] = useState<string | null>(
+    null,
+  );
+  const [anilistRefreshing, setAnilistRefreshing] = useState(false);
+  const [anilistLoadingMore, setAnilistLoadingMore] = useState(false);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('ALL');
+  /* Paging bookkeeping that must not re-render: the generation
+     stamps every first-page load so a stale response (an older
+     filter's, an earlier focus's) can never overwrite a newer
+     one; the page ref is the last page actually appended. */
+  const anilistGenRef = useRef(0);
+  const anilistPageRef = useRef(0);
+  const anilistLoadingMoreRef = useRef(false);
+  const typeFilterRef = useRef<TypeFilter>('ALL');
 
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
@@ -294,7 +365,7 @@ export default function LibraryScreen() {
   const anilistName =
     user?.anilist?.username ??
     anilistUsername ??
-    libThemes?.anilistUser ??
+    anilistMeta?.anilistUser ??
     null;
 
   /* Load all account sections; each lands (or fails) independently. */
@@ -330,38 +401,136 @@ export default function LibraryScreen() {
           e instanceof Error ? e.message : 'Could not load playlists.',
         ),
       );
-    /* The AniList read is only fetched when a link is known to
-       exist — unlinked, the segment renders its link prompt and
-       there is nothing AniList-side to load. The read is the
-       AniList-source themes (Option B): AniList-pure, no watch
-       history, grouped per-anime by the segment below. */
-    if (anilistLinked) {
-      fetchLibraryThemes('anilist')
+  }, [signedIn]);
+
+  /* The AniList segment's first page (Option B read, group-paged):
+     only fetched when a link is known to exist — unlinked, the
+     segment renders its link prompt and there is nothing AniList-
+     side to load. `reset` blanks the accumulated pages first (a
+     filter change: the segment answers with skeletons, then the
+     new first page); a plain reload (focus, pull-to-refresh)
+     keeps the current groups on screen until the fresh page
+     lands. Every call bumps the generation, so only the newest
+     call's response is ever applied. */
+  const loadAnilistFirstPage = useCallback(
+    (filter: TypeFilter, opts?: { reset?: boolean; refresh?: boolean }) => {
+      if (!signedIn || fixtureMode || !anilistLinked) return;
+      const gen = ++anilistGenRef.current;
+      if (opts?.reset) {
+        setAnilistThemes(null);
+        setAnilistMeta(null);
+        setAnilistPageError(null);
+      }
+      if (opts?.refresh) setAnilistRefreshing(true);
+      fetchAnilistThemesPage(
+        1,
+        ANILIST_GROUP_PAGE_SIZE,
+        filter === 'ALL' ? undefined : filter,
+      )
         .then((res) => {
-          setLibThemes(res);
+          if (gen !== anilistGenRef.current) return;
+          anilistPageRef.current = 1;
+          setAnilistThemes(res.themes);
+          setAnilistMeta({
+            totalThemes: res.totalThemes ?? res.total,
+            totalGroups: res.totalGroups ?? 0,
+            hasMore: res.hasMore ?? false,
+            anilistUser: res.anilistUser ?? null,
+          });
           setLibError(null);
+          setAnilistPageError(null);
           syncFavoriteSlugs(res.themes);
         })
-        .catch((e: unknown) =>
+        .catch((e: unknown) => {
+          if (gen !== anilistGenRef.current) return;
           setLibError(
             e instanceof Error
               ? e.message
               : 'Could not load your AniList themes.',
-          ),
-        );
+          );
+        })
+        .finally(() => {
+          if (gen === anilistGenRef.current) setAnilistRefreshing(false);
+        });
+    },
+    [signedIn, anilistLinked],
+  );
+
+  /* The next group page, appended on scroll. Guarded by the meta
+     hasMore, an in-flight ref, and the generation (a first-page
+     reload invalidates an in-flight append). Duplicate themes
+     are dropped by slug when appending — a group is keyed by its
+     anilistId, so deduping themes dedupes groups too. */
+  const loadAnilistNextPage = useCallback(() => {
+    if (
+      !anilistMeta?.hasMore ||
+      anilistLoadingMoreRef.current ||
+      anilistThemes === null
+    ) {
+      return;
     }
-  }, [signedIn, anilistLinked]);
+    const gen = anilistGenRef.current;
+    const nextPage = anilistPageRef.current + 1;
+    anilistLoadingMoreRef.current = true;
+    setAnilistLoadingMore(true);
+    fetchAnilistThemesPage(
+      nextPage,
+      ANILIST_GROUP_PAGE_SIZE,
+      typeFilterRef.current === 'ALL' ? undefined : typeFilterRef.current,
+    )
+      .then((res) => {
+        if (gen !== anilistGenRef.current) return;
+        anilistPageRef.current = nextPage;
+        setAnilistThemes((prev) => {
+          if (!prev) return res.themes;
+          const seen = new Set(prev.map((t) => t.slug));
+          return [...prev, ...res.themes.filter((t) => !seen.has(t.slug))];
+        });
+        setAnilistMeta({
+          totalThemes: res.totalThemes ?? res.total,
+          totalGroups: res.totalGroups ?? 0,
+          hasMore: res.hasMore ?? false,
+          anilistUser: res.anilistUser ?? null,
+        });
+        setAnilistPageError(null);
+        syncFavoriteSlugs(res.themes);
+      })
+      .catch((e: unknown) => {
+        if (gen !== anilistGenRef.current) return;
+        setAnilistPageError(
+          e instanceof Error
+            ? e.message
+            : 'Could not load more AniList themes.',
+        );
+      })
+      .finally(() => {
+        anilistLoadingMoreRef.current = false;
+        setAnilistLoadingMore(false);
+      });
+  }, [anilistMeta, anilistThemes]);
+
+  /* A filter change re-pages from page 1 under the new type (the
+     API regroups over the filtered set). The ref mirror keeps the
+     stable paging callbacks reading the current filter. */
+  useEffect(() => {
+    typeFilterRef.current = typeFilter;
+    loadAnilistFirstPage(typeFilter, { reset: true });
+  }, [typeFilter, loadAnilistFirstPage]);
 
   /* Refetch on focus — the tab stays mounted, so freshness is
      focus-driven (returning from a play shows the new history
-     entry; an unsave elsewhere drops out of Saved). Downloads are
-     local store state, but a focus pass re-verifies their files so
-     an externally deleted file flips to broken here, not at play. */
+     entry; an unsave elsewhere drops out of Saved). The AniList
+     segment resets to page 1 under the current filter (no blank:
+     the loaded groups stay until the fresh page lands). Downloads
+     are local store state, but a focus pass re-verifies their
+     files so an externally deleted file flips to broken here, not
+     at play. */
   useFocusEffect(
     useCallback(() => {
       loadAll();
+      loadAnilistFirstPage(typeFilterRef.current);
       recheckDownloads();
-    }, [loadAll]),
+    }, [loadAll, loadAnilistFirstPage]),
   );
 
   const openTheme = useCallback(
@@ -590,8 +759,8 @@ export default function LibraryScreen() {
     [confirmDeleteId, closeMenu],
   );
 
-  /* AniList segment: group the flat AniList-source list by anime,
-     keyed by the summary's REAL anilistId (owner ruling
+  /* AniList segment: group the accumulated AniList-source pages
+     by anime, keyed by the summary's REAL anilistId (owner ruling
      2026-11-10) — same-title anime (remakes, split seasons) stay
      separate groups, which the old title-string key merged. A
      summary without an id cannot come back from the anilist
@@ -599,14 +768,14 @@ export default function LibraryScreen() {
      fallback keeps such a row visible rather than dropped. The
      endpoint's order (newest season first, then title) fixes the
      group order; inside a group, OPs come before EDs, each by
-     sequence. The All / OP / ED filter applies before grouping,
-     so a group only ever shows the filtered types. */
+     sequence. The All / OP / ED filter is applied by the API
+     (it regroups over the filtered set), so the groups here only
+     ever hold the filtered types. Pages arrive as whole groups,
+     so appending a page appends whole groups — the memo simply
+     re-runs over the grown flat list. */
   const anilistGroups = useMemo(() => {
-    if (!libThemes) return [];
-    const filtered =
-      typeFilter === 'ALL'
-        ? libThemes.themes
-        : libThemes.themes.filter((t) => t.type === typeFilter);
+    if (!anilistThemes) return [];
+    const filtered = anilistThemes;
     const groups: {
       key: string;
       anilistId: number | null;
@@ -645,7 +814,7 @@ export default function LibraryScreen() {
       );
     }
     return groups;
-  }, [libThemes, typeFilter]);
+  }, [anilistThemes]);
 
   /* ---------------- early states ---------------- */
 
@@ -684,11 +853,11 @@ export default function LibraryScreen() {
 
   /* ---------------- section bodies ---------------- */
 
-  const sectionError = (message: string) => (
+  const sectionError = (message: string, onRetry: () => void = loadAll) => (
     <View style={styles.sectionState}>
       <Text style={styles.emptyText}>{message}</Text>
       <Pressable
-        onPress={loadAll}
+        onPress={onRetry}
         accessibilityRole="button"
         accessibilityLabel="Retry"
         style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
@@ -1197,19 +1366,112 @@ export default function LibraryScreen() {
     );
   };
 
+  /* The AniList header's animated total (see useCountUp). */
+  const animatedAnilistTotal = useCountUp(anilistMeta?.totalThemes ?? null);
+
+  /* One skeleton group: the group header's shape (38×48 cover,
+     title + meta bars) over theme-row skeletons — what page 1
+     and the next-page footer show while their data is in flight. */
+  const renderAnilistGroupSkeleton = (rows: number, key: string) => (
+    <View key={key}>
+      <View style={styles.groupHeader}>
+        <SkeletonBlock width={38} height={48} radius={radii.base} />
+        <View style={styles.plMain}>
+          <SkeletonBlock width="55%" height={13} radius={6} />
+          <SkeletonBlock
+            width="30%"
+            height={11}
+            radius={5}
+            style={{ marginTop: 5 }}
+          />
+        </View>
+      </View>
+      {Array.from({ length: rows }, (_, i) => (
+        <SkeletonThemeRow key={i} />
+      ))}
+    </View>
+  );
+
+  /* The segment list's header: the count line (its number counts
+     up to the real totalThemes once page 1 lands; a skeleton bar
+     stands in until then) over the All / OP / ED filter row. The
+     chips switch the API-side filter (see the paging state). */
+  const renderAnilistListHeader = () => (
+    <>
+      {anilistMeta ? (
+        <Text style={styles.dlTotal}>
+          {anilistName ? `AniList · ${anilistName} · ` : ''}
+          {animatedAnilistTotal}{' '}
+          {anilistMeta.totalThemes === 1 ? 'theme' : 'themes'} from
+          anime on your AniList completed and watching lists
+        </Text>
+      ) : (
+        <SkeletonBlock
+          width="78%"
+          height={12}
+          radius={6}
+          style={{ marginBottom: spacing.sm }}
+        />
+      )}
+      <View style={styles.filterRow}>
+        {(['ALL', 'OP', 'ED'] as const).map((f) => {
+          const active = typeFilter === f;
+          return (
+            <Pressable
+              key={f}
+              onPress={() => setTypeFilter(f)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              accessibilityLabel={`Show ${f === 'ALL' ? 'all themes' : `${f}s`}`}
+              style={[
+                styles.filterChip,
+                active && { backgroundColor: theme.accent },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.filterChipText,
+                  active && { color: theme.onAccent },
+                ]}
+              >
+                {f === 'ALL' ? 'All' : f}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </>
+  );
+
+  /* The AniList segment's non-list states render in the same
+     padded scroll frame the other segments get from the screen's
+     ScrollView (the loaded segment renders its own SectionList
+     instead — see the layout swap in the chrome below). */
+  const anilistStateScroll = (content: ReactNode) => (
+    <ScrollView
+      style={styles.scroll}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+    >
+      {content}
+    </ScrollView>
+  );
+
   const renderAnilist = () => {
-    if (!fixtureMode && !signedIn) return renderLoginPrompt();
+    if (!fixtureMode && !signedIn) {
+      return anilistStateScroll(renderLoginPrompt());
+    }
     if (fixtureMode) {
-      return (
+      return anilistStateScroll(
         <Text style={styles.emptyText}>
           Demo mode — themes from your AniList completed and
           watching lists live in your account on the live API.
           Nothing is stored here.
-        </Text>
+        </Text>,
       );
     }
     if (!anilistLinked) {
-      return (
+      return anilistStateScroll(
         <View style={styles.promptBody}>
           <View style={styles.tile}>
             <Link2 size={26} color={theme.accent} strokeWidth={2} />
@@ -1235,132 +1497,142 @@ export default function LibraryScreen() {
       );
     }
     /* The themes view is the segment's only content (Option B).
-       A failed read surfaces the segment's error state; while
-       the read is in flight the segment waits on the spinner. */
-    if (libError && !libThemes) return sectionError(libError);
-    if (!libThemes) {
-      return (
-        <View style={styles.sectionState}>
-          <ActivityIndicator color={theme.accent} />
-        </View>
+       A failed first page surfaces the segment's error state;
+       while page 1 is in flight the segment shows skeleton
+       groups in the list's own shapes (the old spinner froze the
+       whole segment on the ~950-theme pull; the read is paged
+       now, and the skeletons hold the layout). */
+    if (libError && !anilistThemes) {
+      return anilistStateScroll(
+        sectionError(libError, () =>
+          loadAnilistFirstPage(typeFilterRef.current, { reset: true }),
+        ),
       );
     }
-    const filteredCount = anilistGroups.reduce(
-      (n, g) => n + g.themes.length,
-      0,
-    );
+    if (!anilistThemes) {
+      return anilistStateScroll(
+        <>
+          {renderAnilistListHeader()}
+          {renderAnilistGroupSkeleton(3, 'skel-1')}
+          {renderAnilistGroupSkeleton(2, 'skel-2')}
+        </>,
+      );
+    }
+    /* The loaded segment is a virtualised SectionList: one
+       section per anime group (its data = the group's themes),
+       the count + filter header, a skeleton footer while the
+       next page is in flight, and pull-to-refresh back to
+       page 1. Only loaded groups exist in the list — scrolling
+       appends whole groups, so the old render-everything freeze
+       is gone. */
+    const sections = anilistGroups.map((g) => ({
+      key: g.key,
+      anilistId: g.anilistId,
+      title: g.title,
+      year: g.year,
+      cover: g.cover,
+      data: g.themes,
+    }));
     return (
-      <>
-        <Text style={styles.dlTotal}>
-          {anilistName ? `AniList · ${anilistName} · ` : ''}
-          {libThemes.total}{' '}
-          {libThemes.total === 1 ? 'theme' : 'themes'} from anime on
-          your AniList completed and watching lists
-        </Text>
-        <View style={styles.filterRow}>
-          {(['ALL', 'OP', 'ED'] as const).map((f) => {
-            const active = typeFilter === f;
-            return (
-              <Pressable
-                key={f}
-                onPress={() => setTypeFilter(f)}
-                accessibilityRole="button"
-                accessibilityState={{ selected: active }}
-                accessibilityLabel={`Show ${f === 'ALL' ? 'all themes' : `${f}s`}`}
-                style={[
-                  styles.filterChip,
-                  active && { backgroundColor: theme.accent },
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.filterChipText,
-                    active && { color: theme.onAccent },
-                  ]}
-                >
-                  {f === 'ALL' ? 'All' : f}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
-        {anilistGroups.map((group) => (
-          <View key={group.key}>
-            <Pressable
-              onPress={
-                group.anilistId != null
-                  ? () => router.push(`/anime/${group.anilistId}`)
-                  : undefined
-              }
-              disabled={group.anilistId == null}
-              accessibilityRole="button"
-              accessibilityLabel={`Open ${group.title}`}
-              style={({ pressed }) => [
-                styles.groupHeader,
-                pressed && styles.pressed,
-              ]}
-            >
-              {group.cover ? (
-                <Image
-                  source={{ uri: group.cover }}
-                  style={styles.groupCover}
-                />
-              ) : (
-                <View style={[styles.groupCover, styles.plCoverEmpty]} />
-              )}
-              <View style={styles.plMain}>
-                <Text style={styles.plName} numberOfLines={1}>
-                  {group.title}
-                </Text>
-                <Text style={styles.plMeta} numberOfLines={1}>
-                  {group.year ? `${group.year} · ` : ''}
-                  {group.themes.length}{' '}
-                  {group.themes.length === 1 ? 'theme' : 'themes'}
-                </Text>
-              </View>
-            </Pressable>
-            {group.themes.map((item) => (
-              <ThemeRow
-                typeChip={false}
-                key={item.slug}
-                item={item}
-                onPress={() => openTheme(item.slug)}
-                onPlay={() => {
-                  // Queue = the segment's groups flattened in
-                  // display order.
-                  const flat = anilistGroups.flatMap((g) => g.themes);
-                  const index = flat.findIndex((t) => t.slug === item.slug);
-                  playWithQueue(
-                    queueItemsFromSummaries(flat),
-                    index,
-                    item.slug,
-                    'watch',
-                  );
-                }}
-                saved={favorites.isFavorite(item.slug)}
-                savePending={favorites.isPending(item.slug)}
-                onToggleSave={() => void favorites.toggle(item.slug)}
+      <SectionList
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
+        sections={sections}
+        keyExtractor={(item) => item.slug}
+        stickySectionHeadersEnabled={false}
+        showsVerticalScrollIndicator={false}
+        ListHeaderComponent={renderAnilistListHeader()}
+        ListFooterComponent={
+          <>
+            {anilistLoadingMore &&
+              renderAnilistGroupSkeleton(2, 'skel-more')}
+            {anilistPageError && (
+              <Text style={styles.inlineError}>{anilistPageError}</Text>
+            )}
+            {libError && <Text style={styles.inlineError}>{libError}</Text>}
+          </>
+        }
+        ListEmptyComponent={
+          <Text style={styles.emptyText}>
+            {typeFilter !== 'ALL'
+              ? `No ${typeFilter === 'OP' ? 'openings' : 'endings'} in this list.`
+              : 'No themes found yet \u2014 when anime from your AniList completed or watching lists are in the catalogue, their openings and endings will show up here.'}
+          </Text>
+        }
+        renderSectionHeader={({ section }) => (
+          <Pressable
+            onPress={
+              section.anilistId != null
+                ? () => router.push(`/anime/${section.anilistId}`)
+                : undefined
+            }
+            disabled={section.anilistId == null}
+            accessibilityRole="button"
+            accessibilityLabel={`Open ${section.title}`}
+            style={({ pressed }) => [
+              styles.groupHeader,
+              pressed && styles.pressed,
+            ]}
+          >
+            {section.cover ? (
+              <Image
+                source={{ uri: section.cover }}
+                style={styles.groupCover}
               />
-            ))}
-          </View>
-        ))}
-        {libThemes.total === 0 && (
-          <Text style={styles.emptyText}>
-            No themes found yet — when anime from your AniList
-            completed or watching lists are in the catalogue, their
-            openings and endings will show up here.
-          </Text>
+            ) : (
+              <View style={[styles.groupCover, styles.plCoverEmpty]} />
+            )}
+            <View style={styles.plMain}>
+              <Text style={styles.plName} numberOfLines={1}>
+                {section.title}
+              </Text>
+              <Text style={styles.plMeta} numberOfLines={1}>
+                {section.year ? `${section.year} \u00b7 ` : ''}
+                {section.data.length}{' '}
+                {section.data.length === 1 ? 'theme' : 'themes'}
+              </Text>
+            </View>
+          </Pressable>
         )}
-        {libThemes.total > 0 && filteredCount === 0 && (
-          <Text style={styles.emptyText}>
-            No {typeFilter === 'OP' ? 'openings' : 'endings'} in this
-            list.
-          </Text>
+        renderItem={({ item }) => (
+          <ThemeRow
+            typeChip={false}
+            item={item}
+            onPress={() => openTheme(item.slug)}
+            onPlay={() => {
+              // Queue = the segment's LOADED groups flattened in
+              // display order (pages not scrolled to yet are not
+              // in the queue \u2014 the lazy-loading trade).
+              const flat = anilistGroups.flatMap((g) => g.themes);
+              const index = flat.findIndex((t) => t.slug === item.slug);
+              playWithQueue(
+                queueItemsFromSummaries(flat),
+                index,
+                item.slug,
+                'watch',
+              );
+            }}
+            saved={favorites.isFavorite(item.slug)}
+            savePending={favorites.isPending(item.slug)}
+            onToggleSave={() => void favorites.toggle(item.slug)}
+          />
         )}
-        {libError && <Text style={styles.inlineError}>{libError}</Text>}
-      </>
+        onEndReached={loadAnilistNextPage}
+        onEndReachedThreshold={0.5}
+        refreshControl={
+          <RefreshControl
+            refreshing={anilistRefreshing}
+            onRefresh={() =>
+              loadAnilistFirstPage(typeFilterRef.current, { refresh: true })
+            }
+            tintColor={theme.accent}
+            colors={[theme.accent]}
+          />
+        }
+      />
     );
   };
+
 
   const renderOffline = () => {
     if (fixtureMode) {
@@ -1697,17 +1969,24 @@ export default function LibraryScreen() {
           </Pressable>
         )}
 
-        <ScrollView
-          style={styles.scroll}
-          contentContainerStyle={styles.content}
-          showsVerticalScrollIndicator={false}
-        >
-          {section === 'saved' && renderSaved()}
-          {section === 'recent' && renderRecent()}
-          {section === 'playlists' && renderPlaylists()}
-          {section === 'anilist' && renderAnilist()}
-          {section === 'offline' && renderOffline()}
-        </ScrollView>
+        {section === 'anilist' ? (
+          /* The AniList segment owns its scrolling (a virtualised
+             SectionList when loaded; its own scroll frame for the
+             state bodies) — it no longer rides the shared
+             ScrollView that rendered every group at once. */
+          renderAnilist()
+        ) : (
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={styles.content}
+            showsVerticalScrollIndicator={false}
+          >
+            {section === 'saved' && renderSaved()}
+            {section === 'recent' && renderRecent()}
+            {section === 'playlists' && renderPlaylists()}
+            {section === 'offline' && renderOffline()}
+          </ScrollView>
+        )}
         {renderPlaylistMenu()}
       </View>
     </View>

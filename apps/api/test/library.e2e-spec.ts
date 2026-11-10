@@ -860,7 +860,9 @@ process.env.JWT_SECRET = E2E_SECRET;
 
     // user-1 recorded a watch of theme-1 above but has NO AniList
     // link: the AniList source is the honest empty page — his
-    // history-only theme must not leak into it.
+    // history-only theme must not leak into it. The empty page
+    // carries the source's group-pagination meta (zeros) and the
+    // group default limit (10).
     const unlinked = await http
       .get('/library/themes?source=anilist')
       .set(asUser1())
@@ -868,8 +870,11 @@ process.env.JWT_SECRET = E2E_SECRET;
     expect(unlinked.body).toEqual({
       themes: [],
       total: 0,
+      totalThemes: 0,
+      totalGroups: 0,
       page: 1,
-      limit: 50,
+      limit: 10,
+      hasMore: false,
     });
 
     // The default read for the same caller still unions his watch
@@ -892,6 +897,190 @@ process.env.JWT_SECRET = E2E_SECRET;
     expect(linked.body.anilistUser).toBe('AniUser');
     expect(linked.body.themes[0].slug).toBe('test_anime-op1-1');
     expect(linked.body.themes[0].anilistId).toBe(42);
+  });
+});
+
+/**
+ * Suite 2b — the AniList source's GROUP pagination over real HTTP
+ * (owner's lazy-loading order, 2026-11-10): the same mocked-model
+ * wiring as Suite 2, with its own seed — four anime groups (eight
+ * themes) on one linked caller's stored AniList ids.
+ */
+describe('Library AniList group pagination with mocked models (e2e)', () => {
+  let app: INestApplication;
+  const models = makeFakeModels();
+
+  const themeBase = models.themeModel.docs[0];
+  const mkTheme = (overrides: Record<string, unknown>) => ({
+    ...themeBase,
+    entries: [{ atEntryId: 11, duration: 60 }],
+    ...overrides,
+  });
+  models.userModel.docs.push({
+    _id: 'user-9',
+    username: 'nine',
+    displayName: 'Nine',
+    email: 'nine@example.com',
+    passwordHash: 'hashed',
+    avatarUrl: null,
+    bio: '',
+    totalRatings: 0,
+    totalFollowers: 0,
+    totalFollowing: 0,
+    totalTime: 0,
+    isPublic: true,
+    anilist: {
+      accessToken: 'token-9',
+      userId: 99,
+      username: 'AniNine',
+      syncedAt: new Date(), // fresh — the stored ids serve as-is
+      completedMediaIds: [101, 102, 103, 104],
+    },
+  });
+  models.themeModel.docs.push(
+    // Served group order: year desc, then title asc.
+    mkTheme({ _id: 'g1-op1', slug: 'alpha-op1', animeTitle: 'Alpha Anime', animeSeasonYear: 2026, anilistId: 101, type: 'OP', sequence: 1 }),
+    mkTheme({ _id: 'g1-op2', slug: 'alpha-op2', animeTitle: 'Alpha Anime', animeSeasonYear: 2026, anilistId: 101, type: 'OP', sequence: 2 }),
+    mkTheme({ _id: 'g1-ed1', slug: 'alpha-ed1', animeTitle: 'Alpha Anime', animeSeasonYear: 2026, anilistId: 101, type: 'ED', sequence: 1 }),
+    mkTheme({ _id: 'g2-op1', slug: 'beta-op1', animeTitle: 'Beta Anime', animeSeasonYear: 2026, anilistId: 102, type: 'OP', sequence: 1 }),
+    mkTheme({ _id: 'g2-ed1', slug: 'beta-ed1', animeTitle: 'Beta Anime', animeSeasonYear: 2026, anilistId: 102, type: 'ED', sequence: 1 }),
+    mkTheme({ _id: 'g3-op1', slug: 'gamma-op1', animeTitle: 'Gamma Anime', animeSeasonYear: 2025, anilistId: 103, type: 'OP', sequence: 1 }),
+    mkTheme({ _id: 'g4-op1', slug: 'delta-op1', animeTitle: 'Delta Anime', animeSeasonYear: 2024, anilistId: 104, type: 'OP', sequence: 1 }),
+    mkTheme({ _id: 'g4-ed1', slug: 'delta-ed1', animeTitle: 'Delta Anime', animeSeasonYear: 2024, anilistId: 104, type: 'ED', sequence: 1 }),
+  );
+
+  const anilistClientStub = {
+    fetchLibraryMediaIds: jest.fn(async () => null),
+    fetchLibraryEntries: jest.fn(async () => null),
+  };
+
+  const asUser9 = () => ({
+    Authorization: `Bearer ${jwt.sign(
+      {
+        userId: 'user-9',
+        username: 'user-9',
+        email: 'user-9@example.com',
+        tokenType: 'access',
+      },
+      E2E_SECRET,
+      { expiresIn: '15m' },
+    )}`,
+  });
+
+  beforeAll(async () => {
+process.env.JWT_SECRET = E2E_SECRET;
+    process.env.JWT_REFRESH_SECRET = E2E_REFRESH_SECRET;
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [ConfigModule.forRoot({ isGlobal: true })],
+      controllers: [LibraryController, AuthController],
+      providers: [
+        LibraryService,
+        AuthService,
+        AccessTokenGuard,
+        AnilistClient,
+        { provide: AnilistLibraryClient, useValue: anilistClientStub },
+        { provide: getModelToken(User.name), useValue: models.userModel },
+        {
+          provide: getModelToken(ThemeCache.name),
+          useValue: models.themeModel,
+        },
+        {
+          provide: getModelToken(Favorite.name),
+          useValue: models.favoriteModel,
+        },
+        { provide: getModelToken(Rating.name), useValue: models.ratingModel },
+        {
+          provide: getModelToken(WatchHistory.name),
+          useValue: models.historyModel,
+        },
+      ],
+    }).compile();
+    app = moduleFixture.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    delete process.env.JWT_SECRET;
+    delete process.env.JWT_REFRESH_SECRET;
+  });
+
+  it('serves whole groups per page with exact totals; hasMore flips on the last page', async () => {
+    const http = request(app.getHttpServer());
+
+    const page1 = await http
+      .get('/library/themes?source=anilist&page=1&limit=2')
+      .set(asUser9())
+      .expect(200);
+    expect(page1.body.page).toBe(1);
+    expect(page1.body.limit).toBe(2);
+    expect(page1.body.total).toBe(8);
+    expect(page1.body.totalThemes).toBe(8);
+    expect(page1.body.totalGroups).toBe(4);
+    expect(page1.body.hasMore).toBe(true);
+    // Page 1 holds groups 101 + 102 WHOLE (3 + 2 themes) — no
+    // group is split to fill the page.
+    expect(page1.body.themes).toHaveLength(5);
+    expect(new Set(page1.body.themes.map((t: { anilistId: number }) => t.anilistId))).toEqual(
+      new Set([101, 102]),
+    );
+
+    const page2 = await http
+      .get('/library/themes?source=anilist&page=2&limit=2')
+      .set(asUser9())
+      .expect(200);
+    expect(page2.body.hasMore).toBe(false);
+    expect(page2.body.themes).toHaveLength(3);
+    expect(new Set(page2.body.themes.map((t: { anilistId: number }) => t.anilistId))).toEqual(
+      new Set([103, 104]),
+    );
+
+    // The two pages together cover every theme exactly once.
+    const allSlugs = [
+      ...page1.body.themes.map((t: { slug: string }) => t.slug),
+      ...page2.body.themes.map((t: { slug: string }) => t.slug),
+    ].sort();
+    expect(allSlugs).toEqual([
+      'alpha-ed1',
+      'alpha-op1',
+      'alpha-op2',
+      'beta-ed1',
+      'beta-op1',
+      'delta-ed1',
+      'delta-op1',
+      'gamma-op1',
+    ]);
+  });
+
+  it('defaults to 10 groups and regroups under a type filter', async () => {
+    const http = request(app.getHttpServer());
+
+    const defaulted = await http
+      .get('/library/themes?source=anilist')
+      .set(asUser9())
+      .expect(200);
+    expect(defaulted.body.limit).toBe(10);
+    expect(defaulted.body.themes).toHaveLength(8);
+    expect(defaulted.body.hasMore).toBe(false);
+
+    // OP-only: the groups re-form over OPs alone (5 OPs across
+    // the same 4 groups); page 1 at 2 groups carries 101's two
+    // OPs and 102's one.
+    const ops = await http
+      .get('/library/themes?source=anilist&type=OP&page=1&limit=2')
+      .set(asUser9())
+      .expect(200);
+    expect(ops.body.totalThemes).toBe(5);
+    expect(ops.body.totalGroups).toBe(4);
+    expect(ops.body.hasMore).toBe(true);
+    expect(ops.body.themes.map((t: { slug: string }) => t.slug).sort()).toEqual([
+      'alpha-op1',
+      'alpha-op2',
+      'beta-op1',
+    ]);
+    expect(
+      ops.body.themes.every((t: { type: string }) => t.type === 'OP'),
+    ).toBe(true);
   });
 });
 

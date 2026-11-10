@@ -1742,6 +1742,14 @@ export interface ArtistDetailResponse {
  * web's own omission: when BOTH sides of the union are empty the
  * web's early return carries no AniList fields at all, so all three
  * are absent (not null/false) in that case.
+ *
+ * With `source=anilist` the page unit changes (owner's lazy-loading
+ * order, 2026-11-10): a page is up to `limit` ANIME GROUPS (grouped
+ * by anilistId in the served order), never a slice of themes — a
+ * group never splits across pages. `limit` then counts groups
+ * (default 10, capped at 50), `total` still counts themes, and the
+ * group-pagination meta below is present (the union read leaves it
+ * absent, byte-compatible with before).
  */
 export interface LibraryThemesResponse {
   themes: ThemeSummary[];
@@ -1750,6 +1758,19 @@ export interface LibraryThemesResponse {
   /** 1-based page served. */
   page: number;
   limit: number;
+  /**
+   * AniList source only: total anime groups across all pages
+   * (groups formed over the — possibly type-filtered — theme set).
+   */
+  totalGroups?: number;
+  /**
+   * AniList source only: total themes across all groups/pages.
+   * Carries the same value as `total` for that source; named for
+   * the Library header's count-up, which animates toward it.
+   */
+  totalThemes?: number;
+  /** AniList source only: another group page exists after this one. */
+  hasMore?: boolean;
   /** The caller's linked AniList username, or null when unlinked. */
   anilistUser?: string | null;
   /**

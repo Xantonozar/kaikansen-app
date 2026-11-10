@@ -130,7 +130,7 @@ export class LibraryController {
   @Get('library/themes')
   @ApiOkResponse({
     description:
-      'The caller’s library themes, paged: watch history ∪ AniList completed (the web’s /api/themes/library, renamed onto this API’s /library prefix — the literal path would collide with GET /themes/:slug). With source=anilist, only the AniList side is served (themes of the caller’s AniList anime, no watch history).',
+      'The caller’s library themes, paged: watch history ∪ AniList completed (the web’s /api/themes/library, renamed onto this API’s /library prefix — the literal path would collide with GET /themes/:slug). With source=anilist, only the AniList side is served (themes of the caller’s AniList anime, no watch history) and the page unit becomes the anime GROUP: page/limit count groups (limit defaults to 10 groups, capped at 50) and the response carries totalGroups/totalThemes/hasMore.',
   })
   libraryThemes(
     @Req() req: { user: TokenPayload },
@@ -144,7 +144,10 @@ export class LibraryController {
     return this.library.listLibraryThemes(
       req.user.userId,
       Number.isNaN(parsedPage) ? 1 : parsedPage,
-      Number.isNaN(parsedLimit) ? 50 : parsedLimit,
+      // An absent/unparseable limit stays undefined: the service
+      // applies the per-source default (the union's web 50, the
+      // AniList source's 10 groups).
+      Number.isNaN(parsedLimit) ? undefined : parsedLimit,
       type,
       source,
     );

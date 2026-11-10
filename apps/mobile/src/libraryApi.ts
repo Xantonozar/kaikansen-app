@@ -102,33 +102,62 @@ export async function fetchHistory(): Promise<WatchHistoryResponse> {
  * response shape with every theme filled in. The response's
  * `anilistUser` is the linked AniList username (absent entirely when
  * both sides of the union are empty — the web's early return).
- *
- * With `source: 'anilist'` the API serves the AniList side ALONE —
- * themes of the caller's AniList anime, no watch-history mixing
- * (owner ruling 2026-11-10, Option B). That is the Library AniList
- * segment's only read.
  */
-export async function fetchLibraryThemes(
-  source?: 'anilist',
-): Promise<LibraryThemesResponse> {
+export async function fetchLibraryThemes(): Promise<LibraryThemesResponse> {
   if (fixtureMode) return { themes: [], total: 0, page: 1, limit: 100 };
   const PAGE_LIMIT = 100;
   const MAX_PAGES = 25;
-  const sourceParam = source === 'anilist' ? '&source=anilist' : '';
   const first = await apiJson<LibraryThemesResponse>(
-    `/library/themes?page=1&limit=${PAGE_LIMIT}${sourceParam}`,
+    `/library/themes?page=1&limit=${PAGE_LIMIT}`,
   );
   const themes = [...first.themes];
   let page = 1;
   while (themes.length < first.total && page < MAX_PAGES) {
     page += 1;
     const res = await apiJson<LibraryThemesResponse>(
-      `/library/themes?page=${page}&limit=${PAGE_LIMIT}${sourceParam}`,
+      `/library/themes?page=${page}&limit=${PAGE_LIMIT}`,
     );
     if (res.themes.length === 0) break;
     themes.push(...res.themes);
   }
   return { ...first, themes, page: 1, limit: themes.length };
+}
+
+/** Anime groups per AniList page (the API's own default/cap). */
+export const ANILIST_GROUP_PAGE_SIZE = 10;
+
+/**
+ * GET /library/themes?source=anilist — ONE page of the AniList
+ * side alone (owner ruling 2026-11-10, Option B: themes of the
+ * caller's AniList anime, no watch-history mixing), paged by
+ * ANIME GROUP (owner's lazy-loading order, 2026-11-10): `page`
+ * (1-based) and `limit` count groups, a group never splits across
+ * pages, and the response carries the group-pagination meta
+ * (totalGroups / totalThemes / hasMore). `type` ('OP' | 'ED')
+ * regroups over that type alone when given. This is the Library
+ * AniList segment's only read — it pages lazily on scroll instead
+ * of pulling the whole ~950-theme set at once.
+ */
+export async function fetchAnilistThemesPage(
+  page: number,
+  limit: number = ANILIST_GROUP_PAGE_SIZE,
+  type?: 'OP' | 'ED',
+): Promise<LibraryThemesResponse> {
+  if (fixtureMode) {
+    return {
+      themes: [],
+      total: 0,
+      totalThemes: 0,
+      totalGroups: 0,
+      page,
+      limit,
+      hasMore: false,
+    };
+  }
+  const typeParam = type ? `&type=${type}` : '';
+  return apiJson<LibraryThemesResponse>(
+    `/library/themes?source=anilist&page=${page}&limit=${limit}${typeParam}`,
+  );
 }
 
 /* ------------------------------------------------------------------ */

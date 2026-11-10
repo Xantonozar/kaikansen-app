@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
+  FlatList,
   Image,
   Pressable,
   ScrollView,
@@ -31,6 +31,12 @@ import { fetchFriendsActivity, fetchUserNetwork } from '../../../src/socialApi';
 import { Avatar } from '../../../src/components/Avatar';
 import { PopularCard } from '../../../src/components/PopularCard';
 import { PosterCard } from '../../../src/components/PosterCard';
+import {
+  SkeletonBlock,
+  SkeletonFeedRow,
+  SkeletonPopularRow,
+  SkeletonPosterCard,
+} from '../../../src/components/Skeleton';
 import { compactRelativeTime } from '../../../src/time';
 import {
   fontFamilies,
@@ -52,6 +58,14 @@ function seasonTitleCase(season: string): string {
 
 /** How many feed rows Home previews; the full feed lives on Social. */
 const HOME_FEED_PREVIEW = 5;
+
+/**
+ * Rail/list chunk size for the lazy rendering (owner's order,
+ * 2026-11-10): the season rail and the Popular list render this
+ * many entries first and append the next chunk on scroll, so the
+ * first paint never pays for all 50 Popular cards at once.
+ */
+const RAIL_CHUNK = 10;
 
 /** The strip's "recently active" window for the green dot (24h). */
 const RECENT_ACTIVE_MS = 24 * 60 * 60 * 1000;
@@ -88,6 +102,12 @@ function firstNameOf(displayName: string, username: string): string {
  * the type filter is a segmented All/OP/ED control in the Popular
  * header row. Data comes from the new API, or from the bundled
  * real-data fixture when no API URL is configured (see src/api.ts).
+ *
+ * Loading is STAGED (owner's lazy-loading order, 2026-11-10):
+ * every section's read fires in parallel and each section fills
+ * its fixed slot as its own data lands — skeletons hold pending
+ * slots, the layout never reorders — and the season rail +
+ * Popular list mount in chunks of RAIL_CHUNK, appended on scroll.
  */
 export default function HomeScreen() {
   const theme = useTheme();
@@ -109,6 +129,19 @@ export default function HomeScreen() {
      composite that theme's real cover art, per the Lavender Dusk
      mock. Rolled when Home data lands and re-rolled on every tap. */
   const [surprisePick, setSurprisePick] = useState<ThemeSummary | null>(null);
+
+  /* Lazy-render windows (see RAIL_CHUNK): how much of the season
+     rail / Popular list is mounted. A fresh Home payload restarts
+     both windows; a Popular filter change restarts Popular's. */
+  const [seasonVisible, setSeasonVisible] = useState(RAIL_CHUNK);
+  const [popularVisible, setPopularVisible] = useState(RAIL_CHUNK);
+  useEffect(() => {
+    setSeasonVisible(RAIL_CHUNK);
+    setPopularVisible(RAIL_CHUNK);
+  }, [home]);
+  useEffect(() => {
+    setPopularVisible(RAIL_CHUNK);
+  }, [typeFilter]);
 
   useEffect(() => {
     let live = true;
@@ -328,19 +361,27 @@ export default function HomeScreen() {
     );
   }
 
-  if (!home) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator color={theme.accent} />
-        <Text style={styles.loadingText}>Loading themes…</Text>
-      </View>
-    );
-  }
-
-  const popular =
-    typeFilter === 'ALL'
+  /* Staged loading (owner's lazy-loading order, 2026-11-10):
+     there is NO full-screen loading gate any more — the old
+     spinner held every section hostage until the slowest read
+     landed. Each section renders into its fixed slot the moment
+     its own data resolves (the /home read, the feed, the network
+     and the history reads all fire in parallel on mount/focus);
+     a pending slot shows skeletons in its content's shape, and
+     the layout order never changes as data arrives. A failed
+     /home read keeps the screen's error state above. */
+  const popular = home
+    ? typeFilter === 'ALL'
       ? home.popular
-      : home.popular.filter((t) => t.type === typeFilter);
+      : home.popular.filter((t) => t.type === typeFilter)
+    : [];
+  /* The rendered windows (see RAIL_CHUNK). `popular` itself stays
+     the FULL filtered list — it is the play queue, exactly as
+     before; only the mounting is windowed. */
+  const popularShown = popular.slice(0, popularVisible);
+  const seasonShown = home
+    ? home.seasonRail.slice(0, seasonVisible)
+    : [];
 
   /* Friends Activity states (Rich Social Feed): loading card →
      strip + rows card → the web's empty card. Copy is honest per
@@ -361,6 +402,22 @@ export default function HomeScreen() {
       style={styles.scroll}
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
+      scrollEventThrottle={16}
+      onScroll={(e) => {
+        // Popular lazy window: approaching the page bottom mounts
+        // the next chunk of rows (see RAIL_CHUNK).
+        if (!home || popularVisible >= popular.length) return;
+        const { layoutMeasurement, contentOffset, contentSize } =
+          e.nativeEvent;
+        if (
+          layoutMeasurement.height + contentOffset.y >=
+          contentSize.height - 800
+        ) {
+          setPopularVisible((n) =>
+            n < popular.length ? n + RAIL_CHUNK : n,
+          );
+        }
+      }}
     >
       <View style={styles.column}>
         {fixtureMode && (
@@ -382,44 +439,84 @@ export default function HomeScreen() {
         {/* Season poster rail — Lavender Dusk header treatment: mauve
             eyebrow over the big season title, View All on the right
             (opens the Season browse screen, §6.5). */}
-        <View
-          style={[
-            styles.sectionHeader,
-            styles.sectionHeaderFirst,
-            styles.seasonHeaderRow,
-          ]}
-        >
-          <View>
-            <Text style={styles.eyebrow}>Current Season</Text>
-            <Text style={styles.displayTitle}>
-              {seasonTitleCase(home.season.season)} {home.season.year}
-            </Text>
-          </View>
-          <Pressable
-            onPress={() => router.push('/season')}
-            hitSlop={6}
-            accessibilityRole="button"
-            accessibilityLabel="View all season themes"
+        {home ? (
+          <View
+            style={[
+              styles.sectionHeader,
+              styles.sectionHeaderFirst,
+              styles.seasonHeaderRow,
+            ]}
           >
-            <Text style={styles.feedLink}>View All</Text>
-          </Pressable>
-        </View>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={[styles.rail, styles.seasonRail]}
-        >
-          {home.seasonRail.map((item) => (
-            <PosterCard
-              key={item.slug}
-              item={item}
-              onPress={() => openTheme(item.slug)}
-            />
-          ))}
-          {home.seasonRail.length === 0 && (
-            <Text style={styles.emptyText}>No themes this season yet.</Text>
-          )}
-        </ScrollView>
+            <View>
+              <Text style={styles.eyebrow}>Current Season</Text>
+              <Text style={styles.displayTitle}>
+                {seasonTitleCase(home.season.season)} {home.season.year}
+              </Text>
+            </View>
+            <Pressable
+              onPress={() => router.push('/season')}
+              hitSlop={6}
+              accessibilityRole="button"
+              accessibilityLabel="View all season themes"
+            >
+              <Text style={styles.feedLink}>View All</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <View
+            style={[
+              styles.sectionHeader,
+              styles.sectionHeaderFirst,
+              styles.seasonHeaderRow,
+            ]}
+          >
+            <View>
+              <SkeletonBlock width={96} height={11} radius={5} />
+              <SkeletonBlock
+                width={176}
+                height={27}
+                radius={8}
+                style={{ marginTop: 5 }}
+              />
+            </View>
+            <SkeletonBlock width={54} height={13} radius={6} />
+          </View>
+        )}
+        {home ? (
+          <FlatList
+            horizontal
+            data={seasonShown}
+            keyExtractor={(item) => item.slug}
+            renderItem={({ item }) => (
+              <PosterCard
+                item={item}
+                onPress={() => openTheme(item.slug)}
+              />
+            )}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={[styles.rail, styles.seasonRail]}
+            initialNumToRender={RAIL_CHUNK}
+            maxToRenderPerBatch={RAIL_CHUNK}
+            windowSize={5}
+            onEndReached={() => {
+              if (seasonVisible < home.seasonRail.length) {
+                setSeasonVisible((n) => n + RAIL_CHUNK);
+              }
+            }}
+            onEndReachedThreshold={0.5}
+            ListEmptyComponent={
+              <Text style={styles.emptyText}>
+                No themes this season yet.
+              </Text>
+            }
+          />
+        ) : (
+          <View style={[styles.rail, styles.seasonRail, styles.railRow]}>
+            <SkeletonPosterCard />
+            <SkeletonPosterCard />
+            <SkeletonPosterCard />
+          </View>
+        )}
 
         {/* Surprise — the Lavender Dusk mock's banner: the rolled
             theme's anime cover composited on the right, fading into
@@ -429,6 +526,7 @@ export default function HomeScreen() {
             left, and the shuffle disc translucent over the artwork.
             Without a cover the banner is the plain card with the
             solid disc, as before. */}
+        {home ? (
         <Pressable
           onPress={surprise}
           style={({ pressed }) => [
@@ -482,6 +580,30 @@ export default function HomeScreen() {
             <Shuffle size={28} color={theme.onAccent} strokeWidth={2} />
           </View>
         </Pressable>
+        ) : (
+          <View style={styles.surprise}>
+            <View style={styles.surpriseTextBlock}>
+              <SkeletonBlock
+                width={132}
+                height={24}
+                radius={8}
+                tone="surface"
+              />
+              <SkeletonBlock
+                width={168}
+                height={16}
+                radius={6}
+                tone="surface"
+              />
+            </View>
+            <SkeletonBlock
+              width={67}
+              height={67}
+              radius={radii.pill}
+              tone="surface"
+            />
+          </View>
+        )}
 
         {/* Continue Listening — the Home v3 mock's card (owner
             correction, 2026-11-10): a frosted white card holding
@@ -489,6 +611,49 @@ export default function HomeScreen() {
             title + artist inside the card; a mauve play disc
             overlaps the art's bottom-right corner. The card body
             opens the theme; the disc resumes in the entry's mode. */}
+        {/* Continue Listening's pending state: while the history
+            read is in flight (signed-in only — signed-out never
+            fetches it) the slot holds skeleton cards in the rail's
+            shape. A resolved EMPTY history still hides the rail,
+            exactly as before. */}
+        {signedIn && !fixtureMode && history === null && (
+          <>
+            <View style={[styles.sectionHeader, styles.feedHeader]}>
+              <SkeletonBlock width={152} height={19} radius={7} />
+            </View>
+            <View
+              style={[styles.rail, styles.continueRail, styles.railRow]}
+            >
+              {[0, 1, 2].map((i) => (
+                <View key={i} style={styles.continueCard}>
+                  <SkeletonBlock
+                    width={96}
+                    height={96}
+                    radius={radii.base}
+                  />
+                  <SkeletonBlock
+                    width={96}
+                    height={4}
+                    radius={2}
+                    style={{ marginTop: 10 }}
+                  />
+                  <SkeletonBlock
+                    width={62}
+                    height={11}
+                    radius={5}
+                    style={{ marginTop: 6 }}
+                  />
+                  <SkeletonBlock
+                    width={44}
+                    height={9}
+                    radius={4}
+                    style={{ marginTop: 3 }}
+                  />
+                </View>
+              ))}
+            </View>
+          </>
+        )}
         {history !== null && history.length > 0 && (
           <>
             <View style={[styles.sectionHeader, styles.feedHeader]}>
@@ -602,11 +767,23 @@ export default function HomeScreen() {
           </Pressable>
         </View>
         {feedLoading ? (
-          <View style={styles.feedCardEmpty}>
-            <ActivityIndicator color={theme.accent} />
-            <Text style={styles.feedEmptySub}>
-              Catching up with friends…
-            </Text>
+          <View style={styles.feedCard}>
+            <View style={styles.stripSkeletonRow}>
+              {[0, 1, 2, 3].map((i) => (
+                <View key={i} style={styles.stripItem}>
+                  <SkeletonBlock
+                    width={48}
+                    height={48}
+                    radius={radii.pill}
+                  />
+                  <SkeletonBlock width={36} height={9} radius={4} />
+                </View>
+              ))}
+            </View>
+            <View style={styles.feedDivider} />
+            <SkeletonFeedRow />
+            <SkeletonFeedRow />
+            <SkeletonFeedRow />
           </View>
         ) : signedIn && stripFriends.length > 0 ? (
           <View style={styles.feedCard}>
@@ -822,7 +999,9 @@ export default function HomeScreen() {
           </View>
         </View>
         <View style={styles.list}>
-          {popular.map((item, index) => (
+          {!home &&
+            [0, 1, 2].map((i) => <SkeletonPopularRow key={i} />)}
+          {popularShown.map((item, index) => (
             <PopularCard
               key={item.slug}
               item={item}
@@ -842,15 +1021,19 @@ export default function HomeScreen() {
               onToggleSave={() => void favorites.toggle(item.slug)}
             />
           ))}
-          {popular.length === 0 && (
+          {home && popular.length === 0 && (
             <Text style={styles.emptyText}>No {typeFilter} themes here.</Text>
           )}
         </View>
 
-        {/* The web's own end-of-list marker (DESIGN.md §6.4). */}
-        <Text style={styles.endMarker}>
-          You’ve reached the end of the hall of fame! ✨
-        </Text>
+        {/* The web's own end-of-list marker (DESIGN.md §6.4) —
+            shown once the whole (filtered) list is mounted, as
+            it always sat under the full list. */}
+        {home && popularVisible >= popular.length && (
+          <Text style={styles.endMarker}>
+            You’ve reached the end of the hall of fame! ✨
+          </Text>
+        )}
       </View>
     </ScrollView>
   );
@@ -878,9 +1061,14 @@ const createStyles = (theme: Theme) =>
     gap: spacing.sm,
     paddingHorizontal: spacing.screenEdge,
   },
-  loadingText: {
-    ...typeStyles.body,
-    color: theme.muted,
+  railRow: {
+    // The skeleton rails' row direction (their content containers
+    // carry the rails' own padding/gap styles).
+    flexDirection: 'row',
+  },
+  stripSkeletonRow: {
+    flexDirection: 'row',
+    gap: spacing.lg,
   },
   errorText: {
     ...typeStyles.heading,
