@@ -38,6 +38,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # packages/contracts ships only sources; its main entry
+      # dist/index.js is gitignored build output. Metro must resolve
+      # @kaikansen/contracts when bundling the app, so build it here
+      # before EAS runs — without this the bundle step fails with
+      # "Unable to resolve @kaikansen/contracts".
+      - name: Build shared contracts
+        run: npm run build -w @kaikansen/contracts
+
       - name: Install EAS CLI
         run: npm install --global eas-cli
 
