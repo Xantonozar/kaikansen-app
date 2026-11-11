@@ -49,11 +49,24 @@ jobs:
       - name: Install EAS CLI
         run: npm install --global eas-cli
 
+      - name: Free disk space for the build
+        run: |
+          df -h        
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af || true
+          df -h
+
       - name: Build APK (preview profile, local)
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas build --profile preview --platform android --local --non-interactive --output "$GITHUB_WORKSPACE/kaikansen.apk"
+          TMPDIR: ${{ github.workspace }}/.eas-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          eas build --profile preview --platform android --local --non-interactive --output "$GITHUB_WORKSPACE/kaikansen.apk"
 
       - name: Upload run artifact
         uses: actions/upload-artifact@v4
