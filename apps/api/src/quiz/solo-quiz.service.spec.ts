@@ -90,8 +90,14 @@ function makeTheme(i: number, extra: Record<string, unknown> = {}) {
     type: 'OP',
     sequence: 1,
     entries: [{ atEntryId: 5000 + i }],
-    videoUrl: `https://video/${i}.webm`,
-    audioUrl: `https://audio/${i}.webm`,
+    // The catalogue's common case (audioUrl null + AnimeThemes
+    // video → the derived .ogg): since the ogg-only ruling
+    // (2026-11-12) a theme with no resolvable .ogg is not
+    // dealable in solo, so the factory default is a dealable
+    // theme; suites studying audio-less themes stage them
+    // explicitly (non-derivable video + a stored video link).
+    videoUrl: `https://v.animethemes.moe/Anime${i}-OP1.webm`,
+    audioUrl: null,
     isPopular: true,
     ...extra,
   };
@@ -226,14 +232,25 @@ describe('SoloQuizService — game flow', () => {
   });
 
   it('serves no audioUrl when the stored value is a video link and nothing derives (owner doctrine, 2026-11-10)', async () => {
-    const { service } = makeService();
-    const state = await service.createGame(USER_1, { quizType: 'anime' });
-    // Factory themes store https://audio/<i>.webm — a video LINK —
-    // with a non-AnimeThemes video URL, so nothing derives and the
+    const { service, models } = makeService();
+    // Stage the audio-less catalogue corner explicitly (the
+    // factory default is the derivable common case): stored
+    // https://audio/<i>.webm — a video LINK — with a
+    // non-AnimeThemes video URL, so nothing derives and the
     // stored value is not audio: it must NOT be served as the
     // question's audio. (This expectation previously enshrined the
     // old "stored always wins" rule; the client's audio-only last
     // resort is the question's videoUrl, which stays intact.)
+    models.themes.forEach((t, idx) => {
+      t.videoUrl = `https://video/${idx + 1}.webm`;
+      t.audioUrl = `https://audio/${idx + 1}.webm`;
+    });
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    // Under the ogg-only rule (2026-11-12) every such theme is
+    // redrawn; with the whole pool audio-less the redraw cap
+    // deals the 4th candidate through the fill-don't-fail
+    // hatch — and its projection STILL serves no audioUrl.
+    expect(state.question?.theme.slug).toBe('anime-4-op1-1004');
     expect(state.question?.theme.audioUrl).toBeNull();
     expect(state.question?.theme.videoUrl).toBeTruthy();
   });
@@ -682,6 +699,118 @@ describe('SoloQuizService — verified dealing (part 7, 2026-11-11)', () => {
   });
 });
 
+describe('SoloQuizService — ogg-only pool (owner ruling, 2026-11-12)', () => {
+  const oggOf = (i: number) => `https://a.animethemes.moe/Anime${i}-OP1.ogg`;
+
+  /** The derivable factory catalogue with the named themes
+      (1-based) staged audio-less: non-derivable video URL +
+      a stored video link in the audio slot, so
+      resolveAudioUrl returns null for exactly those. The fake
+      $sample is deterministic (first match), so the draw order
+      is the fixture order. */
+  function makeMixedService(nullIndexes: number[]) {
+    const { service, models } = makeService();
+    models.themes.forEach((t, idx) => {
+      if (nullIndexes.includes(idx + 1)) {
+        t.videoUrl = `https://video/${idx + 1}.webm`;
+        t.audioUrl = `https://audio/${idx + 1}.webm`;
+      }
+    });
+    return { service, models };
+  }
+
+  it('a null-audio theme is redrawn and excluded for the rest of the game', async () => {
+    const { service } = makeMixedService([1]);
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    // Theme 1 is sampled first, rejected as audio-less, and
+    // the question is dealt from the same pool: theme 2.
+    expect(state.question?.theme.slug).toBe('anime-2-op1-1002');
+    expect(state.question?.theme.audioUrl).toBe(oggOf(2));
+
+    const dealtSlugs: string[] = [];
+    let last = null;
+    for (let i = 0; i < 10; i++) {
+      last = await service.submitAnswer(USER_1, state.gameId, null);
+      dealtSlugs.push(last.reveal.slug);
+    }
+    expect(last!.gameOver).toBe(true);
+    expect(dealtSlugs).not.toContain('anime-1-op1-1001');
+    expect(new Set(dealtSlugs).size).toBe(10);
+  });
+
+  it('no question projection in a full game ever serves a null-audio theme', async () => {
+    const { service } = makeMixedService([1, 5]);
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const projections = [state.question!];
+    let last = null;
+    for (let i = 0; i < 9; i++) {
+      last = await service.submitAnswer(USER_1, state.gameId, null);
+      projections.push(last.nextQuestion!);
+    }
+    expect(projections).toHaveLength(10);
+    for (const q of projections) {
+      expect(q.theme.slug).not.toBe('anime-1-op1-1001');
+      expect(q.theme.slug).not.toBe('anime-5-op1-1005');
+      expect(q.theme.audioUrl).toMatch(
+        /^https:\/\/a\.animethemes\.moe\/.+\.ogg$/,
+      );
+    }
+  });
+
+  it('redraw cap spent on null-audio candidates deals the next one, exactly like all-404', async () => {
+    const { service } = makeMixedService([1, 2, 3, 4, 5]);
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    // 1 initial rejection + 3 capped redraws, then the 4th
+    // rejected candidate (theme 4) is dealt through the hatch
+    // rather than looping (or failing) forever.
+    expect(state.question?.theme.slug).toBe('anime-4-op1-1004');
+    expect(state.question?.theme.audioUrl).toBeNull();
+  });
+
+  it('a drained pool fills the last slot with the rejected null-audio song', async () => {
+    // Exactly 10 themes; only the last one is audio-less.
+    const models = makeFakeModels();
+    models.themes.splice(10);
+    models.themes.forEach((t, idx) => {
+      if (idx + 1 === 10) {
+        t.videoUrl = 'https://video/10.webm';
+        t.audioUrl = 'https://audio/10.webm';
+      }
+    });
+    const service = new SoloQuizService(
+      models.themeModel as never,
+      models.attemptModel as never,
+      models.userModel as never,
+      models.watchHistoryModel as never,
+    );
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    let last = null;
+    for (let i = 0; i < 9; i++) {
+      last = await service.submitAnswer(USER_1, state.gameId, null);
+    }
+    // Q10: theme 10 is rejected as audio-less, the redraw
+    // finds the pool drained, and the rejected song is dealt
+    // rather than the game dying one question short.
+    expect(last!.nextQuestion?.theme.slug).toBe('anime-10-op1-10010');
+    expect(last!.nextQuestion?.theme.audioUrl).toBeNull();
+  });
+
+  it('the playback-started pre-draw honours the rule — the promotion serves the redrawn question', async () => {
+    const { service } = makeMixedService([2]);
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    expect(state.question?.theme.slug).toBe('anime-1-op1-1001');
+    // The pre-draw samples theme 2 first: audio-less, so it is
+    // rejected and theme 3 is drawn — the reveal carries theme
+    // 3's .ogg, NOT null (theme 2 has no audio to reveal).
+    const signal = await service.markPlaybackStarted(USER_1, state.gameId);
+    expect(signal.nextAudioUrl).toBe(oggOf(3));
+    // …and the answer promotes that very question.
+    const res = await service.submitAnswer(USER_1, state.gameId, null);
+    expect(res.nextQuestion?.theme.slug).toBe('anime-3-op1-1003');
+    expect(res.nextQuestion?.theme.audioUrl).toBe(oggOf(3));
+  });
+});
+
 describe('SoloQuizService — earlier reveal (part 5, 2026-11-11)', () => {
   const oggOf = (i: number) => `https://a.animethemes.moe/Anime${i}-OP1.ogg`;
 
@@ -799,9 +928,17 @@ describe('SoloQuizService — earlier reveal (part 5, 2026-11-11)', () => {
 
   it('a theme with no resolvable audio reveals null, not a video link', async () => {
     const { service, models } = makeService();
-    // Factory themes: stored "audio" is a video link and nothing
-    // derives — the next question has NO audio to reveal.
-    void models;
+    // Stage the audio-less corner explicitly (factory default
+    // is the derivable common case): stored "audio" is a video
+    // link and nothing derives. Under the ogg-only rule
+    // (2026-11-12) Q1 deals through the redraw-cap hatch and
+    // the pre-draw honours the rule too — the dealt next
+    // question still has NO audio to reveal, and the reveal
+    // must not invent a candidate from its video link.
+    models.themes.forEach((t, idx) => {
+      t.videoUrl = `https://video/${idx + 1}.webm`;
+      t.audioUrl = `https://audio/${idx + 1}.webm`;
+    });
     const state = await service.createGame(USER_1, { quizType: 'anime' });
     const signal = await service.markPlaybackStarted(USER_1, state.gameId);
     expect(signal.nextAudioUrl).toBeNull();

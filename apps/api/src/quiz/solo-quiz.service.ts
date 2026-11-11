@@ -234,6 +234,22 @@ interface SoloModels {
  *    no server-held game, hence no equivalent. The pre-drawn
  *    question is measured from its promotion (the answer), not
  *    its draw — preload time is never answer time.
+ * 8. Ogg-only pool (owner ruling, 2026-11-12): solo deals
+ *    ONLY themes with a resolvable .ogg. A theme whose audio
+ *    does not resolve at all takes the definite-missing path
+ *    in sampleVerifiedCandidate exactly like a probed 404
+ *    (point 6) — excluded, redrawn under the same cap, dealt
+ *    only via the fill-don't-fail hatch. This supersedes part
+ *    7's "unresolvable audio deals as before": such themes
+ *    otherwise reach the client with nothing but a video file
+ *    to play, which is also the habitat of the video-leg
+ *    clock bug fixed on the client the same day. Every solo
+ *    draw funnels through the one sampler (creation, the
+ *    answer-time draw, and the point-7 pre-draw the answer
+ *    promotes), so the rule holds for the whole game. Rooms
+ *    dealing is deliberately NOT changed (its sampler keeps
+ *    the web's shape; the same widening there is a separate
+ *    owner decision).
  *
  * Models are OPTIONAL like everywhere else in this API: booted
  * without MONGODB_URI, every method answers 503.
@@ -435,9 +451,18 @@ export class SoloQuizService {
    * ~1s budget (verifyAudio), after which the draw deals
    * unverified — and if a redraw finds the pool drained, the
    * last rejected candidate is dealt unverified rather than
-   * failing the game (fill, don't fail). A theme whose audio
-   * does not resolve at all has nothing to probe and deals as
-   * before.
+   * failing the game (fill, don't fail).
+   *
+   * Ogg-only pool (owner ruling, 2026-11-12 — supersedes part
+   * 7's "deals as before" for unresolvable audio): solo quiz
+   * deals ONLY themes with a resolvable .ogg. A theme whose
+   * audio does not resolve at all (non-derivable video link,
+   * no genuine stored audio) has nothing to probe and nothing
+   * to play but its video file — it takes the definite-missing
+   * path below exactly like a probed 404: excluded from the
+   * rest of the game, redrawn under the same cap and budget,
+   * and dealt only through the same fill-don't-fail hatch
+   * (cap spent / pool drained). No-.ogg themes don't count.
    */
   private async sampleVerifiedCandidate(
     models: SoloModels,
@@ -457,9 +482,9 @@ export class SoloQuizService {
       // re-dealt within the game.
       session.usedThemeIds.push(String(sampled._id));
       const audioUrl = resolveAudioUrl(sampled.audioUrl, sampled.videoUrl);
-      const verdict = audioUrl
+      const verdict: AudioProbeResult = audioUrl
         ? await this.verifyAudio(audioUrl, deadline)
-        : 'ok';
+        : 'missing';
       if (verdict === 'missing' && redraws < VERIFY_MAX_REDRAWS) {
         redraws += 1;
         lastRejected = sampled;
