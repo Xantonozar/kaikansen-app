@@ -2,6 +2,7 @@ import { describe, expect, it } from '@jest/globals';
 import type { ThemeDetail, ThemeEntry } from '@kaikansen/contracts';
 import {
   detailBackendForMode,
+  detailSurfaceVisible,
   hiddenVideoCandidate,
   mountedDetailBackends,
   seekRatioForTap,
@@ -23,8 +24,14 @@ import { resolveListenCandidates } from './playback';
  * - the hidden-video candidate still resolves inside the listen
  *   chain after the split (EXTENDS the playback job's chain
  *   tests in mediaEngine.test.ts / playback.test.ts — the chain
- *   itself is unchanged; this proves the split's Listen backend
- *   still has its untouchable candidate to mount hidden).
+ *   itself is unchanged; this proves the split's listen claim
+ *   still has its untouchable candidate for the page's single
+ *   surface to serve, hidden);
+ * - the single surface's visibility rule (2026-11-11 fix): the
+ *   page owns ONE surface for the whole hero zone; it is visible
+ *   only in watch without the W2 fallback — the mount invariant
+ *   itself (heroes bind no surface) is pinned by
+ *   singleSurface.test.ts.
  */
 
 const VIDEO = 'https://v.animethemes.moe/FateZero-OP1.webm';
@@ -112,13 +119,40 @@ describe('detailBackendForMode / mountedDetailBackends', () => {
   it('a mode switch swaps the single mounted backend — the pair is never co-mounted', () => {
     // The engine/session lives in the provider, not in a hero,
     // so this swap is the WHOLE effect of a mode switch on the
-    // component tree: watch unmounts as listen mounts, with no
+    // backend tree: watch unmounts as listen mounts, with no
     // frame where both exist (and no engine restart — the claim
     // change is the session's, exactly as before the split).
+    // The backends are the NON-surface chrome: the video surface
+    // is page-owned, always mounted, and never part of this swap
+    // (single-surface fix — detailSurfaceVisible above).
     const sequence = (['watch', 'listen', 'watch'] as const).map((m) =>
       mountedDetailBackends(m),
     );
     expect(sequence).toEqual([['watch'], ['listen'], ['watch']]);
+  });
+});
+
+describe('detailSurfaceVisible — the single surface (2026-11-11 fix)', () => {
+  it('is visible only for a live watch backend with no W2 fallback', () => {
+    expect(detailSurfaceVisible('watch', false)).toBe(true);
+    expect(detailSurfaceVisible('watch', true)).toBe(false);
+  });
+
+  it('stays hidden in listen and artwork states, fallback or not', () => {
+    expect(detailSurfaceVisible('listen', false)).toBe(false);
+    expect(detailSurfaceVisible('listen', true)).toBe(false);
+    expect(detailSurfaceVisible('artwork', false)).toBe(false);
+    expect(detailSurfaceVisible('artwork', true)).toBe(false);
+  });
+
+  it('composes with the backend rule: null mode (artwork) never shows it', () => {
+    for (const mode of ['watch', 'listen', null] as const) {
+      for (const fallback of [false, true]) {
+        expect(
+          detailSurfaceVisible(detailBackendForMode(mode), fallback),
+        ).toBe(mode === 'watch' && !fallback);
+      }
+    }
   });
 });
 
@@ -177,8 +211,8 @@ describe('splitPlaybackChannels — the render boundary', () => {
 describe('hiddenVideoCandidate — the untouchable listen fallback', () => {
   it('the catalogue-normal listen chain still ends in the video file, tagged hidden-video', () => {
     // Stored audioUrl null: the chain is the derived .ogg, then
-    // the video file itself — the split's Listen backend mounts
-    // its hidden surface for exactly this candidate.
+    // the video file itself — the page's single surface, hidden
+    // by style while listening, serves exactly this candidate.
     const d = detail();
     const e = entry();
     const chain = resolveListenCandidates(d, e);

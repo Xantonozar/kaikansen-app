@@ -5,7 +5,6 @@ import {
   StyleSheet,
   View,
 } from 'react-native';
-import { VideoView } from 'expo-video';
 import { Pause, Play, RotateCcw } from 'lucide-react-native';
 import type { PlaybackSlow } from '../usePlayback';
 import { radii, spacing, type Theme } from '../theme';
@@ -30,14 +29,16 @@ import { DetailListenProgress } from './DetailProgress';
  * with the play/pause disc hanging off its bottom-right corner,
  * then the progress half (waveform + time row).
  *
- * ⚠️ UNTOUCHABLE — THE HIDDEN-VIDEO AUDIO FALLBACK: this
- * component owns the listen path's hidden surface mount. When
- * the listen chain reaches a VIDEO file as an audio candidate
+ * ⚠️ UNTOUCHABLE — THE HIDDEN-VIDEO AUDIO FALLBACK: when the
+ * listen chain reaches a VIDEO file as an audio candidate
  * (detailPlayer.hiddenVideoCandidate — the chain's last resort),
- * it plays through the expo-video player bound below with NO
- * visible surface (the 1×1, opacity-0 style), sound only,
- * exactly as before the split. The surface stays mounted for the
- * whole listen claim, whatever candidate is live — rendering,
+ * it plays through expo-video with NO visible surface, sound
+ * only, exactly as before the split. Since the single-surface
+ * fix (2026-11-11) that surface is the PAGE's one surface,
+ * hidden by style for the whole listen claim (this component
+ * mounts no surface of its own — on Android the player-to-view
+ * binding must never move); whatever candidate is live, the
+ * fallback keeps playing through it, invisible — rendering,
  * unhiding, reordering or dropping that candidate is a spec
  * violation.
  */
@@ -58,13 +59,6 @@ export const DetailListenHero = memo(function DetailListenHero({
 
   return (
     <View style={styles.listenCard}>
-      {/* The hidden video surface (see the header's UNTOUCHABLE
-          note): always mounted while listening, never visible. */}
-      <VideoView
-        player={playback.surfacePlayer}
-        style={styles.hiddenSurface}
-        nativeControls={false}
-      />
       <View style={styles.listenArtWrap}>
         {cover ? (
           <AppImage source={cover} style={styles.listenArt} />
@@ -151,12 +145,6 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
       zIndex: 6,
       elevation: 6,
-    },
-    hiddenSurface: {
-      position: 'absolute',
-      width: 1,
-      height: 1,
-      opacity: 0,
     },
     pressed: {
       opacity: 0.85,

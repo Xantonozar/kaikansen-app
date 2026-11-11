@@ -348,14 +348,6 @@ export default function PlayerScreen() {
                   resizeMode="cover"
                 />
               ) : null}
-              <VideoView
-                ref={videoRef}
-                player={player}
-                style={styles.video}
-                contentFit="contain"
-                nativeControls={false}
-                surfaceType="textureView"
-              />
             </>
           ) : (
             <>
@@ -368,15 +360,27 @@ export default function PlayerScreen() {
               ) : (
                 <View style={[styles.artwork, styles.artworkPlaceholder]} />
               )}
-              {/* Audio still plays through the player; the surface stays
-                  mounted but invisible so listen mode has no video frame. */}
-              <VideoView
-                player={player}
-                style={styles.hiddenSurface}
-                nativeControls={false}
-              />
             </>
           )}
+          {/* Single-owner surface (2026-11-11 fix): ONE surface
+              for the shared player, always mounted — only its
+              STYLE flips with the mode (the in-flow 16:9 in
+              watch; the 1x1 opacity-0 style in listen, where the
+              audio still plays through the player with no video
+              frame). The branches above used to mount two
+              different surfaces for the same player, swapped on
+              the mode toggle — on Android a player moved between
+              views can go permanently video-dead. textureView,
+              as the old watch surface had it: it composites like
+              a normal view inside this screen's overlays. */}
+          <VideoView
+            ref={videoRef}
+            player={player}
+            style={mode === 'watch' ? styles.video : styles.hiddenSurface}
+            contentFit="contain"
+            nativeControls={false}
+            surfaceType="textureView"
+          />
           {buffering && (
             <View style={styles.overlayCenter}>
               <ActivityIndicator color="#FFFFFF" size="large" />

@@ -1,11 +1,10 @@
-import { memo, useMemo, useRef } from 'react';
+import { memo, useMemo } from 'react';
 import {
   ActivityIndicator,
   Pressable,
   StyleSheet,
   View,
 } from 'react-native';
-import { VideoView } from 'expo-video';
 import { Maximize, Pause, Play, RotateCcw } from 'lucide-react-native';
 import type { VideoSource } from '@kaikansen/contracts';
 import { watchArtworkUnderPlayer } from '../mediaEngine';
@@ -34,30 +33,40 @@ import { WatchQualityPicker } from './WatchQualityPicker';
  * - the artwork-under-player window (problem 7's
  *   watchArtworkUnderPlayer rule, untouched) until the current
  *   source's frames render;
- * - the textureView surface (a surfaceView can attach late
- *   inside the ScrollView and stay black — see the original
- *   note, kept below);
  * - the control strip inside the hero's bottom edge: play/pause
  *   disc, the progress half (DetailStripProgress), the quality
  *   picker and fullscreen;
  * - the W2 degradation: when the engine has fallen back to the
- *   audio chain, the visible surface is replaced by the artwork
- *   and the video surface stays mounted but HIDDEN (audio only)
- *   — the honest note under the hero is the page's.
+ *   audio chain, the artwork replaces the video area (the page's
+ *   surface is hidden by style in that state — audio only) and
+ *   the honest note under the hero is the page's.
+ *
+ * SINGLE-OWNER SURFACE (2026-11-11 fix): this component mounts
+ * NO video surface. The page owns the one surface for the whole
+ * hero zone (see detailPlayer.detailSurfaceVisible) — on
+ * Android a player moved between views can go permanently
+ * video-dead, so the binding never moves; this hero renders the
+ * chrome AROUND it (its container paints above the surface: the
+ * artwork-under window shows through the transparent spacer
+ * until frames land, then unmounts and the video shows). The
+ * fullscreen button fires the onFullscreen prop — the page's
+ * surface owns the ref.
  */
 export const DetailWatchHero = memo(function DetailWatchHero({
   playback,
   cover,
   videoSources,
+  onFullscreen,
 }: {
   /** The engine's slow channel (stable across progress ticks). */
   playback: PlaybackSlow;
   cover: string | null;
   videoSources: readonly VideoSource[] | null | undefined;
+  /** Fullscreen for the page-owned surface (its ref is the page's). */
+  onFullscreen: () => void;
 }) {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const videoRef = useRef<VideoView>(null);
 
   /* The inline player's control strip — lives INSIDE the hero,
      along its bottom edge (the design rule: the hero card IS the
@@ -95,9 +104,7 @@ export const DetailWatchHero = memo(function DetailWatchHero({
             onPick={playback.switchQuality}
           />
           <Pressable
-            onPress={() => {
-              void videoRef.current?.enterFullscreen();
-            }}
+            onPress={onFullscreen}
             hitSlop={6}
             accessibilityRole="button"
             accessibilityLabel="Fullscreen"
@@ -114,16 +121,12 @@ export const DetailWatchHero = memo(function DetailWatchHero({
     /* W2 degradation: every video candidate failed, so the
        engine is playing the audio chain (the .ogg) — the media
        area shows the theme's artwork instead of a dead black
-       frame, with the player surface hidden (audio only) and
-       the honest note under the hero. The strip keeps working:
-       play/pause and seek drive the audio. */
+       frame (the page's surface is hidden by style in this
+       state, audio only) and the honest note sits under the
+       hero. The strip keeps working: play/pause and seek drive
+       the audio. */
     return (
       <View style={styles.heroPlayer}>
-        <VideoView
-          player={playback.surfacePlayer}
-          style={styles.hiddenSurface}
-          nativeControls={false}
-        />
         {cover ? (
           <AppImage source={cover} style={styles.heroVideo} />
         ) : (
@@ -156,20 +159,13 @@ export const DetailWatchHero = memo(function DetailWatchHero({
           resizeMode="cover"
         />
       ) : null}
-      {/* textureView, not the default surfaceView: this hero
-          mounts conditionally (on the Watch tap) inside a
-          ScrollView, where a SurfaceView can attach after
-          playback starts and stay black; a TextureView
-          composites like a normal view and reliably shows the
-          frames. */}
-      <VideoView
-        ref={videoRef}
-        player={playback.surfacePlayer}
-        style={styles.heroVideo}
-        contentFit="contain"
-        nativeControls={false}
-        surfaceType="textureView"
-      />
+      {/* The 16:9 stage the page's surface fills: the surface
+          itself is page-owned (single-owner rule — see the
+          header) and sits UNDER this container, absolutely
+          positioned over the hero zone; this transparent spacer
+          holds the box it overlays, and the artwork-under window
+          above shows through it until frames render. */}
+      <View style={styles.heroSpacer} />
       {playback.buffering && (
         <View style={styles.heroCenter}>
           <ActivityIndicator color={theme.accent} size="large" />
@@ -184,27 +180,35 @@ const createStyles = (theme: Theme) =>
   StyleSheet.create({
     heroPlayer: {
       position: 'relative',
-      backgroundColor: '#000',
+      // NO background fill: this container paints ABOVE the
+      // page-owned surface (a later sibling in the hero zone),
+      // so an opaque fill here would cover the video. The black
+      // comes from the surface's own style and, in W2, the
+      // artwork box below.
     },
     heroVideo: {
       width: '100%',
       aspectRatio: 16 / 9,
       backgroundColor: '#000',
     },
+    // The transparent 16:9 stage the page's surface overlays
+    // (single-owner rule): holds the hero box in flow while the
+    // absolutely-positioned surface fills it from beneath.
+    heroSpacer: {
+      width: '100%',
+      aspectRatio: 16 / 9,
+    },
     // Watch artwork-under-player (perf problem 7): absolutely
-    // fills heroPlayer's 16:9 canvas, behind the VideoView.
+    // fills heroPlayer's 16:9 canvas, covering the page-owned
+    // surface beneath the hero until the source's frames render
+    // (then it unmounts and the video shows — the same pixels
+    // the old under-player layering produced).
     heroArtworkUnder: {
       position: 'absolute',
       top: 0,
       left: 0,
       width: '100%',
       aspectRatio: 16 / 9,
-    },
-    hiddenSurface: {
-      position: 'absolute',
-      width: 1,
-      height: 1,
-      opacity: 0,
     },
     coverEmpty: {
       backgroundColor: theme.raised,

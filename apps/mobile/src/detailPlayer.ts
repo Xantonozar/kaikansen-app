@@ -24,6 +24,18 @@ import type { MediaCandidate } from './mediaEngine';
  *   is stable across progress ticks (problem 8), so a tick can
  *   not re-render the page body. `splitPlaybackChannels` below
  *   is that channel derivation, in pure form for the tests.
+ *
+ * SINGLE-OWNER SURFACE (2026-11-11 fix): the backends above are
+ * the NON-surface UI only (cards, strips, artwork). The video
+ * surface itself is owned by the PAGE: exactly one VideoView
+ * binds the engine's surfacePlayer for the whole hero zone,
+ * mounted once and never remounted across mode switches, W2
+ * states or backend swaps — expo-video on Android binds one
+ * player to one view, and rebinding a played player to a second
+ * view left it permanently video-dead (audio played, no frames
+ * ever rendered). Whether that one surface is VISIBLE is the
+ * pure rule in `detailSurfaceVisible` below; the heroes mount
+ * no surface at all.
  */
 
 /** Which hero the Theme Detail page mounts for a play mode. */
@@ -47,7 +59,10 @@ export function detailBackendForMode(
  * The player backends mounted for a play mode — always ZERO or
  * ONE, never both: the inactive mode's backend is unmounted, not
  * hidden. (Before the split both backends sat mounted-but-hidden
- * in one component body.)
+ * in one component body.) These are the NON-surface backends
+ * (cards/strips/artwork): the video surface is page-owned and
+ * always mounted (see the header's single-owner note) — it is
+ * NOT part of this swap.
  */
 export function mountedDetailBackends(
   playMode: PlaybackMode | null,
@@ -57,15 +72,33 @@ export function mountedDetailBackends(
 }
 
 /**
+ * Whether the page's ONE video surface is VISIBLE (single-surface
+ * fix, 2026-11-11): visible exactly while the watch backend is
+ * live AND the engine has not degraded to the audio chain (W2).
+ * In listen, W2 and artwork states the surface is hidden by
+ * style (1x1, opacity 0, absolute) but stays MOUNTED and bound
+ * to the surfacePlayer — visibility is a style concern, never a
+ * mount concern, so the player-to-view binding never moves.
+ */
+export function detailSurfaceVisible(
+  backend: DetailBackend,
+  audioFallback: boolean,
+): boolean {
+  return backend === 'watch' && !audioFallback;
+}
+
+/**
  * The hidden-video candidate of a listen chain — a VIDEO file
  * reached as an audio candidate (the UNTOUCHABLE fallback): the
- * Listen backend must keep it playing through expo-video with NO
- * visible surface, sound only. The Listen hero owns that hidden
- * surface mount; this helper names WHICH candidate it exists
- * for, so the chain tests can prove the candidate still resolves
- * inside the listen chain after the split. Null when the chain
- * is pure audio (the hidden surface then binds an idle player,
- * exactly as before the split).
+ * listen claim must keep it playing through expo-video with NO
+ * visible surface, sound only. The page's single surface
+ * (hidden by style while the listen backend is up — see
+ * detailSurfaceVisible) serves this candidate; this helper
+ * names WHICH candidate it exists for, so the chain tests can
+ * prove the candidate still resolves inside the listen chain
+ * after the split. Null when the chain is pure audio (the
+ * surface then binds an idle player, exactly as before the
+ * split).
  */
 export function hiddenVideoCandidate(
   candidates: readonly MediaCandidate[],
