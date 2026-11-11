@@ -63,10 +63,10 @@ jobs:
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-          TMPDIR: ${{ github.workspace }} /.eas-tmp
+          TMPDIR: ${{ github.workspace }}/.eas-tmp
         run: |
-        mkdir -p "$TMPDIR"
-        eas build --profile preview --platform android --local --non-interactive --output "$GITHUB_WORKSPACE/kaikansen.apk"
+          mkdir -p "$TMPDIR"
+          eas build --profile preview --platform android --local --non-interactive --output "$GITHUB_WORKSPACE/kaikansen.apk"
 
       - name: Upload run artifact
         uses: actions/upload-artifact@v4
