@@ -2,7 +2,7 @@
   "expo": {
     "name": "Kaikansen",
     "slug": "kaikansen",
-    "version": "1.0.5-beta",
+    "version": "1.0.6-beta",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "kaikansen",
@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "app.kaikansen.mobile",
-      "versionCode": 7,
+      "versionCode": 8,
       "adaptiveIcon": {
         "backgroundColor": "#F7F2F7",
         "foregroundImage": "./assets/android-icon-foreground.png",
