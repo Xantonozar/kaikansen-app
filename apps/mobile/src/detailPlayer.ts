@@ -25,17 +25,26 @@ import type { MediaCandidate } from './mediaEngine';
  *   not re-render the page body. `splitPlaybackChannels` below
  *   is that channel derivation, in pure form for the tests.
  *
- * SINGLE-OWNER SURFACE (2026-11-11 fix): the backends above are
- * the NON-surface UI only (cards, strips, artwork). The video
- * surface itself is owned by the PAGE: exactly one VideoView
- * binds the engine's surfacePlayer for the whole hero zone,
- * mounted once and never remounted across mode switches, W2
- * states or backend swaps — expo-video on Android binds one
- * player to one view, and rebinding a played player to a second
- * view left it permanently video-dead (audio played, no frames
- * ever rendered). Whether that one surface is VISIBLE is the
- * pure rule in `detailSurfaceVisible` below; the heroes mount
- * no surface at all.
+ * PER-MODE SURFACES (2026-11-11 restructure — regression-driven,
+ * supersedes the same-day single-surface fix): each backend owns
+ * its surface again, as in the pre-fix structure that worked in
+ * the field (problem 12's original shape). The WATCH hero mounts
+ * the watch surface: born visible, in-flow 16:9, never
+ * hidden-styled, never restyled — it unmounts wholesale with the
+ * backend. The LISTEN hero mounts its own hidden surface (1×1,
+ * opacity 0) for the hidden-video fallback. The interim design —
+ * ONE page-owned surface whose style flipped hidden↔visible —
+ * shipped in 1.0.0/1.0.1 and the owner's field reports indict
+ * it: 1.0.0 Watch was audio-only at 0:00; 1.0.1 rendered frames
+ * for ~3s, then the player died into the audio fallback; the
+ * owner confirms Watch worked before today's changes and audio
+ * never broke. What makes per-mode surfaces safe THIS time is
+ * the engine's surface discipline (usePlayback): a surface's
+ * unmount pauses the player synchronously (surfaceDetach —
+ * never playing while unbound), and a watch resume waits for
+ * the NEW surface's first rendered frame through the
+ * surface-readiness gate. The pure mount rule is
+ * `detailSurfaceMount` below.
  */
 
 /** Which hero the Theme Detail page mounts for a play mode. */
@@ -59,10 +68,10 @@ export function detailBackendForMode(
  * The player backends mounted for a play mode — always ZERO or
  * ONE, never both: the inactive mode's backend is unmounted, not
  * hidden. (Before the split both backends sat mounted-but-hidden
- * in one component body.) These are the NON-surface backends
- * (cards/strips/artwork): the video surface is page-owned and
- * always mounted (see the header's single-owner note) — it is
- * NOT part of this swap.
+ * in one component body.) Since the 2026-11-11 restructure the
+ * backends DO carry their mode's surface (see the header): the
+ * swap below is therefore also the surface swap, and it runs
+ * under the engine's pause/detach/resume-gate discipline.
  */
 export function mountedDetailBackends(
   playMode: PlaybackMode | null,
@@ -71,31 +80,37 @@ export function mountedDetailBackends(
   return backend === 'artwork' ? [] : [backend];
 }
 
+/** Which surface form a backend mounts (2026-11-11 restructure). */
+export type DetailSurfaceMount = 'watch-visible' | 'listen-hidden' | null;
+
 /**
- * Whether the page's ONE video surface is VISIBLE (single-surface
- * fix, 2026-11-11): visible exactly while the watch backend is
- * live AND the engine has not degraded to the audio chain (W2).
- * In listen, W2 and artwork states the surface is hidden by
- * style (1x1, opacity 0, absolute) but stays MOUNTED and bound
- * to the surfacePlayer — visibility is a style concern, never a
- * mount concern, so the player-to-view binding never moves.
+ * The surface mount rule: exactly ONE surface per mounted
+ * backend, in that mode's own form — the watch surface born
+ * visible (never hidden-styled, never restyled), the listen
+ * surface born hidden for the fallback. The artwork state mounts
+ * none: nothing is claimed, nothing plays (a pause-phase
+ * preloaded video stays surfaceless until the tap, exactly as
+ * pre-fix). W2 needs no special case: the watch backend STAYS
+ * mounted through the degradation (it renders the artwork in
+ * place of the video area with its surface hidden — the
+ * pre-fix shape), so the surface set never changes mid-claim.
  */
-export function detailSurfaceVisible(
+export function detailSurfaceMount(
   backend: DetailBackend,
-  audioFallback: boolean,
-): boolean {
-  return backend === 'watch' && !audioFallback;
+): DetailSurfaceMount {
+  if (backend === 'watch') return 'watch-visible';
+  if (backend === 'listen') return 'listen-hidden';
+  return null;
 }
 
 /**
  * The hidden-video candidate of a listen chain — a VIDEO file
  * reached as an audio candidate (the UNTOUCHABLE fallback): the
  * listen claim must keep it playing through expo-video with NO
- * visible surface, sound only. The page's single surface
- * (hidden by style while the listen backend is up — see
- * detailSurfaceVisible) serves this candidate; this helper
- * names WHICH candidate it exists for, so the chain tests can
- * prove the candidate still resolves inside the listen chain
+ * visible surface, sound only. The listen backend's OWN hidden
+ * surface serves it (detailSurfaceMount 'listen-hidden'); this
+ * helper names WHICH candidate it exists for, so the chain tests
+ * can prove the candidate still resolves inside the listen chain
  * after the split. Null when the chain is pure audio (the
  * surface then binds an idle player, exactly as before the
  * split).

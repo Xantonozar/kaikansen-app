@@ -2,7 +2,7 @@ import { describe, expect, it } from '@jest/globals';
 import type { ThemeDetail, ThemeEntry } from '@kaikansen/contracts';
 import {
   detailBackendForMode,
-  detailSurfaceVisible,
+  detailSurfaceMount,
   hiddenVideoCandidate,
   mountedDetailBackends,
   seekRatioForTap,
@@ -120,11 +120,11 @@ describe('detailBackendForMode / mountedDetailBackends', () => {
     // The engine/session lives in the provider, not in a hero,
     // so this swap is the WHOLE effect of a mode switch on the
     // backend tree: watch unmounts as listen mounts, with no
-    // frame where both exist (and no engine restart — the claim
-    // change is the session's, exactly as before the split).
-    // The backends are the NON-surface chrome: the video surface
-    // is page-owned, always mounted, and never part of this swap
-    // (single-surface fix — detailSurfaceVisible above).
+    // frame where both exist. Since the 2026-11-11 restructure
+    // each backend carries its mode's surface, so the swap IS
+    // the surface swap too — run under the engine's
+    // pause/detach/resume-gate discipline (usePlayback), never
+    // a mid-play rebind and never a style flip.
     const sequence = (['watch', 'listen', 'watch'] as const).map((m) =>
       mountedDetailBackends(m),
     );
@@ -132,26 +132,25 @@ describe('detailBackendForMode / mountedDetailBackends', () => {
   });
 });
 
-describe('detailSurfaceVisible — the single surface (2026-11-11 fix)', () => {
-  it('is visible only for a live watch backend with no W2 fallback', () => {
-    expect(detailSurfaceVisible('watch', false)).toBe(true);
-    expect(detailSurfaceVisible('watch', true)).toBe(false);
+describe('detailSurfaceMount — per-mode surfaces (2026-11-11 restructure)', () => {
+  it('watch mounts its surface born visible; listen mounts its own hidden one', () => {
+    expect(detailSurfaceMount('watch')).toBe('watch-visible');
+    expect(detailSurfaceMount('listen')).toBe('listen-hidden');
   });
 
-  it('stays hidden in listen and artwork states, fallback or not', () => {
-    expect(detailSurfaceVisible('listen', false)).toBe(false);
-    expect(detailSurfaceVisible('listen', true)).toBe(false);
-    expect(detailSurfaceVisible('artwork', false)).toBe(false);
-    expect(detailSurfaceVisible('artwork', true)).toBe(false);
+  it('the artwork state mounts no surface (nothing claimed, nothing plays)', () => {
+    expect(detailSurfaceMount('artwork')).toBeNull();
   });
 
-  it('composes with the backend rule: null mode (artwork) never shows it', () => {
+  it('composes with the backend rule: exactly one surface per play mode, in its own form', () => {
     for (const mode of ['watch', 'listen', null] as const) {
-      for (const fallback of [false, true]) {
-        expect(
-          detailSurfaceVisible(detailBackendForMode(mode), fallback),
-        ).toBe(mode === 'watch' && !fallback);
-      }
+      expect(detailSurfaceMount(detailBackendForMode(mode))).toBe(
+        mode === 'watch'
+          ? 'watch-visible'
+          : mode === 'listen'
+            ? 'listen-hidden'
+            : null,
+      );
     }
   });
 });

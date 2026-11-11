@@ -1,10 +1,11 @@
-import { memo, useMemo } from 'react';
+import { memo, useEffect, useMemo, useRef } from 'react';
 import {
   ActivityIndicator,
   Pressable,
   StyleSheet,
   View,
 } from 'react-native';
+import { VideoView } from 'expo-video';
 import { Pause, Play, RotateCcw } from 'lucide-react-native';
 import type { PlaybackSlow } from '../usePlayback';
 import { radii, spacing, type Theme } from '../theme';
@@ -33,14 +34,17 @@ import { DetailListenProgress } from './DetailProgress';
  * listen chain reaches a VIDEO file as an audio candidate
  * (detailPlayer.hiddenVideoCandidate — the chain's last resort),
  * it plays through expo-video with NO visible surface, sound
- * only, exactly as before the split. Since the single-surface
- * fix (2026-11-11) that surface is the PAGE's one surface,
- * hidden by style for the whole listen claim (this component
- * mounts no surface of its own — on Android the player-to-view
- * binding must never move); whatever candidate is live, the
- * fallback keeps playing through it, invisible — rendering,
- * unhiding, reordering or dropping that candidate is a spec
- * violation.
+ * only, exactly as before the split. Since the 2026-11-11
+ * restructure that surface is THIS hero's own hidden VideoView
+ * (the pre-fix shape again — 1×1, opacity 0, mounted with the
+ * listen hero): the fallback keeps playing through it,
+ * invisible, and the engine's surface-readiness gate NEVER
+ * applies to it (gate rule (c): sound-only candidates play
+ * without waiting for any frame) — rendering, unhiding,
+ * reordering or dropping that candidate is a spec violation.
+ * The hero's unmount detaches under the same discipline as the
+ * watch hero's (engine pauses synchronously; the next surface's
+ * resume is first-frame-gated on the watch side).
  */
 export const DetailListenHero = memo(function DetailListenHero({
   playback,
@@ -57,8 +61,26 @@ export const DetailListenHero = memo(function DetailListenHero({
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
 
+  /* Surface discipline (2026-11-11 restructure): unmounting
+     detaches — the engine pauses the player synchronously, so
+     the binding never moves mid-play. */
+  const detachRef = useRef(playback.surfaceDetach);
+  detachRef.current = playback.surfaceDetach;
+  useEffect(
+    () => () => detachRef.current({ resume: true }),
+    [],
+  );
+
   return (
     <View style={styles.listenCard}>
+      {/* The hidden surface the fallback plays through
+          (UNTOUCHABLE — see the header): this hero's own, 1×1
+          opacity 0, never visible, never gated. */}
+      <VideoView
+        player={playback.surfacePlayer}
+        style={styles.hiddenSurface}
+        nativeControls={false}
+      />
       <View style={styles.listenArtWrap}>
         {cover ? (
           <AppImage source={cover} style={styles.listenArt} />
@@ -108,6 +130,7 @@ const createStyles = (theme: Theme) =>
       // The Listen mock's card (measured from
       // kaikansen-detail-listen-mini-realimg.png): ≈10pt side
       // insets, cardLg radius, ≈20pt padding, accentContainer fill.
+      position: 'relative',
       marginHorizontal: 10,
       marginTop: spacing.md,
       backgroundColor: theme.accentContainer,
@@ -115,6 +138,16 @@ const createStyles = (theme: Theme) =>
       paddingHorizontal: spacing.xl,
       paddingTop: spacing.xl,
       paddingBottom: spacing.xl,
+    },
+    // The fallback's hidden surface (UNTOUCHABLE — header):
+    // 1×1, fully transparent, pinned out of the way.
+    hiddenSurface: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      width: 1,
+      height: 1,
+      opacity: 0,
     },
     listenArtWrap: {
       alignSelf: 'center',

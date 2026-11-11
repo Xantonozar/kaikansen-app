@@ -5,7 +5,6 @@ import {
   firstCandidateIsVideo,
   mediaKindForUrl,
   pickPreloadCandidate,
-  planQualitySwitch,
   playingResolution,
   preloadMatches,
   progressFraction,
@@ -14,10 +13,10 @@ import {
   queuePreloadKey,
   shouldPreloadNext,
   stabilizeProgress,
+  surfaceReadinessAfterSwap,
   tagCandidates,
   watchArtworkUnderPlayer,
-  watchQualityOptions,
-  watchQualityPickerVisible,
+  watchSurfaceGateDecision,
   watchdogPollActive,
   watchdogShouldTrip,
   type WatchdogSnapshot,
@@ -252,7 +251,7 @@ describe('problem 3 — next-track preload gate', () => {
   });
 });
 
-describe('problem 7 — watch quality picker', () => {
+describe('problem 7 → owner ruling 2026-11-11 — fixed best quality, no switching', () => {
   const V1080 = 'https://v.animethemes.moe/FateZero-OP1-1080.webm';
   const V720 = 'https://v.animethemes.moe/FateZero-OP1-720.webm';
   const V360 = 'https://v.animethemes.moe/FateZero-OP1-360.webm';
@@ -262,97 +261,13 @@ describe('problem 7 — watch quality picker', () => {
     { url: V720, resolution: 720 },
   ];
 
-  it('lists exactly the offered sources, best first, by real resolution', () => {
-    expect(watchQualityOptions(sources)).toEqual([
-      { url: V1080, resolution: 1080 },
-      { url: V720, resolution: 720 },
-      { url: V360, resolution: 360 },
-    ]);
-  });
-
-  it('dedupes by URL and by resolution, drops implausible URLs', () => {
-    expect(
-      watchQualityOptions([
-        { url: V720, resolution: 720 },
-        { url: V720, resolution: 720 },
-        { url: 'https://v.animethemes.moe/other.webm', resolution: 720 },
-        { url: 'relative/clip.webm', resolution: 1080 },
-        { url: V360, resolution: 360 },
-      ]),
-    ).toEqual([
-      { url: V720, resolution: 720 },
-      { url: V360, resolution: 360 },
-    ]);
-  });
-
-  it('single-source (or empty) entries show no picker', () => {
-    expect(watchQualityPickerVisible([{ url: V720, resolution: 720 }])).toBe(
-      false,
-    );
-    expect(watchQualityPickerVisible([])).toBe(false);
-    // Two sources collapsing to one rung (same URL) is still single.
-    expect(
-      watchQualityPickerVisible([
-        { url: V720, resolution: 720 },
-        { url: V720, resolution: 480 },
-      ]),
-    ).toBe(false);
-    expect(watchQualityPickerVisible(sources)).toBe(true);
-  });
-
-  it('the switch plan jumps to the picked candidate, keeping position + state', () => {
-    const chain = [V1080, V720, V360, VIDEO];
-    const plan = planQualitySwitch({
-      chain,
-      targetUrl: V360,
-      position: 42.5,
-      isPlaying: true,
-    });
-    expect(plan).toEqual({
-      targetIndex: 2,
-      resumeAt: 42.5,
-      resumePlaying: true,
-      watchdogArmedFromPick: true,
-    });
-    // A pick made while paused stays paused.
-    expect(
-      planQualitySwitch({
-        chain,
-        targetUrl: V720,
-        position: 10,
-        isPlaying: false,
-      })?.resumePlaying,
-    ).toBe(false);
-    // A bad position never leaks into the plan.
-    expect(
-      planQualitySwitch({
-        chain,
-        targetUrl: V720,
-        position: Number.NaN,
-        isPlaying: true,
-      })?.resumeAt,
-    ).toBe(0);
-  });
-
-  it('a pick outside the chain plans nothing', () => {
-    expect(
-      planQualitySwitch({
-        chain: [V1080, V720],
-        targetUrl: 'https://v.animethemes.moe/not-offered.webm',
-        position: 5,
-        isPlaying: true,
-      }),
-    ).toBeNull();
-  });
-
   it('chip resolution follows the ACTUALLY playing source, never the offer', () => {
     // Mid-chain after a failure: the 720 encode is what plays.
     expect(playingResolution(sources, V720)).toBe(720);
     expect(playingResolution(sources, V1080)).toBe(1080);
-    // A failed pick falls back through the chain: the URL that
-    // ends up playing (here the theme-level fallback) matches
-    // no source, so the chip is omitted — never faked at 1080p
-    // or at the picked rung.
+    // A fallback URL that ends up playing (the theme-level
+    // fallback) matches no source, so the chip is omitted —
+    // never faked at 1080p.
     expect(playingResolution(sources, VIDEO)).toBeNull();
     expect(playingResolution(sources, null)).toBeNull();
   });
@@ -367,5 +282,97 @@ describe('problem 7 — watch quality picker', () => {
     expect(
       watchArtworkUnderPlayer({ hasArtwork: false, framesRendered: false }),
     ).toBe(false);
+  });
+});
+
+describe('surface-readiness gate — the 2026-11-11 video fix', () => {
+  it('a watch play HOLDS until the bound surface renders a frame', () => {
+    expect(
+      watchSurfaceGateDecision({
+        kind: 'video',
+        role: 'primary',
+        surfaceReady: false,
+      }),
+    ).toBe('hold');
+    expect(
+      watchSurfaceGateDecision({
+        kind: 'video',
+        role: 'primary',
+        surfaceReady: true,
+      }),
+    ).toBe('play');
+  });
+
+  it('sound-only video candidates NEVER wait for a frame (untouchable)', () => {
+    // The listen chain's video files — the tagged hidden-video
+    // last resort AND any video file the chain walks to — play
+    // through the hidden surface with no frame by design.
+    expect(
+      watchSurfaceGateDecision({
+        kind: 'video',
+        role: 'hidden-video',
+        surfaceReady: false,
+      }),
+    ).toBe('play');
+    expect(
+      watchSurfaceGateDecision({
+        kind: 'video',
+        role: 'audio-fallback',
+        surfaceReady: false,
+      }),
+    ).toBe('play');
+  });
+
+  it('readiness is per player instance: an identity change forgets it', () => {
+    // Same instance keeps its readiness.
+    expect(
+      surfaceReadinessAfterSwap({
+        previousPlayerKey: 'p1',
+        nextPlayerKey: 'p1',
+        readyPlayerKey: 'p1',
+      }),
+    ).toEqual({ ready: true, readyPlayerKey: 'p1' });
+    // A new instance starts unready even though the old one was.
+    expect(
+      surfaceReadinessAfterSwap({
+        previousPlayerKey: 'p1',
+        nextPlayerKey: 'p2',
+        readyPlayerKey: 'p1',
+      }),
+    ).toEqual({ ready: false, readyPlayerKey: 'p1' });
+    // Readiness recorded FOR the new instance counts (its first
+    // frame fired as it took over).
+    expect(
+      surfaceReadinessAfterSwap({
+        previousPlayerKey: 'p1',
+        nextPlayerKey: 'p2',
+        readyPlayerKey: 'p2',
+      }),
+    ).toEqual({ ready: true, readyPlayerKey: 'p2' });
+    // No surface player at all → unready, stale key dropped.
+    expect(
+      surfaceReadinessAfterSwap({
+        previousPlayerKey: 'p1',
+        nextPlayerKey: null,
+        readyPlayerKey: 'p1',
+      }),
+    ).toEqual({ ready: false, readyPlayerKey: null });
+  });
+
+  it('a held play still trips the stall watchdog (never hangs forever)', () => {
+    // While the gate holds, the engine stays in `loading`, so the
+    // ordinary watchdog snapshot trips after the stall window and
+    // the chain advances through the existing failure path.
+    const snap: WatchdogSnapshot = {
+      now: PLAYBACK_STALL_WATCHDOG_MS + 1_000,
+      loadingSince: 0,
+      armedFrom: 0,
+      hasSource: true,
+      failed: false,
+      disabled: false,
+    };
+    expect(watchdogShouldTrip(snap)).toBe(true);
+    // Before the window: no trip — the gate gets its chance.
+    expect(watchdogShouldTrip({ ...snap, now: 1_000 })).toBe(false);
   });
 });

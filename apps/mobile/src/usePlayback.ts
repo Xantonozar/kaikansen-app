@@ -5,11 +5,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import {
-  createVideoPlayer,
-  useVideoPlayer,
-  type VideoPlayer,
-} from 'expo-video';
+import { useVideoPlayer, type VideoPlayer } from 'expo-video';
 import { useEvent, useEventListener } from 'expo';
 import type {
   PlaybackMode,
@@ -33,16 +29,16 @@ import { downloadFileUri, useDownloads, type DownloadRecord } from './downloads'
 import {
   WATCHDOG_POLL_INTERVAL_MS,
   mediaKindForUrl,
-  planQualitySwitch,
   progressFraction,
   queuePreloadKey,
   shouldPreloadNext,
   stabilizeProgress,
+  surfaceReadinessAfterSwap,
   tagCandidates,
+  watchSurfaceGateDecision,
   watchdogPollActive,
   watchdogShouldTrip,
   type MediaCandidate,
-  type QualitySwitchPlan,
 } from './mediaEngine';
 import {
   isPlausibleUrl,
@@ -69,6 +65,23 @@ import {
  * NO visible surface, sound only — UNTOUCHABLE, exactly as
  * before). The doctrine order is unchanged: derived .ogg →
  * genuine stored audio → the video file picture-hidden.
+ *
+ * SURFACES (2026-11-11 restructure — regression-driven): each
+ * MODE owns its surface. The watch surface is born visible
+ * (in-flow 16:9, mounted with the watch UI) and is never
+ * hidden-styled or restyled; the listen surface is born hidden
+ * (1×1) and only ever serves the fallback. A mode switch
+ * unmounts the old surface and mounts the new one — the pre-fix
+ * structure that worked in the field. What makes the rebind
+ * safe this time is the SURFACE DISCIPLINE: a surface reports
+ * its unmount through `surfaceDetach`, which pauses the player
+ * synchronously (never playing while unbound), and a watch
+ * resume afterwards waits for the new surface's first rendered
+ * frame through the surface-readiness gate (`notifySurface
+ * FirstFrame`). The interim single always-mounted shared view
+ * (whose style flipped hidden↔visible) shipped in 1.0.0/1.0.1
+ * and is what the owner's field reports indict — audio always
+ * fine, video dead or dying seconds in.
  *
  * Behaviour, identical for both consumers:
  *
@@ -145,32 +158,27 @@ import {
  *   never changes on a progress tick, while the tick pair rides
  *   its own channel (usePlaybackProgress in playback-context).
  *
- * Perf problem 7 (watch quality, 2026-11-10):
+ * Quality (owner ruling 2026-11-11 17:01 — supersedes the
+ * perf-problem-7 switcher): playback is FIXED at the best
+ * available quality. The watch chain starts at the highest
+ * resolution and walks down ONLY on failure — that fallback is
+ * reliability, not switching. There is NO quality picker and NO
+ * switch path: the hero's resolution chip is a static label of
+ * the source actually playing.
  *
- * - `switchQuality(url)` performs a CONTROLLED CANDIDATE JUMP
- *   inside the existing watch chain (planQualitySwitch in
- *   mediaEngine.ts): the picked source becomes the chain's
- *   current candidate and a failure there keeps walking FORWARD
- *   through the same handleFailure path (then W2, as usual). The
- *   position + playing state captured at pick time are restored
- *   when the swapped source's load settles — a native replace
- *   starts at 0, so the restore rides the load promise's
- *   resolution (and only there: no position polling). The load
- *   re-stamps the stall watchdog's arm moment, so a switch that
- *   stalls advances the chain exactly like a stalled start.
- * - `framesRendered` tracks whether the video engine has
- *   rendered frames for the CURRENT source (status readyToPlay
- *   or playing); any source change resets it, so surfaces can
- *   hold the anime artwork UNDER the player until the new
- *   source's frames land (a quality switch included), instead
- *   of flashing black.
- * - `surfacePlayer` SWAPS to a second lazily-created video
- *   player while a quality switch is in flight: the old player
- *   keeps its last frame on screen during the load, and the new
- *   player becomes the surface only once ITS frames render —
- *   the surface never binds a player whose replace would blank
- *   it mid-switch. Outside switches this is exactly the primary
- *   player, as before.
+ * Surface-readiness gate (2026-11-11 video fix): a WATCH play
+ * never reaches the video player before the bound VideoView has
+ * rendered its first frame for the current player instance
+ * (onFirstFrameRender → notifySurfaceFirstFrame below; the pure
+ * decisions live in mediaEngine). A player that starts playing
+ * surfaceless can lose its video pipeline on Android
+ * (expo/expo#35012 family) — the owner's 1.0.1 field report:
+ * real frames for ~3s, then the chain fell to the audio
+ * fallback. Held plays are remembered and released the moment
+ * readiness fires; the hidden-video listen fallback is NEVER
+ * gated (it plays sound-only with no frame by design); a surface
+ * that never signals keeps the engine in `loading`, so the
+ * stall watchdog fails through the existing chain as before.
  */
 
 export interface PlaybackPreloadRequest {
@@ -201,26 +209,6 @@ export interface ActivePlayerHandle {
   replay: () => void;
 }
 
-/**
- * A second expo-video player handle, created lazily by the
- * VIDEO POOL (see usePlayback) the first time a quality switch
- * needs somewhere to load the picked source while the current
- * surface keeps showing the old player's last frame. It mirrors
- * the small slice of the VideoPlayer surface the engine drives;
- * the real player satisfies it structurally.
- */
-export interface SwitchPlayerHandle {
-  status: VideoPlayer['status'];
-  playing: boolean;
-  duration: number;
-  currentTime: number;
-  replaceAsync: (source: string | null) => Promise<void>;
-  play: () => void;
-  pause: () => void;
-  replay: () => void;
-  addListener: VideoPlayer['addListener'];
-}
-
 export function usePlayback(args: {
   slug: string | null;
   detail: ThemeDetail | null;
@@ -246,12 +234,6 @@ export function usePlayback(args: {
   /** Problem 3: the next queue item's listen chain, preloaded
       once the current track is stably playing. Null = none. */
   nextPreload?: NextTrackPreload | null;
-  /** Perf problem 7: factory for the lazily-created SECOND video
-      player a quality switch loads into (see the header's
-      surface-swap note). Tests inject a fake; production omits it
-      and the engine builds a real player through expo-video's
-      createVideoPlayer on first use. */
-  createSwitchPlayer?: (source: string) => SwitchPlayerHandle;
 }) {
   const { slug, detail, entry, mode, active } = args;
   const watchAudioFallback = args.watchAudioFallback === true;
@@ -364,6 +346,11 @@ export function usePlayback(args: {
       : (tagCandidates(candidates, chainPurpose)[candidateIndex] ?? null)
     : null;
   const kind: 'audio' | 'video' = candidate?.kind ?? 'video';
+  // Live mirror for the surface-discipline callbacks (they read
+  // the candidate's role + the playing state at detach time,
+  // outside any render's closure).
+  const candidateRef = useRef<MediaCandidate | null>(candidate);
+  candidateRef.current = candidate;
 
   /* ---------------- the two native players ---------------- */
   const videoPlayer = useVideoPlayer(null, (p) => {
@@ -433,46 +420,149 @@ export function usePlayback(args: {
     { isPlaying: videoPlayer.playing },
   );
 
-  /* ---------------- perf problem 7: the video pool ----------------
-     A quality switch loads the picked source into a SECOND video
-     player so the visible surface can keep showing the current
-     player's last frame until the new source renders — swapping
-     the surface to a player mid-replace would blank it (its view
-     drops the old frame the moment the new source starts
-     loading). `switchPlayerState` is null until the first switch
-     creates the player (lazily, through the injected factory or
-     expo-video's createVideoPlayer); afterwards the two players
-     alternate roles — the standby becomes the surface on a
-     completed switch, and the retired one becomes the next
-     standby. `standbyBusyRef` marks a switch in flight: while it
-     is set, the standby's events are routed by the switch
-     handlers below, never by the main engine's listeners. */
-  const createSwitchPlayerRef = useRef(args.createSwitchPlayer);
-  createSwitchPlayerRef.current = args.createSwitchPlayer;
-  const [switchPlayerState, setSwitchPlayerState] =
-    useState<SwitchPlayerHandle | null>(null);
-  const switchPlayerRef = useRef<SwitchPlayerHandle | null>(null);
-  const standbyBusyRef = useRef(false);
-  // Status snapshots of the standby, fed by its own imperative
-  // listeners (its events must not ride the primary's useEvent
-  // channels — those are bound to the primary player object).
-  const [standbyStatus, setStandbyStatus] = useState<
-    'idle' | 'loading' | 'readyToPlay' | 'error'
-  >('idle');
-  const [standbyPlaying, setStandbyPlaying] = useState(false);
-  const [standbyTick, setStandbyTick] = useState(0);
-  const surfaceSwapped = switchPlayerState !== null;
-  const surfaceSwappedRef = useRef(false);
-  surfaceSwappedRef.current = surfaceSwapped;
-  // Typed as the real VideoPlayer so VideoView binds it: the
-  // production standby IS a real player (createVideoPlayer) —
-  // the SwitchPlayerHandle seam exists only for the test fake.
-  const surfacePlayer: VideoPlayer =
-    (switchPlayerState as VideoPlayer | null) ?? videoPlayer;
-  const surfaceStatus = surfaceSwapped ? standbyStatus : videoStatus;
-  const surfaceIsPlaying = surfaceSwapped
-    ? standbyPlaying
-    : videoIsPlaying;
+  /* The surface binding: exactly ONE video player exists (the
+     quality pool was removed with the owner's no-switching
+     ruling, 2026-11-11), so the surface player is always the
+     primary and its identity is stable for the engine's life. */
+  const surfacePlayer: VideoPlayer = videoPlayer;
+  const surfaceStatus = videoStatus;
+  const surfaceIsPlaying = videoIsPlaying;
+
+  /* ---------------- surface-readiness gate (2026-11-11) -------
+     A WATCH play must not reach the video player until the
+     bound VideoView has rendered its first frame FOR THE
+     CURRENT PLAYER INSTANCE: a player started surfaceless can
+     lose its video pipeline on Android (expo/expo#35012 family —
+     frames for ~3s, then the player errors and the chain falls
+     back: the owner's 1.0.1 field report). Readiness arrives via
+     notifySurfaceFirstFrame, wired from the VideoView's
+     onFirstFrameRender prop by whichever screen owns the visible
+     surface (player route / theme detail hero). The hidden 1×1
+     listen surface passes visible=false — its frames never mark
+     readiness, so the hidden-video listen fallback stays
+     ungated by construction as well as by the role rule.
+     Readiness is tracked by an opaque per-instance key so any
+     future surface-player swap re-arms the gate through
+     surfaceReadinessAfterSwap (mediaEngine). */
+  const surfacePlayerKey = 'primary';
+  const [surfaceReadyPlayerKey, setSurfaceReadyPlayerKey] =
+    useState<string | null>(null);
+  const surfaceReadyPlayerKeyRef = useRef<string | null>(null);
+  const surfacePlayerKeyRef = useRef(surfacePlayerKey);
+  const gateReadiness = surfaceReadinessAfterSwap({
+    previousPlayerKey: surfacePlayerKeyRef.current,
+    nextPlayerKey: surfacePlayerKey,
+    readyPlayerKey: surfaceReadyPlayerKeyRef.current,
+  });
+  const surfaceReadyRef = useRef(gateReadiness.ready);
+  surfaceReadyRef.current = gateReadiness.ready;
+  const surfaceIsPlayingRef = useRef(surfaceIsPlaying);
+  surfaceIsPlayingRef.current = surfaceIsPlaying;
+  // Play requests remembered while the gate holds (one per slot:
+  // the main source load + the preload-adoption path). A newer
+  // load supersedes an older held request — the callbacks read
+  // the engine's live refs, so releasing the newest release is
+  // enough; stale ones are overwritten, never queued.
+  const heldPlaysRef = useRef<{
+    load: (() => void) | null;
+    adopt: (() => void) | null;
+    retry: (() => void) | null;
+    resume: (() => void) | null;
+  }>({ load: null, adopt: null, retry: null, resume: null });
+
+  const playVideoGated = useCallback(
+    (
+      slot: 'load' | 'adopt' | 'retry' | 'resume',
+      doPlay: () => void,
+      forCandidate: MediaCandidate,
+    ) => {
+      const decision = watchSurfaceGateDecision({
+        kind: forCandidate.kind,
+        role: forCandidate.role,
+        surfaceReady: surfaceReadyRef.current,
+      });
+      if (decision === 'play') {
+        heldPlaysRef.current[slot] = null;
+        try {
+          doPlay();
+        } catch {
+          // Player released — nothing to start.
+        }
+        return;
+      }
+      heldPlaysRef.current[slot] = doPlay;
+    },
+    [],
+  );
+
+  const notifySurfaceFirstFrame = useCallback(
+    (args: { visible: boolean }) => {
+      if (!args.visible) return;
+      if (surfaceReadyPlayerKeyRef.current === surfacePlayerKey) return;
+      surfaceReadyPlayerKeyRef.current = surfacePlayerKey;
+      setSurfaceReadyPlayerKey(surfacePlayerKey);
+      // Release every remembered play, newest state first: the
+      // callbacks re-check their own load's currency before
+      // touching the player.
+      const held = heldPlaysRef.current;
+      heldPlaysRef.current = {
+        load: null,
+        adopt: null,
+        retry: null,
+        resume: null,
+      };
+      for (const release of [held.load, held.adopt, held.retry, held.resume]) {
+        if (!release) continue;
+        try {
+          release();
+        } catch {
+          // Player released — nothing to start.
+        }
+      }
+    },
+    [],
+  );
+
+  /* Surface detach discipline (2026-11-11 restructure): a
+     surface calls this as it unmounts — a mode switch unmounts
+     the old mode's surface and mounts the new mode's, and the
+     player must NEVER be playing while unbound (that mid-play
+     rebind is what the regression evidence indicts). The pause
+     lands synchronously; readiness for the outgoing surface is
+     forgotten (per-instance rule); and if the video player was
+     playing, a resume is remembered and released by the gate
+     when the NEW surface renders its first frame — for a watch
+     surface. For the hidden listen surface the resume plays at
+     once through the gate's hidden-video bypass (its semantics
+     never wait for a frame). Audio candidates are untouched:
+     expo-audio has no surface at all. */
+  const surfaceDetach = useCallback((args: { resume: boolean }) => {
+    if (loadedEngineRef.current !== 'video') return;
+    const wasPlaying = surfaceIsPlayingRef.current;
+    try {
+      videoPlayer.pause();
+    } catch {
+      // Player already released — nothing to stop.
+    }
+    if (surfaceReadyPlayerKeyRef.current !== null) {
+      surfaceReadyPlayerKeyRef.current = null;
+      setSurfaceReadyPlayerKey(null);
+    }
+    if (args.resume && wasPlaying) {
+      const url = loadedUrlRef.current;
+      if (url === null) return;
+      const current = candidateRef.current;
+      if (!current) return;
+      playVideoGated(
+        'resume',
+        () => {
+          if (loadedUrlRef.current === url) videoPlayer.play();
+        },
+        current,
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoPlayer, playVideoGated]);
 
   /* ---------------- engine state (the slow channel) ---------------- */
   const [playerError, setPlayerError] = useState<string | null>(null);
@@ -520,18 +610,6 @@ export function usePlayback(args: {
 
   const loadedUrlRef = useRef<string | null>(null);
   const loadedEngineRef = useRef<'audio' | 'video' | null>(null);
-  /* Perf problem 7 — a quality switch in flight: the plan
-     (target candidate + the position/playing state to restore),
-     the candidate index the switch STARTED from (a failed switch
-     load continues the chain from the PICK, per planQualitySwitch
-     — this is only the watchdog's re-arm reference), and the
-     generation counter that retires stale switch completions
-     (a newer load/claim supersedes an in-flight switch). */
-  const qualitySwitchRef = useRef<{
-    plan: QualitySwitchPlan;
-    generation: number;
-  } | null>(null);
-  const switchGenerationRef = useRef(0);
   const mountedRef = useRef(true);
   useEffect(() => {
     return () => {
@@ -556,23 +634,14 @@ export function usePlayback(args: {
       if (failedUrlRef.current === failedUrl) return;
       failedUrlRef.current = failedUrl;
     }
-    // A quality switch in flight is settled by ANY chain move:
-    // the switch's own load failed over to here (the chain walks
-    // forward from the pick and the standby's half-load is
-    // abandoned), or a different failure superseded the switch.
-    // Either way the standby goes back to idle and the surface
-    // stays on the primary player.
-    if (qualitySwitchRef.current) {
-      qualitySwitchRef.current = null;
-      switchGenerationRef.current += 1;
-      standbyBusyRef.current = false;
-      setSwitchLoading(false);
-      try {
-        switchPlayerRef.current?.pause();
-      } catch {
-        // Already released — nothing to stop.
-      }
-    }
+    // A remembered gate-held play belongs to the source that
+    // just failed — never let it fire onto the next candidate.
+    heldPlaysRef.current = {
+      load: null,
+      adopt: null,
+      retry: null,
+      resume: null,
+    };
     if (!localUsable && candidateIndex + 1 < candidates.length) {
       setCandidateIndex(candidateIndex + 1);
       return;
@@ -606,33 +675,38 @@ export function usePlayback(args: {
   /* ---------------- per-engine load machinery ---------------- */
   // Video: loaded through replaceAsync; its promise rejection and
   // its statusChange 'error' both feed handleFailure (deduped).
+  // The play that follows the load is SURFACE-GATED (2026-11-11
+  // video fix): a watch candidate's play is held until the bound
+  // surface renders its first frame for this player; the
+  // hidden-video listen candidate plays straight through.
   useEffect(() => {
     if (!active || !candidate || candidate.kind !== 'video') return;
     if (loadedUrlRef.current === candidate.url) return;
-    // A quality switch owns the picked candidate's load (the
-    // standby player is fetching it): the main effect stands
-    // down for exactly that candidate until the switch settles.
-    if (
-      qualitySwitchRef.current &&
-      candidates[qualitySwitchRef.current.plan.targetIndex] ===
-        candidate.url
-    ) {
-      return;
-    }
-    loadedUrlRef.current = candidate.url;
+    const url = candidate.url;
+    const forCandidate = candidate;
+    loadedUrlRef.current = url;
     loadedEngineRef.current = 'video';
     setPlayerError(null);
     setEnded(false);
     setProgress({ current: 0, duration: 0 });
     void videoPlayer
-      .replaceAsync(candidate.url)
+      .replaceAsync(url)
       .then(() => {
-        if (mountedRef.current) videoPlayer.play();
+        if (!mountedRef.current) return;
+        // A superseded load must not start the source that
+        // replaced it — the release re-checks currency.
+        playVideoGated(
+          'load',
+          () => {
+            if (loadedUrlRef.current === url) videoPlayer.play();
+          },
+          forCandidate,
+        );
       })
       .catch((e: unknown) => {
         // A superseded load (a newer source already took over)
         // must not fail the source that replaced it.
-        if (!mountedRef.current || loadedUrlRef.current !== candidate.url) {
+        if (!mountedRef.current || loadedUrlRef.current !== url) {
           return;
         }
         handleFailureRef.current(
@@ -653,179 +727,6 @@ export function usePlayback(args: {
       // Player already released — nothing to stop.
     }
   }, [kind, active, videoPlayer]);
-
-  /* ---------------- perf problem 7: quality switch ----------------
-     switchQuality(targetUrl) = a controlled candidate jump
-     (planQualitySwitch): the picked source becomes the chain's
-     current candidate, loaded into the STANDBY video player —
-     the surface keeps the current player's frame until the new
-     source renders, then surfacePlayer swaps to the standby and
-     the retired player becomes the next standby. The position +
-     playing state captured at pick time are restored when the
-     standby's load settles (the .then below — the ONLY restore
-     trigger; no position polling). The load re-stamps the
-     watchdog's arm moment, so a switch that stalls advances the
-     chain from the pick via handleFailure, exactly like a
-     stalled start; a switch load that errors outright takes the
-     same path. While a switch is in flight the main video load
-     effect stands down for the picked candidate (guard above). */
-  const ensureSwitchPlayer = useCallback(
-    (source: string): SwitchPlayerHandle => {
-      const existing = switchPlayerRef.current;
-      if (existing) return existing;
-      const factory = createSwitchPlayerRef.current;
-      const created: SwitchPlayerHandle = factory
-        ? factory(source)
-        : (() => {
-            // createVideoPlayer takes no setup callback (that is
-            // useVideoPlayer's shape) — configure after creation.
-            // A manually created player is never auto-released by
-            // a hook; the pool keeps exactly one standby for the
-            // engine's life, alternating roles with the primary.
-            const real = createVideoPlayer(source);
-            real.timeUpdateEventInterval = 0.5;
-            real.loop = false;
-            return real;
-          })();
-      switchPlayerRef.current = created;
-      // The standby's own event channels (the primary's useEvent
-      // hooks are bound to the primary player object): status +
-      // playing feed the surface snapshots once this player IS
-      // the surface; progress + playToEnd feed the engine while
-      // it is the loaded engine. All three listeners stay for the
-      // player's life; the busy flag routes their meaning.
-      try {
-        created.addListener('statusChange', ({ status: next, error }) => {
-          if (switchPlayerRef.current !== created) return;
-          if (standbyBusyRef.current) {
-            // A switch load erroring: the chain advances from
-            // the pick (handled there — never twice).
-            if (next === 'error') {
-              handleFailureRef.current(error?.message);
-            }
-            return;
-          }
-          setStandbyStatus(next);
-          if (next === 'error' && loadedEngineRef.current === 'video') {
-            handleFailureRef.current(error?.message);
-          }
-        });
-        created.addListener('playingChange', ({ isPlaying: next }) => {
-          if (switchPlayerRef.current !== created) return;
-          if (!standbyBusyRef.current) setStandbyPlaying(next);
-        });
-        created.addListener('timeUpdate', ({ currentTime }) => {
-          if (switchPlayerRef.current !== created) return;
-          if (standbyBusyRef.current) return;
-          if (loadedEngineRef.current !== 'video') return;
-          setProgress((prev) =>
-            stabilizeProgress(prev, {
-              current: currentTime,
-              duration: created.duration,
-            }),
-          );
-        });
-        created.addListener('playToEnd', () => {
-          if (switchPlayerRef.current !== created) return;
-          if (standbyBusyRef.current) return;
-          if (loadedEngineRef.current !== 'video') return;
-          setEnded(true);
-        });
-      } catch {
-        // Listener surface unavailable — the load promise still
-        // drives the switch; status reads stay primary-only.
-      }
-      return created;
-    },
-    [],
-  );
-
-  const switchQuality = useCallback(
-    (targetUrl: string) => {
-      // Watch chain only, remote only, and only while a video
-      // candidate is live — every other state is a no-op (the
-      // picker only renders for a live multi-source watch).
-      if (!active || localUsable || audioFallback) return;
-      if (mode !== 'watch' || kind !== 'video' || !url) return;
-      if (targetUrl === url) return;
-      const plan = planQualitySwitch({
-        chain: candidates,
-        targetUrl,
-        position: playerHandle.currentTime,
-        isPlaying,
-      });
-      if (!plan) return;
-      const generation = ++switchGenerationRef.current;
-      qualitySwitchRef.current = { plan, generation };
-      standbyBusyRef.current = true;
-      setSwitchLoading(true);
-      switchPlayerRef.current?.pause();
-      setCandidateIndex(plan.targetIndex);
-      // The watchdog re-arms from the switch moment (the plan's
-      // watchdogArmedFromPick): a stalled switch load advances.
-      loadStartedAtRef.current = Date.now();
-      const standby = ensureSwitchPlayer(targetUrl);
-      void standby
-        .replaceAsync(targetUrl)
-        .then(() => {
-          if (!mountedRef.current) return;
-          // A settle is honoured only while THIS switch is the
-          // live one and its candidate is still the chain's.
-          const live = qualitySwitchRef.current;
-          if (!live || live.generation !== generation) return;
-          if (candidates[live.plan.targetIndex] !== targetUrl) return;
-          qualitySwitchRef.current = null;
-          standbyBusyRef.current = false;
-          setSwitchLoading(false);
-          loadedUrlRef.current = targetUrl;
-          loadedEngineRef.current = 'video';
-          failedUrlRef.current = null;
-          setPlayerError(null);
-          setEnded(false);
-          // Restore position + playing state (the load promise's
-          // resolution is the restore's only trigger).
-          try {
-            standby.currentTime = plan.resumeAt;
-            if (plan.resumePlaying) standby.play();
-            else standby.pause();
-          } catch {
-            // Released mid-switch — nothing to restore onto.
-          }
-          setProgress((prev) =>
-            stabilizeProgress(prev, {
-              current: plan.resumeAt,
-              duration: prev.duration,
-            }),
-          );
-          setStandbyStatus(standby.status);
-          setStandbyPlaying(standby.playing);
-          // The surface swap: the standby (frames rendering)
-          // becomes the surface; the retired primary becomes the
-          // standby for the next switch and is silenced.
-          try {
-            videoPlayer.pause();
-          } catch {
-            // Already released — nothing to silence.
-          }
-          switchPlayerRef.current = videoPlayer;
-          setSwitchPlayerState(standby);
-        })
-        .catch((e: unknown) => {
-          if (!mountedRef.current) return;
-          const live = qualitySwitchRef.current;
-          if (!live || live.generation !== generation) return;
-          // The picked source failed to load: the chain advances
-          // from the pick (handleFailure settles the switch).
-          handleFailureRef.current(
-            e instanceof Error ? e.message : undefined,
-          );
-        });
-    },
-    // candidates/isPlaying/kind are read live at pick time; the
-    // callback identity rides the slow inputs like its siblings.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [active, localUsable, audioFallback, mode, url, videoPlayer, ensureSwitchPlayer],
-  );
 
   // Audio: loaded through replace() on the live audio player —
   // or ADOPTED from the preload slot when the claim key matches
@@ -922,9 +823,6 @@ export function usePlayback(args: {
 
   useEventListener(videoPlayer, 'timeUpdate', ({ currentTime }) => {
     if (loadedEngineRef.current !== 'video') return;
-    // After a quality-switch surface swap the primary is the
-    // standby — its ticks must not drive progress.
-    if (surfaceSwappedRef.current) return;
     setProgress((prev) =>
       stabilizeProgress(prev, {
         current: currentTime,
@@ -935,7 +833,6 @@ export function usePlayback(args: {
 
   useEventListener(videoPlayer, 'playToEnd', () => {
     if (loadedEngineRef.current !== 'video') return;
-    if (surfaceSwappedRef.current) return;
     setEnded(true);
   });
 
@@ -966,24 +863,20 @@ export function usePlayback(args: {
   }, [audioStatus]);
 
   /* ---------------- seek to an absolute position ----------------
-     Additive sibling of seekToRatio (problem 7): a quality
-     switch restores the position captured at pick time through
-     the same per-engine seek the ratio path uses. Goes through
-     whichever player the pool currently surfaces for video. */
+     Additive sibling of seekToRatio: the same per-engine seek
+     the ratio path uses, on the one video player. */
   const seekTo = useCallback(
     (seconds: number) => {
       if (!Number.isFinite(seconds)) return;
       const target = Math.max(0, seconds);
       if (kind === 'audio') {
         void audioPlayerRef.current.seekTo(target).catch(() => {});
-      } else if (switchPlayerRef.current && surfaceSwapped) {
-        switchPlayerRef.current.currentTime = target;
       } else {
         videoPlayer.currentTime = target;
       }
       setEnded(false);
     },
-    [kind, videoPlayer, surfaceSwapped],
+    [kind, videoPlayer],
   );
 
   /* ---------------- stall watchdog ---------------- */
@@ -1000,22 +893,13 @@ export function usePlayback(args: {
     hasSource: url !== null,
     failed: playerError !== null,
   });
-  // A quality switch load lives on the STANDBY player: the main
-  // status channel still reports the OLD source (ready/playing),
-  // so `buffering` alone would disarm the watchdog for exactly
-  // the load the spec wants it armed for (problem 7). A switch
-  // in flight counts as loading from its re-stamped arm moment.
-  // (switchLoading is state, not the ref, so the watchdog effect
-  // re-runs when a switch starts and settles.)
-  const [switchLoading, setSwitchLoading] = useState(false);
   useEffect(() => {
     if (!watchdogArmed) return;
     const id = setInterval(() => {
       if (
         watchdogShouldTrip({
           now: Date.now(),
-          loadingSince:
-            buffering || switchLoading ? loadStartedAtRef.current : null,
+          loadingSince: buffering ? loadStartedAtRef.current : null,
           armedFrom: loadStartedAtRef.current,
           hasSource: true,
           failed: false,
@@ -1026,7 +910,7 @@ export function usePlayback(args: {
       }
     }, WATCHDOG_POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [watchdogArmed, buffering, switchLoading, url]);
+  }, [watchdogArmed, buffering, url]);
 
   /* ---------------- mode-matched preload (inactive) ---------------- */
   // While the claim is INACTIVE, preload the claim mode's media:
@@ -1099,16 +983,26 @@ export function usePlayback(args: {
     if (!active || !candidate || candidate.kind !== 'video') return;
     if (preloadedVideoUrlRef.current !== candidate.url) return;
     if (loadedUrlRef.current === candidate.url) return;
-    loadedUrlRef.current = candidate.url;
+    const url = candidate.url;
+    const forCandidate = candidate;
+    loadedUrlRef.current = url;
     loadedEngineRef.current = 'video';
     preloadedVideoUrlRef.current = null;
     setPlayerError(null);
     setEnded(false);
-    try {
-      videoPlayer.play();
-    } catch {
-      // Released — nothing to start.
-    }
+    // The adoption play is surface-gated like any watch play
+    // (2026-11-11 video fix): the preload loaded into the player
+    // while its surface situation was unsettled — exactly the
+    // surfaceless start this gate exists to prevent. The
+    // hidden-video listen candidate plays straight through.
+    playVideoGated(
+      'adopt',
+      () => {
+        if (loadedUrlRef.current === url) videoPlayer.play();
+      },
+      forCandidate,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, candidate, videoPlayer]);
 
   /* ---------------- problem 3: next-track preload ---------------- */
@@ -1145,53 +1039,21 @@ export function usePlayback(args: {
     };
   }, []);
 
-  // The surface swap is per-SESSION, not per-track: a queue
-  // advance / entry switch / mode flip starts the new track on
-  // the PRIMARY player through the normal load effects, so the
-  // pool resets — the standby is silenced and the primary
-  // becomes the surface again — whenever the claim's identity
-  // changes underneath a swapped surface. A quality switch does
-  // NOT pass through here (it changes only the candidate index).
-  const poolClaimKey = `${slug ?? ''}:${entry?.atEntryId ?? ''}:${mode}`;
-  const prevPoolClaimKeyRef = useRef(poolClaimKey);
+  // A claim change retires any remembered gate-held play: it
+  // belonged to the previous claim's source (the new claim's own
+  // load effect re-requests play for its candidate).
+  const gateClaimKey = `${slug ?? ''}:${entry?.atEntryId ?? ''}:${mode}`;
+  const prevGateClaimKeyRef = useRef(gateClaimKey);
   useEffect(() => {
-    if (prevPoolClaimKeyRef.current === poolClaimKey) return;
-    prevPoolClaimKeyRef.current = poolClaimKey;
-    if (!surfaceSwappedRef.current) return;
-    const standby = switchPlayerRef.current;
-    try {
-      standby?.pause();
-    } catch {
-      // Already released — nothing to silence.
-    }
-    switchPlayerRef.current = null;
-    standbyBusyRef.current = false;
-    qualitySwitchRef.current = null;
-    switchGenerationRef.current += 1;
-    setSwitchLoading(false);
-    setSwitchPlayerState(null);
-    setStandbyStatus('idle');
-    setStandbyPlaying(false);
-  }, [poolClaimKey]);
-
-  // Deactivation likewise returns the pool to the primary (the
-  // deactivation effect above already pauses it) and silences
-  // the standby — a re-activation starts on the primary.
-  useEffect(() => {
-    if (active || !surfaceSwappedRef.current) return;
-    try {
-      switchPlayerRef.current?.pause();
-    } catch {
-      // Already released — nothing to silence.
-    }
-    switchPlayerRef.current = null;
-    standbyBusyRef.current = false;
-    qualitySwitchRef.current = null;
-    setSwitchLoading(false);
-    setSwitchPlayerState(null);
-    setStandbyStatus('idle');
-    setStandbyPlaying(false);
-  }, [active]);
+    if (prevGateClaimKeyRef.current === gateClaimKey) return;
+    prevGateClaimKeyRef.current = gateClaimKey;
+    heldPlaysRef.current = {
+      load: null,
+      adopt: null,
+      retry: null,
+      resume: null,
+    };
+  }, [gateClaimKey]);
 
   // History: once per entry+mode, when playback first truly starts.
   const recordedKeyRef = useRef<string | null>(null);
@@ -1268,14 +1130,8 @@ export function usePlayback(args: {
         },
       };
     }
-    // Video: the handle drives whichever player the pool
-    // currently surfaces (the primary, or the switch standby
-    // after a completed quality switch) — controls must never
-    // drive the retired player.
-    const video = () =>
-      switchPlayerRef.current && surfaceSwappedRef.current
-        ? switchPlayerRef.current
-        : videoPlayer;
+    // Video: the handle drives the one video player.
+    const video = () => videoPlayer;
     return {
       get currentTime() {
         return video().currentTime;
@@ -1302,24 +1158,17 @@ export function usePlayback(args: {
       const target = Math.min(1, Math.max(0, ratio)) * duration;
       if (kind === 'audio') {
         void audioPlayerRef.current.seekTo(target).catch(() => {});
-      } else if (switchPlayerRef.current && surfaceSwapped) {
-        switchPlayerRef.current.currentTime = target;
       } else {
         videoPlayer.currentTime = target;
       }
       setEnded(false);
     },
-    [kind, videoPlayer, surfaceSwapped],
+    [kind, videoPlayer],
   );
 
   /** The main button: replay once ended, else play/pause. */
   const toggleMain = useCallback(() => {
-    // Video controls drive the SURFACED player (post-switch the
-    // standby, not the retired primary).
-    const video =
-      switchPlayerRef.current && surfaceSwapped
-        ? switchPlayerRef.current
-        : videoPlayer;
+    const video = videoPlayer;
     if (ended) {
       if (kind === 'audio') {
         const audio = audioPlayerRef.current;
@@ -1336,7 +1185,7 @@ export function usePlayback(args: {
       if (kind === 'audio') audioPlayerRef.current.play();
       else video.play();
     }
-  }, [ended, isPlaying, kind, videoPlayer, surfaceSwapped]);
+  }, [ended, isPlaying, kind, videoPlayer]);
 
   const retry = useCallback(() => {
     // From the W2 fallback, "try again" means trying the VIDEO
@@ -1378,16 +1227,23 @@ export function usePlayback(args: {
       return;
     }
     loadedUrlRef.current = url;
-    // Retry loads into the SURFACED player (post-switch, the
-    // standby holds the failed source — the primary is stale).
-    const retryPlayer =
-      switchPlayerRef.current && surfaceSwapped
-        ? switchPlayerRef.current
-        : videoPlayer;
-    void retryPlayer
+    const retryCandidate = candidate;
+    void videoPlayer
       .replaceAsync(url)
       .then(() => {
-        if (mountedRef.current) retryPlayer.play();
+        if (!mountedRef.current) return;
+        // The retry play is surface-gated like any watch play.
+        if (retryCandidate) {
+          playVideoGated(
+            'retry',
+            () => {
+              if (loadedUrlRef.current === url) videoPlayer.play();
+            },
+            retryCandidate,
+          );
+        } else {
+          videoPlayer.play();
+        }
       })
       .catch((e: unknown) => {
         if (!mountedRef.current) return;
@@ -1396,7 +1252,7 @@ export function usePlayback(args: {
         );
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioFallback, localUsable, candidateIndex, url, candidate, videoPlayer, surfaceSwapped]);
+  }, [audioFallback, localUsable, candidateIndex, url, candidate, videoPlayer]);
 
   /* Problem 8 — the split return: `slow` carries every field
      except progress/fraction and is memoised on the slow inputs
@@ -1406,17 +1262,30 @@ export function usePlayback(args: {
   const slow = useMemo(
     () => ({
       player: playerHandle,
-      /** The expo-video player a VideoView binds (watch surface
-          + hidden listen surface). Normally the primary player;
-          after a completed quality switch it is the standby the
-          switch loaded into (perf problem 7 — the surface swap
-          keeps the old frame until the new source renders). */
+      /** The expo-video player a VideoView binds — the engine's
+          ONE video player (the quality pool is gone with the
+          owner's no-switching ruling, 2026-11-11). Which surface
+          binds it is per-mode: the watch hero's born-visible
+          surface, or the listen hero's hidden one — never both
+          at once, and the binding only moves while paused (the
+          surface discipline — see notifySurfaceFirstFrame). */
       surfacePlayer,
-      /** True once `surfacePlayer` is the post-switch standby —
-          consumers that compare/bind the primary player object
-          directly (fullscreen refs) must treat a swap as a new
-          surface. */
-      surfaceSwapped,
+      /** Surface discipline (2026-11-11 restructure): the
+          visible surface's VideoView reports its first rendered
+          frame here (onFirstFrameRender, visible=true) — that
+          marks the surface ready for this player instance and
+          releases any gate-held watch play/resume. The hidden
+          listen surface passes visible=false: its frames never
+          mark readiness. */
+      notifySurfaceFirstFrame,
+      /** Surface discipline: call as a surface unmounts (or
+          before a mode switch swaps surfaces) — pauses the video
+          player synchronously if a video candidate is live, so
+          the player is NEVER playing while unbound. A watch
+          resume afterwards waits for the new surface's first
+          frame through the gate (held in the resume slot); a
+          listen resume plays at once (the fallback is ungated). */
+      surfaceDetach,
       /** Which engine the current candidate plays on. */
       surfaceKind: kind,
       /** The candidate now loaded, tagged (kind + role) — the
@@ -1427,9 +1296,9 @@ export function usePlayback(args: {
       offline,
       unavailable,
       buffering,
-      /** Perf problem 7: video frames for the CURRENT source
-          are on screen (false before the first frame and during
-          a quality switch — the artwork-under-player window). */
+      /** Video frames for the CURRENT source are on screen
+          (false before the first frame — the artwork-under-player
+          window surfaces hold the poster for). */
       framesRendered,
       /** W2: watch degraded to the listen chain's audio (opt-in
           claims only) — render artwork + an audio-only note. */
@@ -1439,14 +1308,14 @@ export function usePlayback(args: {
       isPlaying,
       seekToRatio,
       seekTo,
-      switchQuality,
       toggleMain,
       retry,
     }),
     [
       playerHandle,
       surfacePlayer,
-      surfaceSwapped,
+      notifySurfaceFirstFrame,
+      surfaceDetach,
       kind,
       candidate,
       url,
@@ -1461,7 +1330,6 @@ export function usePlayback(args: {
       isPlaying,
       seekToRatio,
       seekTo,
-      switchQuality,
       toggleMain,
       retry,
     ],

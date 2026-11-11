@@ -333,58 +333,17 @@ export function queuePreloadKey(item: {
 }
 
 /* ------------------------------------------------------------------ */
-/* Watch quality (perf problem 7 — best-quality start + picker)        */
+/* Watch quality (fixed best — owner ruling 2026-11-11: NO switching) */
 /* ------------------------------------------------------------------ */
 
 /**
- * One quality the picker offers: an entry video source, by its
- * REAL resolution value. The picker lists exactly these — never
- * a rung the entry does not offer.
+ * One offered quality: an entry video source, by its REAL
+ * resolution value. The watch chain walks these best-first; the
+ * hero's resolution chip names the rung ACTUALLY playing.
  */
 export interface WatchQualityOption {
   url: string;
   resolution: number;
-}
-
-/**
- * The picker's options for an entry: its video sources by
- * resolution DESCENDING (the watch chain's own order — best
- * first, which is also the start rule), plausible URLs only,
- * de-duplicated by URL (first wins — the highest resolution a
- * URL appears under) and by resolution (when two encodes claim
- * the same rung, the chain's earlier one is what the engine
- * would walk to anyway).
- */
-export function watchQualityOptions(
-  sources: readonly WatchQualityOption[],
-): WatchQualityOption[] {
-  const sorted = [...sources].sort((a, b) => b.resolution - a.resolution);
-  const urls = new Set<string>();
-  const resolutions = new Set<number>();
-  const out: WatchQualityOption[] = [];
-  for (const source of sorted) {
-    const plausible =
-      typeof source.url === 'string' && /^https?:\/\//i.test(source.url);
-    if (!plausible) continue;
-    if (urls.has(source.url) || resolutions.has(source.resolution)) {
-      continue;
-    }
-    urls.add(source.url);
-    resolutions.add(source.resolution);
-    out.push({ url: source.url, resolution: source.resolution });
-  }
-  return out;
-}
-
-/**
- * Whether the quality picker exists at all: only when the entry
- * offers MORE THAN ONE quality. A single-source entry shows no
- * picker (owner spec) — its resolution chip still reports.
- */
-export function watchQualityPickerVisible(
-  sources: readonly WatchQualityOption[],
-): boolean {
-  return watchQualityOptions(sources).length > 1;
 }
 
 /**
@@ -404,48 +363,78 @@ export function playingResolution(
 }
 
 /**
- * The plan for a quality switch: a CONTROLLED CANDIDATE JUMP
- * inside the existing watch chain — the picked source becomes
- * the chain's current candidate, and the failure machinery keeps
- * walking FORWARD from there (the next candidate after the pick),
- * never backwards into encodes the user just moved away from.
+ * The surface-readiness gate (2026-11-11 video fix — the owner's
+ * field report on the 1.0.1 build: Watch rendered real frames
+ * for ~3s, then fell to the audio fallback). Root cause: the
+ * engine called play() on a video player before any VideoView
+ * surface had attached/rendered — expo-video on Android can lose
+ * the player's video pipeline when playback starts surfaceless
+ * (expo/expo#35012 family): frames flash briefly, the player
+ * errors, and the chain falls back. The gate holds every WATCH
+ * play until the bound surface signals its first rendered frame
+ * (VideoView's onFirstFrameRender).
  *
- * - `resumeAt`: the position the swapped source starts from —
- *   the position captured at pick time; the caller re-applies it
- *   after the new source loads (a native replace starts at 0).
- * - `resumePlaying`: the playing state to restore after the
- *   load — a pick made while paused stays paused.
- * - `watchdogArmedFromPick`: true for EVERY pick: the stall
- *   watchdog must be ARMED for a switch load exactly like a
- *   start load (spec: the watchdog applies to picker switches).
- *   The engine re-arms it off the load's start, which the switch
- *   path re-stamps.
+ * This is the pure decision seam; the engine wires it to refs.
  *
- * Returns null for a pick that changes nothing — the picked URL
- * is already the playing one (the picker marks it current), or
- * it is not in the chain at all (a stale pick against a chain
- * that has moved on).
+ * - `watchSurfaceGateDecision` answers one question — may this
+ *   play request reach the video player NOW?
+ *   · only a 'primary' VIDEO candidate is gated: it is the one
+ *     meant for the visible watch surface. Every VIDEO
+ *     candidate with another role plays sound-only through the
+ *     hidden surface (the listen chain's video files, incl. the
+ *     'hidden-video' last resort — UNTOUCHABLE) and bypasses
+ *     unconditionally.
+ *   · a surface already ready for the CURRENT player instance
+ *     plays immediately.
+ *   · anything else HOLDS — the request is remembered by the
+ *     engine and released the moment readiness fires.
+ * - `surfaceReadinessAfterSwap`: readiness is PER PLAYER
+ *   INSTANCE. A surface-player identity change (the pool reset
+ *   on a claim change, unmount) forgets the old instance's
+ *   readiness — the new instance must render its own first frame
+ *   before a watch play reaches it.
+ * - The gate never replaces the stall watchdog: a held play
+ *   keeps the engine in `loading`, so a surface that never
+ *   signals fails through the existing watchdog → chain path.
  */
-export interface QualitySwitchPlan {
-  targetIndex: number;
-  resumeAt: number;
-  resumePlaying: boolean;
-  watchdogArmedFromPick: boolean;
+export type SurfaceGateDecision = 'play' | 'hold';
+
+export function watchSurfaceGateDecision(args: {
+  /** The candidate's kind: audio-engine candidates never reach
+      the video player, so the gate question does not arise. */
+  kind: 'audio' | 'video';
+  /** The candidate's role: a VIDEO candidate with any role but
+      'primary' plays sound-only (the listen chain's video files,
+      incl. the 'hidden-video' last resort) and is NEVER gated;
+      only a 'primary' VIDEO candidate is meant for the visible
+      watch surface. */
+  role: 'primary' | 'audio-fallback' | 'hidden-video';
+  /** Has the bound surface rendered a frame for THIS player? */
+  surfaceReady: boolean;
+}): SurfaceGateDecision {
+  if (args.kind !== 'video' || args.role !== 'primary') return 'play';
+  return args.surfaceReady ? 'play' : 'hold';
 }
 
-export function planQualitySwitch(args: {
-  chain: readonly string[];
-  targetUrl: string;
-  position: number;
-  isPlaying: boolean;
-}): QualitySwitchPlan | null {
-  const targetIndex = args.chain.indexOf(args.targetUrl);
-  if (targetIndex < 0) return null;
+export function surfaceReadinessAfterSwap(args: {
+  previousPlayerKey: string | null;
+  nextPlayerKey: string | null;
+  readyPlayerKey: string | null;
+}): { ready: boolean; readyPlayerKey: string | null } {
+  if (args.nextPlayerKey === null) {
+    return { ready: false, readyPlayerKey: null };
+  }
+  if (args.nextPlayerKey !== args.previousPlayerKey) {
+    // A different instance owns the surface now: only readiness
+    // recorded FOR that instance counts.
+    return {
+      ready: args.readyPlayerKey === args.nextPlayerKey,
+      readyPlayerKey: args.readyPlayerKey,
+    };
+  }
   return {
-    targetIndex,
-    resumeAt: Math.max(0, Number.isFinite(args.position) ? args.position : 0),
-    resumePlaying: args.isPlaying,
-    watchdogArmedFromPick: true,
+    ready: args.readyPlayerKey === args.nextPlayerKey,
+    readyPlayerKey: args.readyPlayerKey,
   };
 }
 

@@ -64,10 +64,7 @@ import { AddToPlaylistSheet } from '../../../src/components/AddToPlaylistSheet';
 import { DetailListenHero } from '../../../src/components/DetailListenHero';
 import { DetailWatchHero } from '../../../src/components/DetailWatchHero';
 import { AppImage } from '../../../src/components/AppImage';
-import {
-  detailBackendForMode,
-  detailSurfaceVisible,
-} from '../../../src/detailPlayer';
+import { detailBackendForMode } from '../../../src/detailPlayer';
 import { useAuth } from '../../../src/auth';
 import {
   applyFavoriteState,
@@ -137,11 +134,15 @@ type IconComponent = ComponentType<{
  *      the ACTIVE mode's is mounted; progress renders inside
  *      their progress components off the progress channel, so a
  *      progress tick never re-renders this page body.
- *      Single-surface fix (2026-11-11): the backends are chrome
- *      only — the page owns the hero zone's ONE video surface
- *      (mounted once, visibility by style), because on Android
- *      a player moved between views can go permanently
- *      video-dead.
+ *      Per-mode surfaces (2026-11-11 restructure): each backend
+ *      mounts its OWN video surface in its mode's form (watch
+ *      born visible, listen born hidden) — the pre-fix shape
+ *      that worked in the field, restored after the interim
+ *      always-mounted style-flipped page surface shipped in
+ *      1.0.0/1.0.1 and the owner's field reports indicted it
+ *      (audio fine, video dead or dying seconds in). The
+ *      pause/detach/resume discipline lives in the engine
+ *      (usePlayback surfaceDetach + the readiness gate).
  *   2. Watch/Listen segmented toggle — directly under the hero
  *      (starts inline playback in that mode; Listen disabled when
  *      the selected entry has no audio, like the web's).
@@ -812,15 +813,12 @@ export default function ThemeDetailScreen() {
      (DetailWatchHero / DetailListenHero) rendering the shared
      engine's slow channel; their progress halves consume the
      progress channel internally, so no tick reaches this page.
-     Single-surface fix (2026-11-11): the heroes are the
-     NON-surface chrome only — the page owns the hero zone's one
-     video surface (below), whose visibility is the pure
-     detailSurfaceVisible rule (watch mode, no W2 fallback). */
+     Per-mode surfaces (2026-11-11 restructure): each hero
+     mounts its OWN surface in its mode's form (detailPlayer
+     .detailSurfaceMount — watch born visible, listen born
+     hidden); the page owns no surface. The swap runs under the
+     engine's pause/detach/resume-gate discipline. */
   const backend = detailBackendForMode(playMode);
-  const surfaceVisible = detailSurfaceVisible(
-    backend,
-    playback.audioFallback,
-  );
 
   /* Screen header (design polish pass): the mock draws a header
      row ABOVE the hero — bare back chevron left, the share / ⋮
@@ -893,57 +891,27 @@ export default function ThemeDetailScreen() {
             {detailHeader}
             {/* 1 — Media hero (the player, once playing) */}
             <View style={styles.artWrap}>
-              {/* Single-owner video surface (2026-11-11 fix):
-                  the hero zone's ONLY surface view, bound to the
-                  engine's surfacePlayer for the life of the hero
-                  zone — never unmounted across mode switches, W2
-                  states or backend swaps (on Android a player
-                  moved between views can go permanently
-                  video-dead: audio plays, no frames ever render).
-                  Visibility is style only, by the
-                  detailSurfaceVisible rule: the visible 16:9 in
-                  watch; the 1x1 opacity-0 style in listen (the
-                  hidden-video fallback plays through it, sound
-                  only — DetailListenHero's UNTOUCHABLE note), W2
-                  and before play. textureView, not the default
-                  surfaceView: this hero lives inside a ScrollView,
-                  where a SurfaceView can attach late and stay
-                  black; a TextureView composites like a normal
-                  view and reliably shows the frames. It renders
-                  FIRST so the backend chrome below paints over
-                  it (the watch hero's artwork-under window covers
-                  it until frames land, then unmounts). */}
-              <VideoView
-                ref={videoRef}
-                player={playback.surfacePlayer}
-                style={
-                  surfaceVisible
-                    ? styles.heroSurface
-                    : styles.heroSurfaceHidden
-                }
-                contentFit="contain"
-                nativeControls={false}
-                surfaceType="textureView"
-              />
               {backend === 'watch' ? (
                 /* Perf problem 12: the Watch backend component —
                    mounted only in watch mode; it renders the
-                   watch chrome (control strip, quality picker,
-                   artwork-under window, W2 artwork state) over
-                   the page's single surface. The Listen backend
-                   is unmounted, not hidden. */
+                   watch chrome AND its own born-visible surface
+                   (2026-11-11 restructure — per-mode surfaces,
+                   detailPlayer.detailSurfaceMount). The Listen
+                   backend is unmounted, not hidden. */
                 <DetailWatchHero
                   playback={playback}
                   cover={cover}
                   videoSources={selectedEntry?.videoSources ?? []}
-                  onFullscreen={enterFullscreen}
+                  onFullscreenRef={(ref) => {
+                    videoRef.current = ref;
+                  }}
                 />
               ) : backend === 'listen' ? (
                 /* Perf problem 12: the Listen backend component —
                    mounted only in listen mode; it renders the
-                   listen card. The hidden-video fallback plays
-                   through the page's single surface above, hidden
-                   by style (the untouchable fallback — see
+                   listen card AND its own hidden surface, which
+                   the hidden-video fallback plays through, sound
+                   only (the untouchable fallback — see
                    DetailListenHero's header). */
                 <DetailListenHero
                   playback={playback}
@@ -1711,27 +1679,10 @@ const createStyles = (theme: Theme) =>
     textAlign: 'center',
   },
   artWrap: {
+    // The hero zone (2026-11-11 restructure): a plain relative
+    // container again — it owns NO surface; each backend hero
+    // mounts its own (DetailWatchHero / DetailListenHero).
     position: 'relative',
-  },
-  // The page's single video surface, visible (single-surface
-  // fix): absolutely fills the hero zone's 16:9 stage, UNDER the
-  // backend chrome that follows it in the hero zone.
-  heroSurface: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: '100%',
-    aspectRatio: 16 / 9,
-    backgroundColor: '#000',
-  },
-  // The same surface, hidden: still mounted and bound (the
-  // listen claim's hidden-video fallback plays through it) —
-  // visibility is a style, never a mount.
-  heroSurfaceHidden: {
-    position: 'absolute',
-    width: 1,
-    height: 1,
-    opacity: 0,
   },
   cover: {
     // 16:9 in BOTH states (design polish pass): the paused

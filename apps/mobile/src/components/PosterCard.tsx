@@ -8,12 +8,10 @@ import { useTheme } from '../theme-context';
 import { usePosterCardWidth } from '../layout';
 
 /**
- * Season poster card — ported from the website's ThemeFeaturedCard
- * (kaisen-src/app/components/theme/ThemeFeaturedCard.tsx): portrait
- * art at radius cardLg, a bottom gradient scrim, and the song title in
- * white inside the art. No below-art text: the web carries the title
- * in-art, so the old top "SEASON YEAR" sticker and the below-art
- * song/anime block are gone.
+ * Season poster card — originated as a port of the website's
+ * ThemeFeaturedCard (kaisen-src/app/components/theme/ThemeFeaturedCard.tsx):
+ * portrait art at radius cardLg, originally with a bottom gradient
+ * scrim and the song title in white inside the art.
  *
  * Proportions follow the Lavender Dusk Home mock, not the web card:
  * measured from kaikansen-home-v3-realimg.png the mock's cards are
@@ -23,18 +21,19 @@ import { usePosterCardWidth } from '../layout';
  * them at 1.3× that size (owner's order, 2026-11-10 — the factor
  * lives in usePosterCardWidth).
  *
- * The scrim + white title are artwork-legibility treatment, not
- * theme surfaces: the web applies the identical black scrim and white
- * text in both of its themes, so they are fixed here too (stacked
- * translucent strips stand in for the web's CSS gradient — no gradient
- * library in the app). Everything else reads the active theme tokens.
+ * OWNER RULING 2026-11-11 ("remove this shadow dark boxes thing
+ * from seasonal", title placement = Option A): the stacked-strip
+ * scrim and the in-art white title are GONE — that supersedes the
+ * old "web scrim parity" note. The art now stands clean, and the
+ * song title sits BELOW the art in the app's standard ink text
+ * (PopularCard's title treatment: display font, 15pt, theme.text),
+ * two lines max. Everything reads the active theme tokens.
  * Used only by the Home season rail.
  *
  * The in-art season/type chip ("SUMMER '26 OP", layout-fidelity
  * Slice 6) was removed on the owner's order (2026-11-10): the rail
  * already sits under the season's section header, so printing the
- * season and type on every card was redundant. The title now sits
- * alone in the overlay.
+ * season and type on every card was redundant.
  */
 export function PosterCard({
   item,
@@ -65,20 +64,10 @@ export function PosterCard({
         ) : (
           <View style={[styles.image, styles.placeholder]} />
         )}
-        {/* Bottom gradient scrim (web: from-black/90 via-black/40). */}
-        <View style={styles.scrim} pointerEvents="none">
-          <View style={[styles.scrimStrip, { backgroundColor: 'rgba(0,0,0,0.08)' }]} />
-          <View style={[styles.scrimStrip, { backgroundColor: 'rgba(0,0,0,0.28)' }]} />
-          <View style={[styles.scrimStrip, { backgroundColor: 'rgba(0,0,0,0.5)' }]} />
-          <View style={[styles.scrimStrip, { backgroundColor: 'rgba(0,0,0,0.72)' }]} />
-          <View style={[styles.scrimStrip, { backgroundColor: 'rgba(0,0,0,0.88)' }]} />
-        </View>
-        <View style={styles.overlay}>
-          <Text style={styles.song} numberOfLines={2}>
-            {item.songTitle}
-          </Text>
-        </View>
       </View>
+      <Text style={styles.song} numberOfLines={2}>
+        {item.songTitle}
+      </Text>
     </Pressable>
   );
 }
@@ -104,27 +93,10 @@ const createStyles = (theme: Theme) =>
   placeholder: {
     backgroundColor: theme.raised,
   },
-  scrim: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    height: '55%',
-  },
-  scrimStrip: {
-    flex: 1,
-  },
-  overlay: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    padding: spacing.lg,
-  },
   song: {
     fontFamily: fontFamilies.display,
     fontSize: 15,
-    lineHeight: 19,
-    color: '#FFFFFF',
+    color: theme.text,
+    marginTop: spacing.sm,
   },
 });

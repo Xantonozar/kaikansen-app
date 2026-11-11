@@ -1,4 +1,10 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -7,6 +13,7 @@ import {
   View,
 } from 'react-native';
 import { AppImage } from '../../src/components/AppImage';
+import { Image as ExpoImage } from '../../src/expoImage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   useFocusEffect,
@@ -33,7 +40,6 @@ import { fixtureMode } from '../../src/api';
 import { downloadId, useDownloads } from '../../src/downloads';
 import { entryHasAudio, formatTime } from '../../src/playback';
 import { watchArtworkUnderPlayer } from '../../src/mediaEngine';
-import { WatchQualityPicker } from '../../src/components/WatchQualityPicker';
 import { usePlaybackSession } from '../../src/playback-context';
 import {
   fontFamilies,
@@ -70,13 +76,22 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * this route only for 'playlist'/'offline' sessions — any other
  * session's tap lands on the current track's theme detail.
  *
- * Composition follows the Lavender Dusk player mock (design
- * polish pass): NO header bar — the media carries two dark-glass
- * discs (✕ top-left, maximize top-right, watch only) and the
- * OP/resolution chips at its bottom-left; below it a centred
- * title block (song, artist, "ANIME · SEASON YEAR" pill), the
- * Watch/Listen segmented toggle, the seek bar, and the transport
- * row: repeat · prev · pause disc · next · download. Repeat is
+ * Composition follows the OWNER-APPROVED modern player design
+ * (Stitch generation 2026-11-11, screen 1d540c33…, approved
+ * 16:55 — the earlier Lavender Dusk mock's composition
+ * superseded where they differ): a SAFE HEADER zone — the ✕ and
+ * fullscreen discs are WHITE-glass, sit BELOW the status bar
+ * with real clearance (a notched phone collided with the old
+ * insets.top + spacing.sm overlay), and the fullscreen disc
+ * shows in BOTH modes; the HERO is a rounded card inset from
+ * the screen edges holding the media: in watch, the video; in
+ * listen, the theme's portrait art shown WHOLE (contain)
+ * centred over a blurred, darkened copy of the same art — never
+ * a face-slicing cover crop; the OP/resolution chips sit at
+ * the hero's bottom-left. Below: centred title block (song,
+ * artist, "ANIME · SEASON YEAR" pill), the Watch/Listen
+ * segmented toggle, the seek bar, and the transport row:
+ * repeat · prev · pause disc · next · download. Repeat is
  * the provider's real repeat mode (off → queue → one, honoured
  * at track end — see src/playback-context.tsx); Download drives
  * the shared downloads store for the current theme + mode,
@@ -108,9 +123,24 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * engine's active URL matched back to the entry's video sources
  * (the fallback chain can land on a lower encode; a local
  * download or a fallback URL has no knowable resolution, so the
- * chip is then omitted, never guessed). The hero is 16:9 in both
- * modes (the mock's single canvas); watch keeps contentFit
- * "contain" so no frame of a non-16:9 video is ever cropped.
+ * chip is then omitted, never guessed). It is a STATIC label:
+ * owner ruling 2026-11-11 17:01 removed quality switching
+ * entirely — playback is FIXED at the best available quality
+ * (the watch chain starts highest and falls back down ONLY on
+ * failure, which is reliability, not switching), so there is no
+ * picker anywhere. Watch keeps contentFit "contain" so no frame
+ * of a non-16:9 video is ever cropped.
+ *
+ * SURFACE DISCIPLINE (2026-11-11 restructure): the route's ONE
+ * surface element is remounted KEYED BY MODE — born visible
+ * in-flow in watch, born 1×1-hidden in listen, never restyled
+ * between the forms (the always-mounted style-flip surface of
+ * the interim fix is indicted by the owner's field reports —
+ * see src/singleSurface.test.ts). The mode-keyed effect cleanup
+ * calls the engine's surfaceDetach on every swap/unmount: the
+ * player pauses synchronously (never playing while unbound),
+ * and a watch resume waits for the NEW surface's first frame
+ * through the surface-readiness gate (usePlayback).
  *
  * A usable local download renders the player even when the
  * catalogue fetch failed (fully offline open from the Library):
@@ -206,6 +236,8 @@ export default function PlayerScreen() {
   const mode = session.mode;
   const {
     surfacePlayer: player,
+    notifySurfaceFirstFrame,
+    surfaceDetach,
     localUsable,
     unavailable,
     buffering,
@@ -217,6 +249,20 @@ export default function PlayerScreen() {
   } = playback;
   const videoRef = useRef<VideoView>(null);
   const [barWidth, setBarWidth] = useState(0);
+
+  /* Surface discipline (2026-11-11 restructure): the surface
+     below is keyed by mode, so a mode switch UNMOUNTS it — this
+     cleanup (keyed by mode for the same reason) detaches on
+     every swap and on route unmount: the engine pauses the
+     player synchronously and forgets the old surface's
+     readiness, so the binding never moves mid-play and the
+     watch resume waits for the new surface's first frame. */
+  const detachRef = useRef(surfaceDetach);
+  detachRef.current = surfaceDetach;
+  useEffect(
+    () => () => detachRef.current({ resume: true }),
+    [mode],
+  );
 
   /* Download state for the current theme + mode — the same store
      and the same states the detail screen's download sheet shows. */
@@ -243,7 +289,7 @@ export default function PlayerScreen() {
       accessibilityLabel="Close player"
       style={({ pressed }) => [styles.glassDisc, pressed && styles.pressed]}
     >
-      <X size={19} color="#FFFFFF" strokeWidth={2} />
+      <X size={19} color="#2D2329" strokeWidth={2} />
     </Pressable>
   );
 
@@ -258,7 +304,9 @@ export default function PlayerScreen() {
       (resolution.status === 'missing' || resolution.status === 'error');
     return (
       <View style={styles.screen}>
-        <View style={[styles.topRow, { paddingTop: insets.top + spacing.sm }]}>
+        <View
+          style={[styles.topRow, { paddingTop: insets.top + spacing.md }]}
+        >
           {closeDisc}
         </View>
         <View style={styles.center}>
@@ -276,6 +324,9 @@ export default function PlayerScreen() {
     );
   }
 
+  // The listen hero shows this art WHOLE (contain) over its
+  // blurred backdrop — the grill/cover precedence is unchanged
+  // from the 16:9 era; contain simply never crops it now.
   const cover = detail
     ? (detail.animeGrillImage ?? detail.animeCoverImage)
     : (localUsable?.coverImage ?? null);
@@ -329,15 +380,42 @@ export default function PlayerScreen() {
   return (
     <View style={styles.screen}>
       <View style={styles.column}>
+        {/* Safe header (approved modern design): a real
+            status-bar-safe zone — the white-glass ✕ / fullscreen
+            discs sit fully BELOW the status bar with a real gap
+            (the old insets.top + spacing.sm overlay collided on
+            the owner's notched phone). NOT an overlay: the row
+            takes layout space above the hero card. */}
+        <View
+          style={[
+            styles.headerRow,
+            { paddingTop: insets.top + spacing.md },
+          ]}
+        >
+          {closeDisc}
+          <Pressable
+            onPress={() => {
+              void videoRef.current?.enterFullscreen();
+            }}
+            hitSlop={3}
+            accessibilityRole="button"
+            accessibilityLabel="Fullscreen"
+            style={({ pressed }) => [
+              styles.glassDisc,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Maximize size={19} color="#2D2329" strokeWidth={2} />
+          </Pressable>
+        </View>
         <View style={styles.mediaWrap}>
           {mode === 'watch' ? (
             <>
               {/* Perf problem 7: the anime artwork sits UNDER the
-                  video surface until frames render (initial load
-                  and across a quality switch) — the hero never
-                  sits black while a source loads. Once frames
-                  render the VideoView's own black canvas + the
-                  video fully cover it. */}
+                  video surface until frames render (initial load)
+                  — the hero never sits black while a source
+                  loads. Once frames render the VideoView's own
+                  black canvas + the video fully cover it. */}
               {watchArtworkUnderPlayer({
                 hasArtwork: !!cover,
                 framesRendered: playback.framesRendered,
@@ -351,67 +429,74 @@ export default function PlayerScreen() {
             </>
           ) : (
             <>
+              {/* Listen hero (approved modern design): the
+                  theme's art shown WHOLE (contain), centred,
+                  over a blurred + darkened copy of the same art
+                  filling the card — the wide AniList art is never
+                  face-sliced by a cover crop again. The blur
+                  layer is a raw expo-image (AppImage's mapping
+                  has no blurRadius); the dark scrim sits between
+                  backdrop and art. */}
               {cover ? (
-                <AppImage
-                  source={cover}
-                  style={styles.artwork}
-                  resizeMode="cover"
-                />
+                <>
+                  <ExpoImage
+                    source={{ uri: cover }}
+                    style={styles.heroBackdrop}
+                    contentFit="cover"
+                    blurRadius={24}
+                    cachePolicy="memory-disk"
+                    transition={0}
+                  />
+                  <View style={styles.heroScrim} />
+                  <AppImage
+                    source={cover}
+                    style={styles.artworkContain}
+                    resizeMode="contain"
+                  />
+                </>
               ) : (
-                <View style={[styles.artwork, styles.artworkPlaceholder]} />
+                <View
+                  style={[styles.artworkContain, styles.artworkPlaceholder]}
+                />
               )}
             </>
           )}
-          {/* Single-owner surface (2026-11-11 fix): ONE surface
-              for the shared player, always mounted — only its
-              STYLE flips with the mode (the in-flow 16:9 in
-              watch; the 1x1 opacity-0 style in listen, where the
-              audio still plays through the player with no video
-              frame). The branches above used to mount two
-              different surfaces for the same player, swapped on
-              the mode toggle — on Android a player moved between
-              views can go permanently video-dead. textureView,
-              as the old watch surface had it: it composites like
-              a normal view inside this screen's overlays. */}
+          {/* The route's ONE surface element (2026-11-11
+              restructure): remounted KEYED BY MODE — born
+              visible in-flow inside the hero card in watch,
+              born 1×1-hidden in listen (where the audio still
+              plays through the player with no video frame). It
+              is NEVER restyled between the forms: the interim
+              always-mounted style-flip surface shipped in
+              1.0.0/1.0.1 and the owner's field reports indicted
+              it (audio fine; video dead, or frames for ~3s then
+              death). The mode-keyed detach effect above pauses
+              the player before this element unmounts, and the
+              watch form's first rendered frame releases the
+              gated resume. textureView: it composites like a
+              normal view inside this screen's overlays. In
+              listen the VideoView renders AFTER the artwork
+              (sibling order) but is 1×1 opacity-0 absolute —
+              invisible by construction. */}
           <VideoView
+            key={mode}
             ref={videoRef}
             player={player}
             style={mode === 'watch' ? styles.video : styles.hiddenSurface}
             contentFit="contain"
             nativeControls={false}
             surfaceType="textureView"
+            onFirstFrameRender={
+              mode === 'watch'
+                ? () => notifySurfaceFirstFrame({ visible: true })
+                : undefined
+            }
           />
           {buffering && (
             <View style={styles.overlayCenter}>
               <ActivityIndicator color="#FFFFFF" size="large" />
             </View>
           )}
-          {/* Overlaid media chrome (the mock): dark-glass discs,
-              no header bar. */}
-          <View
-            style={[
-              styles.mediaTopRow,
-              { paddingTop: insets.top + spacing.sm },
-            ]}
-          >
-            {closeDisc}
-            {mode === 'watch' && (
-              <Pressable
-                onPress={() => {
-                  void videoRef.current?.enterFullscreen();
-                }}
-                hitSlop={3}
-                accessibilityRole="button"
-                accessibilityLabel="Fullscreen"
-                style={({ pressed }) => [
-                  styles.glassDisc,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Maximize size={19} color="#FFFFFF" strokeWidth={2} />
-              </Pressable>
-            )}
-          </View>
           {detail && (
             <View style={styles.mediaChips}>
               <View style={styles.opChip}>
@@ -427,16 +512,6 @@ export default function PlayerScreen() {
                   </Text>
                 </View>
               )}
-              {/* Perf problem 7: the quality picker (self-hides
-                  for single-source entries and local downloads —
-                  the engine refuses local switches anyway). */}
-              {mode === 'watch' && !localUsable && entry ? (
-                <WatchQualityPicker
-                  sources={entry.videoSources}
-                  activeUrl={playback.url}
-                  onPick={playback.switchQuality}
-                />
-              ) : null}
             </View>
           )}
         </View>
@@ -692,10 +767,13 @@ export default function PlayerScreen() {
         </View>
         </View>
 
-        {/* Up Next (the mock's card): eyebrow + one line
-            "title — artist" + lavender play disc. No cover
-            thumbnail — the mock draws none. Tapping it — or its
-            play disc — skips to it, same as the Next control. */}
+        {/* Up Next (the approved modern design's card): 40pt
+            cover thumbnail + eyebrow + one line
+            "title — artist" + lavender play disc. (The earlier
+            mock drew no thumbnail; the approved design does, and
+            the queue item carries its cover.) Tapping it — or
+            its play disc — skips to it, same as the Next
+            control. */}
         {hasNext && nextQueueItem && (
           <Pressable
             onPress={next}
@@ -706,6 +784,14 @@ export default function PlayerScreen() {
               pressed && styles.pressed,
             ]}
           >
+            {nextQueueItem.coverUrl ? (
+              <AppImage
+                source={nextQueueItem.coverUrl}
+                style={styles.upNextThumb}
+              />
+            ) : (
+              <View style={[styles.upNextThumb, styles.artworkPlaceholder]} />
+            )}
             <View style={styles.upNextText}>
               <Text style={styles.upNextEyebrow}>Up next</Text>
               <Text style={styles.upNextLine} numberOfLines={1}>
@@ -750,20 +836,49 @@ const createStyles = (theme: Theme) =>
       textAlign: 'center',
       paddingHorizontal: spacing.screenEdge,
     },
+    // The hero CARD (approved modern design): inset from the
+    // screen edges, cardLg radius, clipped — the media lives
+    // inside it instead of bleeding edge-to-edge.
     mediaWrap: {
       position: 'relative',
-      backgroundColor: '#000',
+      marginHorizontal: spacing.screenEdge,
+      aspectRatio: 16 / 9,
+      borderRadius: radii.cardLg,
+      overflow: 'hidden',
+      backgroundColor: '#251B22',
     },
     video: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
       width: '100%',
-      aspectRatio: 16 / 9,
+      height: '100%',
       backgroundColor: '#000',
     },
-    artwork: {
+    // Listen hero layers (approved design): blurred backdrop
+    // fill + dark scrim + the art itself, whole (contain).
+    heroBackdrop: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
       width: '100%',
-      // The mock's hero is one 16:9 canvas in both modes.
-      aspectRatio: 16 / 9,
-      backgroundColor: theme.surface,
+      height: '100%',
+      transform: [{ scale: 1.25 }],
+    },
+    heroScrim: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: 'rgba(37, 27, 34, 0.45)',
+    },
+    artworkContain: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      width: '100%',
+      height: '100%',
     },
     // Watch artwork-under-player (perf problem 7): absolutely
     // fills mediaWrap's 16:9 canvas, behind the VideoView.
@@ -788,28 +903,34 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
     },
-    mediaTopRow: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      right: 0,
+    // Safe header row (approved design): holds the two discs
+    // above the hero card, inside the status-bar-safe zone.
+    headerRow: {
       flexDirection: 'row',
       justifyContent: 'space-between',
-      // The mock's overlay inset (HTML left/right-3.5).
-      paddingHorizontal: 14,
+      paddingHorizontal: spacing.screenEdge,
+      paddingBottom: spacing.md,
     },
     glassDisc: {
-      // The mock's glass discs are 36pt (HTML w-9 h-9).
+      // The design's discs are 36pt WHITE glass with ink icons
+      // (w-9 h-9, white/70 fill + hairline border + soft shadow).
       width: 36,
       height: 36,
       borderRadius: 18,
-      backgroundColor: 'rgba(16, 7, 12, 0.45)',
+      backgroundColor: 'rgba(255, 255, 255, 0.7)',
+      borderWidth: 1,
+      borderColor: theme.border,
       alignItems: 'center',
       justifyContent: 'center',
+      shadowColor: '#2D2329',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.1,
+      shadowRadius: 6,
+      elevation: 2,
     },
     mediaChips: {
       position: 'absolute',
-      left: 14,
+      left: spacing.md,
       bottom: spacing.md,
       flexDirection: 'row',
       alignItems: 'center',
@@ -863,33 +984,37 @@ const createStyles = (theme: Theme) =>
       gap: spacing.xs,
     },
     songTitle: {
+      // Design: 22pt extrabold ink.
       fontFamily: fontFamilies.display,
-      fontSize: 20,
+      fontSize: 22,
       color: theme.text,
       textAlign: 'center',
     },
     artistLine: {
-      // HTML: 14pt medium in the muted tone.
+      // Design: 14pt medium in mauve (theme.secondary).
       fontFamily: fontFamilies.caption,
       fontSize: 14,
-      color: theme.muted,
+      color: theme.secondary,
       textAlign: 'center',
     },
     seasonPill: {
-      // HTML: mauve text on a half-strength lavender wash.
+      // Design chip: mauveDeep text on the mauveLight wash with
+      // a hairline mauve border.
       backgroundColor: withOpacity(theme.accentContainer, 0.5),
+      borderWidth: 1,
+      borderColor: theme.border,
       borderRadius: radii.pill,
       paddingHorizontal: spacing.sm + 2,
-      paddingVertical: 2,
+      paddingVertical: 3,
       marginTop: spacing.xs,
       maxWidth: '100%',
     },
     seasonPillText: {
       fontFamily: fontFamilies.bodyStrong,
-      fontSize: 12,
+      fontSize: 11,
       letterSpacing: 0.6,
       textTransform: 'uppercase',
-      color: theme.secondary,
+      color: theme.accent,
     },
     modeToggle: {
       // The mock's toggle is a CENTRED, content-width pill
@@ -939,6 +1064,7 @@ const createStyles = (theme: Theme) =>
       paddingVertical: spacing.sm,
     },
     seekTrack: {
+      // Design: 6pt track in the mauveLight tone (theme.raised).
       height: 6,
       borderRadius: 3,
       backgroundColor: theme.raised,
@@ -950,15 +1076,15 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.accent,
     },
     seekKnob: {
-      // HTML: 16pt knob with a 2pt white ring and a soft shadow.
+      // Design: 16pt WHITE thumb with a 2pt mauveDeep ring.
       position: 'absolute',
       width: 16,
       height: 16,
       borderRadius: 8,
       marginLeft: -8,
-      backgroundColor: theme.accent,
+      backgroundColor: '#FFFFFF',
       borderWidth: 2,
-      borderColor: '#FFFFFF',
+      borderColor: theme.accent,
       shadowColor: '#000000',
       shadowOffset: { width: 0, height: 1 },
       shadowOpacity: 0.2,
@@ -971,9 +1097,9 @@ const createStyles = (theme: Theme) =>
       paddingHorizontal: 28,
     },
     timeText: {
-      // HTML: 12pt medium, body face (not mono).
+      // Design: 11pt medium muted, body face (not mono).
       fontFamily: fontFamilies.caption,
-      fontSize: 12,
+      fontSize: 11,
       color: theme.muted,
     },
     transport: {
@@ -1047,6 +1173,13 @@ const createStyles = (theme: Theme) =>
       padding: spacing.md + 2,
       marginHorizontal: spacing.xl,
       marginBottom: spacing.xxl,
+    },
+    upNextThumb: {
+      // Design: 40pt cover thumb, rounded-xl.
+      width: 40,
+      height: 40,
+      borderRadius: radii.base,
+      backgroundColor: theme.surface,
     },
     upNextText: {
       flex: 1,

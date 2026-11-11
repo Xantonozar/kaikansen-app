@@ -35,8 +35,11 @@ import {
  * the fetchThemeBySlug precedent) — never through the app cache:
  * a cached "latest" would defeat the check's purpose. The check
  * runs once per launch (root layout, post-first-paint, silent on
- * failure: CHECK_FAILED just settles the machine) and again when
- * the About screen asks. Fixture mode has no API — no check.
+ * failure: CHECK_FAILED settles the machine to `checkFailed`,
+ * which the home prompt never renders) and again when the About
+ * screen asks — About's ask FORCES a fresh check whatever the
+ * last outcome was (see check's options below). Fixture mode
+ * has no API — no check.
  *
  * INSTALLED FACTS: marketing version from
  * `Constants.expoConfig.version`, build number from
@@ -105,7 +108,7 @@ export async function fetchAppVersion(): Promise<AppVersionResponse | null> {
 
 const UpdateContext = createContext<{
   state: UpdateState;
-  check: () => void;
+  check: (options?: { force?: boolean }) => void;
   pressUpdate: () => void;
   pressLater: () => void;
 } | null>(null);
@@ -115,10 +118,45 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef(state);
   stateRef.current = state;
   const checkingRef = useRef(false);
+  // Launch auto-check memory: the plain check() fires at most
+  // once per launch (the root layout's effect), whatever the
+  // outcome. Forced checks (About) neither read nor set this —
+  // they are explicit user-surface asks, not the auto-check.
+  const autoCheckedRef = useRef(false);
 
-  const check = useCallback(() => {
+  /**
+   * Run the release check. Two call shapes:
+   *
+   * - check() — the launch auto-check. Fire-once per launch:
+   *   after its first run (any outcome), later plain calls are
+   *   no-ops, so stray re-renders can never re-hit the network.
+   * - check({ force: true }) — About's on-open effect and its
+   *   Retry tap. Always starts a FRESH check from any resting
+   *   outcome (never checked, checked-current, check-failed):
+   *   the reducer's CHECK_STARTED accepts exactly those phases.
+   *
+   * Both shapes dedupe through checkingRef — a call made while
+   * a check is in flight joins it instead of doubling the
+   * fetch — and both are ignored while a prompt/flow phase
+   * (available…error) is live, so a re-check can never stomp an
+   * update the user is acting on.
+   */
+  const check = useCallback((options?: { force?: boolean }) => {
     if (checkingRef.current) return;
-    if (stateRef.current.phase !== 'idle') return;
+    const phase = stateRef.current.phase;
+    if (options?.force) {
+      if (
+        phase !== 'idle' &&
+        phase !== 'current' &&
+        phase !== 'checkFailed'
+      ) {
+        return;
+      }
+    } else {
+      if (autoCheckedRef.current) return;
+      if (phase !== 'idle') return;
+      autoCheckedRef.current = true;
+    }
     checkingRef.current = true;
     setState((s) => updateReducer(s, { type: 'CHECK_STARTED' }));
     void (async () => {
@@ -257,7 +295,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
 
 export function useUpdate(): {
   state: UpdateState;
-  check: () => void;
+  check: (options?: { force?: boolean }) => void;
   pressUpdate: () => void;
   pressLater: () => void;
 } {

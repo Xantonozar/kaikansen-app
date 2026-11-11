@@ -96,8 +96,10 @@ function Shell() {
   const { check } = useUpdate();
 
   // The update check (release readiness): once per launch, after
-  // the shell has painted — the provider's check is a silent
-  // no-op on failure, so nothing here can disturb the start.
+  // the shell has painted. Silent for the home prompt on failure
+  // — a failed launch check pops nothing here; the honest
+  // failure state is only ever surfaced on About (owner ruling
+  // 2026-11-11).
   useEffect(() => {
     check();
   }, [check]);
