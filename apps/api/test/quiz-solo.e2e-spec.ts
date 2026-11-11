@@ -214,6 +214,16 @@ const E2E_REFRESH_SECRET = ['e2e', 'quiz', 'refresh', 'secret'].join('-');
 describe('Solo quiz flow with mocked models (e2e)', () => {
   let app: INestApplication;
   const models = makeFakeModels();
+  // Derivable AnimeThemes catalogue (the factory fixtures'
+  // video URLs do not derive): since the ogg-only ruling
+  // (2026-11-12) a solo game can only be dealt themes with a
+  // resolvable .ogg, so the full-loop suite plays on dealable
+  // themes; the audio-less pool shape is pinned by the
+  // ogg-only suite at the end of this file.
+  models.themes.forEach((t, i) => {
+    t.videoUrl = `https://v.animethemes.moe/Anime${i + 1}-OP1.webm`;
+    t.audioUrl = null;
+  });
 
   const token = () =>
     jwt.sign(
@@ -275,11 +285,13 @@ process.env.JWT_SECRET = E2E_SECRET;
       .set(auth())
       .expect(200);
     expect(typeof signalled.body.playbackStartedAt).toBe('string');
-    // Part 5's field is present but null here: these fixtures
-    // have no resolvable audio (a stored video-link "audioUrl"
-    // and a non-derivable videoUrl), so there is nothing to
-    // reveal — the additive field must not invent a candidate.
-    expect(signalled.body.nextAudioUrl).toBeNull();
+    // Part 5's field carries the next question's derived .ogg
+    // (these fixtures are derivable — see the suite header).
+    // The null reveal for an audio-less pool is pinned by the
+    // ogg-only suite below and the unit suite.
+    expect(signalled.body.nextAudioUrl).toBe(
+      'https://a.animethemes.moe/Anime2-OP1.ogg',
+    );
 
     const answered = await http
       .post(`/quiz/solo/games/${gameId}/answers`)
@@ -457,5 +469,88 @@ describe('Solo quiz earlier reveal with derivable audio (e2e, part 5)', () => {
       .send({ answer: null })
       .expect(200);
     expect(final.body.gameOver).toBe(true);
+  });
+});
+
+describe('Solo quiz ogg-only pool (e2e, owner ruling 2026-11-12)', () => {
+  let app: INestApplication;
+  const models = makeFakeModels();
+  // The factory fixtures UNCONVERTED: video URLs that do not
+  // derive and no stored audio — every theme in this pool has
+  // NO resolvable .ogg, so every draw runs the redraw machinery
+  // and deals only through the fill-don't-fail cap hatch.
+
+  const token = () =>
+    jwt.sign(
+      {
+        userId: USER_1,
+        username: 'alice',
+        email: 'alice@example.com',
+        tokenType: 'access',
+      },
+      E2E_SECRET,
+      { expiresIn: '15m' },
+    );
+  const auth = () => ({ Authorization: `Bearer ${token()}` });
+
+  beforeAll(async () => {
+    process.env.JWT_SECRET = E2E_SECRET;
+    process.env.JWT_REFRESH_SECRET = E2E_REFRESH_SECRET;
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [ConfigModule.forRoot({ isGlobal: true })],
+      controllers: [QuizController],
+      providers: [
+        SoloQuizService,
+        AuthService,
+        AccessTokenGuard,
+        AnilistClient,
+        { provide: getModelToken(ThemeCache.name), useValue: models.themeModel },
+        { provide: getModelToken(QuizAttempt.name), useValue: models.attemptModel },
+        { provide: getModelToken(User.name), useValue: models.userModel },
+        { provide: getModelToken(WatchHistory.name), useValue: models.watchHistoryModel },
+      ],
+    }).compile();
+    app = moduleFixture.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    delete process.env.JWT_SECRET;
+    delete process.env.JWT_REFRESH_SECRET;
+  });
+
+  it('audio-less themes are redrawn; the cap deals the 4th, and the pre-draw honours the rule too', async () => {
+    const http = request(app.getHttpServer());
+
+    const created = await http
+      .post('/quiz/solo/games')
+      .set(auth())
+      .send({ quizType: 'anime' })
+      .expect(201);
+    const gameId = created.body.gameId as string;
+    // Themes 1–3 were sampled and rejected as audio-less; the
+    // redraw cap deals theme 4 (fill, don't fail) — with no
+    // audioUrl, exactly like a probed-404 candidate past cap.
+    expect(created.body.question.theme.slug).toBe('anime-4-op1');
+    expect(created.body.question.theme.audioUrl).toBeNull();
+
+    // The playback-started pre-draw runs the same sampler:
+    // themes 5–7 rejected, theme 8 pre-drawn — so the reveal
+    // is null (theme 8 has no .ogg to reveal)…
+    const signalled = await http
+      .post(`/quiz/solo/games/${gameId}/playback-started`)
+      .set(auth())
+      .expect(200);
+    expect(signalled.body.nextAudioUrl).toBeNull();
+
+    // …and the answer promotes that very pre-drawn question.
+    const answered = await http
+      .post(`/quiz/solo/games/${gameId}/answers`)
+      .set(auth())
+      .send({ answer: null })
+      .expect(200);
+    expect(answered.body.nextQuestion.theme.slug).toBe('anime-8-op1');
+    expect(answered.body.nextQuestion.theme.audioUrl).toBeNull();
   });
 });

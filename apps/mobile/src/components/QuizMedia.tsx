@@ -13,8 +13,12 @@ import {
   Text,
 } from 'react-native';
 import { AppImage } from './AppImage';
-import { useVideoPlayer, VideoView } from 'expo-video';
-import { useEvent, useEventListener } from 'expo';
+import {
+  useVideoPlayer,
+  VideoView,
+  type VideoPlayerStatus,
+} from 'expo-video';
+import { useEventListener } from 'expo';
 import { Music2, Volume2, VolumeX } from 'lucide-react-native';
 import { isPlausibleUrl } from '../playback';
 import { isQuizSliceUri, prefetchQuizSlice } from '../quizPrefetch';
@@ -42,11 +46,13 @@ import {
   createQuizStallTracker,
   firstCandidateIsVideo,
   pickPreloadCandidate,
+  quizAudioPhase,
   quizFailedShouldClear,
   quizProgressSignature,
   quizQuestionStallShouldTrip,
   quizSampleStarted,
   quizStallObserve,
+  quizVideoStatusAfterLoadIssued,
   tagCandidates,
   watchdogPollActive,
   watchdogShouldTrip,
@@ -118,6 +124,18 @@ import { useTheme } from '../theme-context';
  * 'playing' again (mediaEngine.quizFailedShouldClear). The
  * countdown path's verdict stays latched, exactly as before.
  *
+ * Video-leg status discipline (clock-stall fix, 2026-11-12):
+ * the audio leg's per-load status reset (fresh player + ref
+ * stamp) is mirrored for video — a statusChange bridge feeds
+ * `videoStatusRef`, and every video load STAMPS the ref to
+ * 'loading' synchronously at issuance — so a question can
+ * never inherit its predecessor's 'readyToPlay' and lose the
+ * phase edge the solo clock starts on (the song playing while
+ * the timer never started; diagnosis QUIZ-CLOCK-STALL-
+ * DIAGNOSIS-2026-11-12). The stamp writes only 'loading': no
+ * clock can start early off it, and the countdown path's
+ * hold/watchdog semantics are untouched.
+ *
  * `nextCandidates` + `nextMediaKey` (solo next-question preload,
  * playback plan; part 6 rework 2026-11-11): while the current
  * question plays, the NEXT question's first audio candidate is
@@ -170,13 +188,46 @@ function useQuizMediaPlayer(
   const videoPlayer = useVideoPlayer(null, (p) => {
     p.loop = false;
   });
-  const { status: videoStatus } = useEvent(videoPlayer, 'statusChange', {
-    status: videoPlayer.status,
-  });
-  // Ref mirror so the watchdog poll reads the CURRENT video
-  // status at tick time, not the status at the poll's creation.
-  const videoStatusRef = useRef(videoStatus);
-  videoStatusRef.current = videoStatus;
+  /* Video status bridge (clock-stall fix, 2026-11-12 — mirrors
+     the audio bridge below): the player is created ONCE for the
+     hook's life and its status is purely event-fed, so the hook
+     keeps the latest status in a ref fed by a statusChange
+     listener (+ a tick to re-render), and the per-candidate
+     load effect STAMPS the ref to 'loading' synchronously when
+     a new load is issued (mediaEngine
+     .quizVideoStatusAfterLoadIssued). Without the stamp, a
+     question whose predecessor left the player at
+     'readyToPlay' inherited that status across the switch:
+     the phase never edged, QuizAudioOnly never reported
+     'playing', and the solo clock (and the server's
+     playback-start signal — the same consumer) never fired
+     while the song audibly played (diagnosis
+     QUIZ-CLOCK-STALL-DIAGNOSIS-2026-11-12). The watchdog poll
+     also reads this ref, so its loading observation is the
+     stamped truth, not a leftover from the previous question. */
+  const videoStatusRef = useRef<VideoPlayerStatus>(videoPlayer.status);
+  const [, setVideoTick] = useState(0);
+  useEffect(() => {
+    let subscription: { remove: () => void } | null = null;
+    try {
+      subscription = videoPlayer.addListener(
+        'statusChange',
+        ({ status: next }) => {
+          videoStatusRef.current = next;
+          setVideoTick((t) => t + 1);
+        },
+      );
+    } catch {
+      // Listener unsupported — the watchdog still guards stalls.
+    }
+    return () => {
+      try {
+        subscription?.remove();
+      } catch {
+        // Already detached.
+      }
+    };
+  }, [videoPlayer]);
 
   /* ---- audio engine state ---- */
   // The live audio player for the current candidate: a player
@@ -359,6 +410,16 @@ function useQuizMediaPlayer(
     }
 
     // Video candidate — the original expo-video load + hold.
+    // STAMP (clock-stall fix, 2026-11-12): the player IS
+    // loading from this moment by construction; stamping the
+    // status ref synchronously — before the native player can
+    // publish anything about the new source — guarantees the
+    // buffering interlude whose end (the genuine readyToPlay
+    // event, fed back through the bridge above) is the edge
+    // the solo clock starts on, even when the previous
+    // question left this player at 'readyToPlay'.
+    videoStatusRef.current = quizVideoStatusAfterLoadIssued();
+    setVideoTick((t) => t + 1);
     let cancelled = false;
     void videoPlayer
       .replaceAsync(url)
@@ -427,7 +488,7 @@ function useQuizMediaPlayer(
       ? 'error'
       : kind === 'audio'
         ? audioTickStatus(audioStatusRef.current)
-        : videoStatus;
+        : videoStatusRef.current;
   void audioPlayer;
 
   /* ---- stall watchdog ---- */
@@ -845,13 +906,12 @@ export function QuizAudioOnly({
   const { videoPlayer, kind, status, url, failed, muted, toggleMute, holdPending } =
     useQuizMediaPlayer(candidates, mediaKey, playAtMs, nextCandidates, nextMediaKey);
 
-  const phase: QuizAudioPhase = failed
-    ? 'failed'
-    : url === null
-      ? 'empty'
-      : holdPending || status === 'loading' || status === 'idle'
-        ? 'buffering'
-        : 'playing';
+  const phase: QuizAudioPhase = quizAudioPhase({
+    failed,
+    hasUrl: url !== null,
+    holdPending,
+    status,
+  });
 
   const reportRef = useRef(onStateChange);
   reportRef.current = onStateChange;
