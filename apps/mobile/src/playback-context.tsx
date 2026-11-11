@@ -132,10 +132,12 @@ export interface PlaybackSession {
   watchAudioFallback?: boolean;
   /** Playback plan (2026-11-10): while this claim is INACTIVE the
       engine preloads the claim mode's media (theme detail claims
-      it from its open mode: Listen preloads the whole .ogg,
-      Watch the video — preload only, no autoplay), so the tap
-      starts near-instantly. The claim key is slug+entry+mode and
-      must match the key the engine derives for adoption. */
+      it from its open mode: Listen downloads the whole .ogg into
+      the prepare cache — buffer package, src/detailAudio.ts —
+      Watch preloads the video; preload only, no autoplay), so
+      the tap starts near-instantly. The claim key is
+      slug+entry+mode and must match the key the engine derives
+      for adoption. */
   preloadKey?: string | null;
 }
 

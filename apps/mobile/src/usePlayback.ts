@@ -28,6 +28,7 @@ import {
 import { downloadFileUri, useDownloads, type DownloadRecord } from './downloads';
 import {
   WATCHDOG_POLL_INTERVAL_MS,
+  bufferConnectionKind,
   failureAttributionDecision,
   markFailureHandled,
   mediaKindForUrl,
@@ -38,12 +39,26 @@ import {
   stallShouldTrip,
   surfaceReadinessAfterSwap,
   tagCandidates,
+  videoBufferOptionsFor,
   videoLoadAction,
   watchSurfaceGateDecision,
   watchdogPollActive,
+  type BufferConnectionKind,
+  type BufferConnectionSample,
   type FailureChannel,
   type MediaCandidate,
 } from './mediaEngine';
+import NetInfo, { type NetInfoState } from './netInfo';
+import {
+  abandonDetailAudio,
+  detailAudioStallShouldTrip,
+  detailListenCandidates,
+  getDetailAudioEntry,
+  prepareDetailAudio,
+  unpinDetailAudio,
+  useDetailAudioProgress,
+  type DetailAudioProgress,
+} from './detailAudio';
 import {
   isPlausibleUrl,
   resolveListenCandidates,
@@ -126,12 +141,15 @@ import {
  *
  * - MODE-MATCHED PRELOAD (detail claims pass `preload`): while
  *   the session is INACTIVE the engine preloads the mode's media
- *   without playing — Listen preloads the whole .ogg through the
- *   audio preload slot (src/audioEngine.ts); Watch preloads the
- *   video into the (paused) video player. A tap then ADOPTS the
- *   preloaded player/source (no re-create, no re-download) and
- *   starts near-instantly. A preload is keyed by slug+entry+mode;
- *   switching the mode or entry re-keys and discards it.
+ *   without playing — Listen prepares the whole .ogg (since the
+ *   buffer package: as a resumable cache DOWNLOAD, src/
+ *   detailAudio.ts — see the BUFFER PACKAGE bullet below; the
+ *   audio preload slot in src/audioEngine.ts still serves the
+ *   queue paths); Watch preloads the video into the (paused)
+ *   video player. A tap then ADOPTS the preloaded player/source
+ *   (no re-create, no re-download) and starts near-instantly.
+ *   A preload is keyed by slug+entry+mode; switching the mode or
+ *   entry re-keys and discards it.
  * - STALL WATCHDOG (rebuilt 2026-11-11 watch fix — owner
  *   numbers): a NEVER-STARTED source stuck in one continuous
  *   no-progress stall advances the chain through the SAME
@@ -150,6 +168,22 @@ import {
  *   re-keys and replaces it, and the eventual advance adopts it
  *   when the claim key matches. Offline next tracks need none
  *   (the provider passes nothing for them).
+ * - BUFFER PACKAGE (2026-11-11 evening — the detail claims'
+ *   answer to the owner's peak-hour freeze report: both modes
+ *   buffering/stuck on a healthy edge, the choke being the
+ *   single-flow phone→edge road): Watch loads carry a
+ *   NetInfo-sized buffer cushion (the buffer section below);
+ *   a detail LISTEN claim no longer relies on streaming its
+ *   first candidate: the inactive preload DOWNLOADS the whole
+ *   .ogg into a cache file (src/detailAudio.ts — resumable, so
+ *   a connection reset resumes instead of killing the stream
+ *   and dropping the chain onto the 40–60 MB hidden video),
+ *   and activation either plays that file or WAITS on the same
+ *   transfer — the player watchdog stands down while waiting,
+ *   and the download's own 30s no-progress verdict abandons to
+ *   the streamed chain, unchanged. Queue/quiz preload paths are
+ *   untouched: only claims whose session key is the engine's
+ *   own detail key (slug+entry+mode) take the download path.
  * - PROBLEM 8 (progress split): progress lives in its own state,
  *   QUANTIZED to whole seconds and reference-stabilised
  *   (stabilizeProgress) — same-second ticks produce no state
@@ -221,6 +255,24 @@ export interface NextTrackPreload {
 
 /** The audio engine's status, normalised for the event bridge. */
 type AudioStatusEvent = AudioStatus & { isBuffering?: boolean };
+
+/** Fold a NetInfo state onto the buffer classifier's sample
+    (mediaEngine.BufferConnectionSample): the connection type,
+    reachability, and the platform's expensive flag where the
+    state's details carry one (null when unreported). */
+function bufferSampleOf(state: NetInfoState): BufferConnectionSample {
+  const details = state.details as {
+    isConnectionExpensive?: boolean;
+  } | null;
+  return {
+    type: state.type,
+    isInternetReachable: state.isInternetReachable,
+    isConnectionExpensive:
+      details && typeof details.isConnectionExpensive === 'boolean'
+        ? details.isConnectionExpensive
+        : null,
+  };
+}
 
 /** A player-agnostic control handle over the ACTIVE engine. */
 export interface ActivePlayerHandle {
@@ -300,6 +352,74 @@ export function usePlayback(args: {
       ? listenCandidates
       : watchCandidates;
   const [candidateIndex, setCandidateIndex] = useState(0);
+
+  /* ---------------- buffer package: detail Listen prepare ----
+     A DETAIL claim (its session preload key IS the engine's own
+     slug+entry+mode claim key — the key derived below for
+     adoption; queue claims carry `queue:` keys and never match)
+     runs its Listen chain through the prepare cache
+     (src/detailAudio.ts):
+     - the chain in play is the listen chain (listen mode, or a
+       watch claim degraded by W2): its prepare lives under the
+       LISTEN claim key, whatever mode opened the page;
+     - a LANDED prepare file leads the chain (the pure plan in
+       detailAudio.detailListenCandidates — a completed library
+       download still wins outright through localUsable above,
+       which is the plan's first rule, so the engine consults
+       the plan with libraryUri null);
+     - a prepare still FETCHING at the chain's head makes the
+       claim WAIT (detailWait): no streamed load is issued
+       underneath the transfer. The wait is chain-head-only —
+       once the chain has advanced (candidateIndex > 0) the
+       remote chain stands exactly as before.
+     The progress subscription is what re-renders the engine
+     when the transfer lands (the snapshot flips to ready), and
+     it feeds the slow channel for the listen hero's honest %. */
+  const detailKeyBase =
+    slug !== null && wantedEntryId != null
+      ? `${slug}:${wantedEntryId}`
+      : null;
+  const isDetailClaim =
+    detailKeyBase !== null &&
+    claimPreloadKey !== null &&
+    claimPreloadKey === `${detailKeyBase}:${mode}`;
+  const listenClaimKey =
+    detailKeyBase !== null ? `${detailKeyBase}:listen` : null;
+  const chainIsListen = mode === 'listen' || audioFallback;
+  const prepareKey = isDetailClaim && chainIsListen ? listenClaimKey : null;
+  const prepareProgress: DetailAudioProgress | null =
+    useDetailAudioProgress(prepareKey);
+  const prepareEntry = prepareKey ? getDetailAudioEntry(prepareKey) : null;
+  const preparedUri =
+    !localUsable &&
+    candidateIndex === 0 &&
+    prepareEntry !== null &&
+    prepareEntry.status === 'ready' &&
+    prepareEntry.url === (candidates[0] ?? null)
+      ? prepareEntry.uri
+      : null;
+  const effectiveCandidates = useMemo(
+    () =>
+      prepareKey !== null
+        ? detailListenCandidates({
+            libraryUri: null,
+            preparedUri,
+            remoteChain: candidates,
+          })
+        : candidates,
+    [prepareKey, preparedUri, candidates],
+  );
+  const detailWait =
+    active &&
+    prepareKey !== null &&
+    !localUsable &&
+    candidateIndex === 0 &&
+    preparedUri === null &&
+    prepareEntry !== null &&
+    prepareEntry.status === 'fetching' &&
+    prepareEntry.url === (candidates[0] ?? null);
+  const detailWaitRef = useRef(detailWait);
+  detailWaitRef.current = detailWait;
   // The URLs whose failure was already handled (advanced past or
   // surfaced) — a failing source reports through BOTH the load
   // promise and the status listener; PER-URL attribution (watch
@@ -351,7 +471,7 @@ export function usePlayback(args: {
   const url = localUsable
     ? downloadFileUri(localUsable)
     : detail
-      ? (candidates[candidateIndex] ?? null)
+      ? (effectiveCandidates[candidateIndex] ?? null)
       : remoteUrl;
   const offline = localUsable !== undefined;
   // The current candidate, tagged with its engine + role. Local
@@ -371,7 +491,8 @@ export function usePlayback(args: {
               ? 'hidden-video'
               : 'primary',
         }
-      : (tagCandidates(candidates, chainPurpose)[candidateIndex] ?? null)
+      : (tagCandidates(effectiveCandidates, chainPurpose)[candidateIndex] ??
+        null)
     : null;
   const kind: 'audio' | 'video' = candidate?.kind ?? 'video';
   // Live mirror for the surface-discipline callbacks (they read
@@ -384,6 +505,13 @@ export function usePlayback(args: {
   // activated, and its handler must know which world it woke in.
   const activeRef = useRef(active);
   activeRef.current = active;
+  // Live mirror of the session's claim key: the preload
+  // bookkeeping below reads it to tell "the claim merely
+  // activated" (the session still holds the key — a detail
+  // prepare's pin stays with the live claim) from "the claim
+  // moved on" (the pin is released; see the key-leave effect).
+  const claimPreloadKeyRef = useRef(claimPreloadKey);
+  claimPreloadKeyRef.current = claimPreloadKey;
 
   /* ---------------- the two native players ---------------- */
   const videoPlayer = useVideoPlayer(null, (p) => {
@@ -465,6 +593,59 @@ export function usePlayback(args: {
   // is the gate's second release signal (watch fix, fix 4).
   const videoStatusRef = useRef(videoStatus);
   videoStatusRef.current = videoStatus;
+
+  /* ---------------- buffer package: the Watch cushion ---------
+     The video player's buffer cushion is sized by the
+     CONNECTION at each load (buffer package, 2026-11-11
+     evening — the pure decision lives in mediaEngine:
+     bufferConnectionKind + videoBufferOptionsFor). The engine
+     keeps the latest NetInfo sample; loads read the classified
+     kind through the ref mirror, so a load issued from any
+     callback uses the freshest class. expo-video's defaults
+     (Android: ~20s forward, 2s to start) left almost no runway
+     for a dipping single-flow road to ride out on — the owner's
+     1.0.3 peak-hour freezes on BOTH detail modes. */
+  const [connectionSample, setConnectionSample] =
+    useState<BufferConnectionSample | null>(null);
+  useEffect(() => {
+    let live = true;
+    NetInfo.fetch()
+      .then((state) => {
+        if (live) setConnectionSample(bufferSampleOf(state));
+      })
+      .catch(() => {
+        // No sample: the classifier defaults to metered.
+      });
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      setConnectionSample(bufferSampleOf(state));
+    });
+    return () => {
+      live = false;
+      unsubscribe();
+    };
+  }, []);
+  const connectionKindRef = useRef<BufferConnectionKind>('metered');
+  connectionKindRef.current = bufferConnectionKind(connectionSample);
+
+  /** Set the player's buffer cushion for ONE load, from its
+      candidate (watch candidates get their connection's Watch
+      profile; the hidden-video listen fallback always gets the
+      metered profile — an audio-only rescue must not gorge the
+      road it exists to survive). Applied as each load is issued,
+      so a claim on a changed connection re-tunes. */
+  const applyVideoBufferOptions = useCallback(
+    (forCandidate: MediaCandidate) => {
+      try {
+        videoPlayer.bufferOptions = videoBufferOptionsFor({
+          role: forCandidate.role,
+          connection: connectionKindRef.current,
+        });
+      } catch {
+        // Player released — nothing to tune.
+      }
+    },
+    [videoPlayer],
+  );
 
   /* ---------------- surface-readiness gate (2026-11-11) -------
      A WATCH play must not reach the video player until the
@@ -731,7 +912,7 @@ export function usePlayback(args: {
       retry: null,
       resume: null,
     };
-    if (!localUsable && candidateIndex + 1 < candidates.length) {
+    if (!localUsable && candidateIndex + 1 < effectiveCandidates.length) {
       setCandidateIndex(candidateIndex + 1);
       return;
     }
@@ -799,6 +980,7 @@ export function usePlayback(args: {
       setPlayerError(null);
       setEnded(false);
       setProgress({ current: 0, duration: 0 });
+      applyVideoBufferOptions(forCandidate);
       playVideoGated(
         'adopt',
         () => {
@@ -816,6 +998,7 @@ export function usePlayback(args: {
     setProgress({ current: 0, duration: 0 });
     const issued = { url, settled: false };
     videoLoadRef.current = issued;
+    applyVideoBufferOptions(forCandidate);
     void videoPlayer
       .replaceAsync(url)
       .then(() => {
@@ -865,6 +1048,14 @@ export function usePlayback(args: {
   // moves off it (a different candidate, deactivation, unmount).
   useEffect(() => {
     if (!active || !candidate || candidate.kind !== 'audio') return;
+    // Buffer package: while the claim WAITS on its prepare
+    // download (detailWait), the streamed load of the same URL
+    // must not start underneath the transfer. The wait lifting
+    // re-runs this effect (it is a dep): the candidate is then
+    // the landed file itself, or — after the download stall
+    // verdict abandoned the transfer — the untouched remote
+    // chain head, loaded exactly as before the package.
+    if (detailWaitRef.current) return;
     if (
       loadedUrlRef.current === candidate.url &&
       loadedEngineRef.current === 'audio'
@@ -911,7 +1102,7 @@ export function usePlayback(args: {
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, candidate?.url, candidate?.kind]);
+  }, [active, candidate?.url, candidate?.kind, detailWait]);
 
   // Deactivation (the detail screen switching themes): pause and
   // forget the loaded source so the next activation starts fresh.
@@ -1068,11 +1259,16 @@ export function usePlayback(args: {
       stallSinceRef.current = Date.now();
     }
   }, [progress.duration]);
-  const watchdogArmed = watchdogPollActive({
-    active,
-    hasSource: url !== null,
-    failed: playerError !== null,
-  });
+  // Buffer package: while the claim waits on its prepare
+  // download (detailWait), the player watchdog stands down —
+  // the "buffering" it would judge is the wait itself, and the
+  // download's own stall poll below owns that clock.
+  const watchdogArmed =
+    watchdogPollActive({
+      active,
+      hasSource: url !== null,
+      failed: playerError !== null,
+    }) && !detailWait;
   useEffect(() => {
     if (!watchdogArmed) return;
     const id = setInterval(() => {
@@ -1093,6 +1289,35 @@ export function usePlayback(args: {
     return () => clearInterval(id);
   }, [watchdogArmed, kind, url]);
 
+  /* ---------------- buffer package: download stall poll ------
+     While a detail Listen claim waits on its prepare download,
+     this poll owns the wait's clock: the module's pure decision
+     (30s without a byte of progress — the transfer stamps every
+     byte itself; a started playback is immune by construction,
+     since a wait means nothing has loaded) abandons the
+     transfer, the entry's removal lifts the wait, and the audio
+     load effect falls through to the streamed chain, unchanged,
+     with per-URL failure attribution intact. */
+  useEffect(() => {
+    if (!detailWait || !prepareKey) return;
+    const key = prepareKey;
+    const id = setInterval(() => {
+      const entry = getDetailAudioEntry(key);
+      if (!entry) return;
+      if (
+        detailAudioStallShouldTrip({
+          status: entry.status,
+          now: Date.now(),
+          lastProgressAt: entry.lastProgressAt,
+          playbackStarted: false,
+        })
+      ) {
+        abandonDetailAudio(key);
+      }
+    }, WATCHDOG_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [detailWait, prepareKey]);
+
   /* ---------------- mode-matched preload (inactive) ---------------- */
   // While the claim is INACTIVE, preload the claim mode's media:
   // audio candidates go to the preload slot (the whole .ogg
@@ -1101,19 +1326,38 @@ export function usePlayback(args: {
   // load effect, seeing the URL already in place) starts it
   // near-instantly. Switching mode/entry re-keys and discards.
   const preloadKey = preloadRequest?.key ?? null;
-  const preloadCandidateUrl = useMemo(() => {
+  const preloadCandidate = useMemo(() => {
     if (!preloadRequest) return null;
     const tagged = tagCandidates(
       preloadRequest.candidates,
       preloadRequest.mode,
     );
-    return tagged[0]?.url ?? null;
+    return tagged[0] ?? null;
   }, [preloadRequest]);
+  const preloadCandidateUrl = preloadCandidate?.url ?? null;
   const preloadedVideoUrlRef = useRef<string | null>(null);
+  // The preload keys this engine has fed to the detail prepare
+  // cache (buffer package): when such a key is retired, its
+  // entry is UNPINNED (left warm for a return visit), never
+  // slot-discarded — the audio slot never held anything for it.
+  const detailPreparedKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (active) return;
     if (!preloadKey || !preloadCandidateUrl) return;
     if (mediaKindForUrl(preloadCandidateUrl) === 'audio') {
+      // Buffer package: a DETAIL claim's Listen preload is the
+      // prepare DOWNLOAD (src/detailAudio.ts), not a slot stream
+      // — a stream dies on the first connection reset, where the
+      // resumable download survives it, and the landed file
+      // plays immune to the road. The gate is the key itself:
+      // only the engine's own detail key matches claimKey (the
+      // provider's queue keys never do), so every other preload
+      // consumer keeps the slot path below, untouched.
+      if (claimKey !== null && preloadKey === claimKey) {
+        detailPreparedKeysRef.current.add(preloadKey);
+        prepareDetailAudio(preloadKey, preloadCandidateUrl);
+        return;
+      }
       preloadAudio(preloadKey, preloadCandidateUrl);
       return;
     }
@@ -1135,6 +1379,7 @@ export function usePlayback(args: {
     preloadedVideoUrlRef.current = preloadCandidateUrl;
     const issued = { url: preloadCandidateUrl, settled: false };
     videoLoadRef.current = issued;
+    if (preloadCandidate) applyVideoBufferOptions(preloadCandidate);
     void videoPlayer
       .replaceAsync(preloadCandidateUrl)
       .then(() => {
@@ -1196,16 +1441,35 @@ export function usePlayback(args: {
 
   // Drop preloads when their key leaves (mode switch, entry
   // switch, slug change) — a stale preload must never be adopted.
+  // Buffer package: a retired DETAIL prepare key is unpinned
+  // instead (its file stays warm under the cache's retention;
+  // prepareDetailAudio's own pin-move is the backstop for keys
+  // retired by activation, where this effect sees no key change
+  // at all). A key the live session still holds — it merely
+  // activated — keeps its pin.
   const lastPreloadKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const prev = lastPreloadKeyRef.current;
-    if (prev && prev !== preloadKey) discardPreload(prev);
+    if (prev && prev !== preloadKey) {
+      if (detailPreparedKeysRef.current.has(prev)) {
+        if (prev !== claimPreloadKeyRef.current) {
+          detailPreparedKeysRef.current.delete(prev);
+          unpinDetailAudio(prev);
+        }
+      } else {
+        discardPreload(prev);
+      }
+    }
     lastPreloadKeyRef.current = preloadKey;
   }, [preloadKey]);
   useEffect(() => {
     return () => {
-      if (lastPreloadKeyRef.current) {
-        discardPreload(lastPreloadKeyRef.current);
+      const last = lastPreloadKeyRef.current;
+      if (!last) return;
+      if (detailPreparedKeysRef.current.has(last)) {
+        unpinDetailAudio(last);
+      } else {
+        discardPreload(last);
       }
     };
   }, []);
@@ -1414,7 +1678,11 @@ export function usePlayback(args: {
     // Retry restarts the chain from its first candidate; the index
     // change alone reloads it, so only force the load when the
     // first candidate is already the one showing.
-    if (!localUsable && candidates.length > 0 && candidateIndex !== 0) {
+    if (
+      !localUsable &&
+      effectiveCandidates.length > 0 &&
+      candidateIndex !== 0
+    ) {
       setPlayerError(null);
       handledFailureUrlsRef.current = new Set();
       setCandidateIndex(0);
@@ -1446,6 +1714,7 @@ export function usePlayback(args: {
     const retryCandidate = candidate;
     const issued = { url, settled: false };
     videoLoadRef.current = issued;
+    if (retryCandidate) applyVideoBufferOptions(retryCandidate);
     void videoPlayer
       .replaceAsync(url)
       .then(() => {
@@ -1524,6 +1793,11 @@ export function usePlayback(args: {
       /** W2: watch degraded to the listen chain's audio (opt-in
           claims only) — render artwork + an audio-only note. */
       audioFallback,
+      /** Buffer package: the detail Listen prepare download's
+          progress for the claim in play (null unless a prepare
+          is registered for it) — the listen hero renders the
+          honest byte-% while the claim waits on the transfer. */
+      prepareProgress,
       playerError,
       ended,
       isPlaying,
@@ -1546,6 +1820,7 @@ export function usePlayback(args: {
       buffering,
       framesRendered,
       audioFallback,
+      prepareProgress,
       playerError,
       ended,
       isPlaying,
