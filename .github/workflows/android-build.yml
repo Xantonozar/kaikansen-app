@@ -65,16 +65,18 @@ jobs:
       - name: Install EAS CLI
         run: npm install --global eas-cli
 
+      # TMPDIR is deliberately NOT overridden here: an earlier attempt
+      # pointed it at $GITHUB_WORKSPACE/.eas-tmp, which sits inside
+      # the project directory, so EAS's copy of the project into its
+      # shallow-clone dir became a copy into a subdirectory of
+      # itself and cp refused (EINVAL, runs #22/#23). The default
+      # /tmp worked for runs #13–#15; the relocated free-disk step
+      # above is the real cure for run #16's quota failure.
       - name: Build APK (preview profile, local)
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-          # EAS builds under /tmp by default; /tmp is quota'd on the
-          # runner (run #16), so point it at the workspace disk.
-          TMPDIR: ${{ github.workspace }}/.eas-tmp
-        run: |
-          mkdir -p "$TMPDIR"
-          eas build --profile preview --platform android --local --non-interactive --output "$GITHUB_WORKSPACE/kaikansen.apk"
+        run: eas build --profile preview --platform android --local --non-interactive --output "$GITHUB_WORKSPACE/kaikansen.apk"
 
       - name: Upload run artifact
         uses: actions/upload-artifact@v4
