@@ -14,8 +14,11 @@
  * The stall watchdog budget (playback plan decision 4): a source
  * that stays in `loading` for this long without reaching playing
  * is treated as failed — the chain advances through the same
- * failure path a hard error takes. Shared by the detail/player
- * engine and every quiz surface.
+ * failure path a hard error takes. As of the 2026-11-11 watch
+ * fix this budget governs the QUIZ surfaces (whose countdown
+ * arming is built on it); the detail/player engine uses the
+ * kind-based grace + started-source immunity in the watch-fix
+ * section below (stallShouldTrip).
  */
 export const PLAYBACK_STALL_WATCHDOG_MS = 4000;
 
@@ -202,6 +205,147 @@ export function watchdogShouldTrip(snap: WatchdogSnapshot): boolean {
     return false;
   }
   return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Watch fix (2026-11-11) — failure attribution, single-load         */
+/* decision, and the detail/player stall watchdog.                   */
+/*                                                                   */
+/* Diagnosis: WATCH-102-FAILURE-DIAGNOSIS.md (H1/H2). The QUIZ       */
+/* engine keeps the watchdog above unchanged (its countdown-hold     */
+/* arming depends on it); everything in this section is used ONLY    */
+/* by the detail/player engine (usePlayback).                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The channels a source failure can be reported on. One physical
+ * failure is typically reported TWICE — the load promise rejects
+ * AND the player's status flips to 'error' — and the two reports
+ * do not arrive atomically: the chain may already have advanced
+ * when the second one lands.
+ */
+export type FailureChannel = 'promise' | 'status' | 'watchdog' | 'sync';
+
+/**
+ * May this failure report be HANDLED against the current
+ * candidate? The rules that keep one failure from burning two
+ * chain candidates (diagnosis §1.6/§6):
+ *
+ * - CURRENCY: a report naming a URL that is no longer the
+ *   current load is stale and ignored (the promise channel's
+ *   long-standing guard, generalised).
+ * - PER-URL ATTRIBUTION: a URL whose failure was already handled
+ *   can never be handled again, on any channel.
+ * - STATUS-CHANNEL SUBORDINATION: the 'status' channel cannot
+ *   name its source. While the current load's promise is still
+ *   in flight, a status error is either that load's own (the
+ *   promise rejection will handle it, correctly attributed) or
+ *   a stale duplicate of the PREVIOUS candidate's failure — in
+ *   both cases the promise channel owns it, so the status report
+ *   is ignored. Once the current load has SETTLED (its promise
+ *   resolved), a status error is a genuine post-load failure of
+ *   the current source and is handled against it.
+ */
+export function failureAttributionDecision(args: {
+  channel: FailureChannel;
+  /** The URL this report is attributed to (the caller names the
+      load it belongs to; the status channel names the current
+      load, which the subordination rule then vets). */
+  reportUrl: string | null;
+  /** The URL loaded right now (loadedUrlRef). */
+  currentUrl: string | null;
+  /** Has the current load's promise resolved (settled)? */
+  currentLoadSettled: boolean;
+  /** URLs whose failure has already been handled. */
+  handledUrls: ReadonlySet<string>;
+}): 'handle' | 'ignore' {
+  const { channel, reportUrl, currentUrl, handledUrls } = args;
+  if (reportUrl === null || currentUrl === null) return 'ignore';
+  if (reportUrl !== currentUrl) return 'ignore';
+  if (handledUrls.has(reportUrl)) return 'ignore';
+  if (channel === 'status' && !args.currentLoadSettled) return 'ignore';
+  return 'handle';
+}
+
+/** Immutably record a URL's failure as handled. */
+export function markFailureHandled(
+  handledUrls: ReadonlySet<string>,
+  url: string,
+): ReadonlySet<string> {
+  if (handledUrls.has(url)) return handledUrls;
+  const next = new Set(handledUrls);
+  next.add(url);
+  return next;
+}
+
+/**
+ * The single-load decision for the video player (diagnosis §1.3):
+ * the engine tracks the ONE load it has issued into the player
+ * (by the inactive preload or by an activation). When a claim
+ * activates over a candidate, exactly one of:
+ * - 'adopt' — that same URL is already loaded (settled): play
+ *   from it; issuing another load would restart it from zero and
+ *   interrupt it (the double-load defect);
+ * - 'wait' — that same URL is still loading: its settle handler
+ *   owns the play/failure; do not issue a duplicate;
+ * - 'issue' — no load for this URL exists: load it now.
+ */
+export type VideoLoadAction = 'issue' | 'adopt' | 'wait';
+
+export function videoLoadAction(args: {
+  candidateUrl: string;
+  /** The URL of the load last issued into the video player. */
+  issuedUrl: string | null;
+  /** Whether that issued load's promise has resolved. */
+  issuedSettled: boolean;
+}): VideoLoadAction {
+  if (args.issuedUrl !== args.candidateUrl) return 'issue';
+  return args.issuedSettled ? 'adopt' : 'wait';
+}
+
+/**
+ * The detail/player stall grace, by engine kind (owner ruling
+ * 2026-11-11 19:10, replacing the 4s budget for this engine):
+ * a source that has never started may be declared dead only
+ * after this long of CONTINUOUS no-progress silence. Users on
+ * bad net stall longer than 4s without being dead.
+ */
+export const AUDIO_STALL_GRACE_MS = 30_000;
+export const VIDEO_STALL_GRACE_MS = 60_000;
+
+export function stallGraceMs(kind: MediaEngineKind): number {
+  return kind === 'audio' ? AUDIO_STALL_GRACE_MS : VIDEO_STALL_GRACE_MS;
+}
+
+/**
+ * The rebuilt stall decision for the detail/player engine. The
+ * hook tracks the current continuous buffering EPISODE:
+ * `stallSince` is stamped when buffering begins and re-stamped
+ * by any progress (a status leaving 'loading', an advancing
+ * progress tick, playing); it is null whenever the player is
+ * not in a stall. Rules (owner rulings, 2026-11-11):
+ * - a source that has STARTED (played, advanced past 0, or —
+ *   video — rendered frames) is NEVER killed for buffering:
+ *   mid-playback stalls are waited out; only real player errors
+ *   advance the chain;
+ * - a never-started source trips only after the full kind grace
+ *   of continuous silence.
+ */
+export interface StallSnapshot {
+  now: number;
+  kind: MediaEngineKind;
+  stallSince: number | null;
+  hasStarted: boolean;
+  hasSource: boolean;
+  failed: boolean;
+  disabled: boolean;
+}
+
+export function stallShouldTrip(snap: StallSnapshot): boolean {
+  if (snap.disabled || snap.failed || !snap.hasSource) return false;
+  if (snap.hasStarted) return false;
+  if (snap.stallSince === null) return false;
+  return snap.now - snap.stallSince >= stallGraceMs(snap.kind);
 }
 
 /* ------------------------------------------------------------------ */
@@ -411,9 +555,19 @@ export function watchSurfaceGateDecision(args: {
   role: 'primary' | 'audio-fallback' | 'hidden-video';
   /** Has the bound surface rendered a frame for THIS player? */
   surfaceReady: boolean;
+  /** Watch fix (2026-11-11, diagnosis H2/§6.4): the player
+      itself reports 'readyToPlay' for the current source — the
+      source is loaded and playable, which is the same safety
+      the first frame was proxying for. A held play releases on
+      EITHER signal. Optional; omitting it keeps the original
+      first-frame-only behaviour (the engine passes it only for
+      fresh load/adopt/retry plays — a post-detach RESUME still
+      waits for the new surface's own first frame, preserving
+      the detach discipline). */
+  playerReadyToPlay?: boolean;
 }): SurfaceGateDecision {
   if (args.kind !== 'video' || args.role !== 'primary') return 'play';
-  return args.surfaceReady ? 'play' : 'hold';
+  return args.surfaceReady || args.playerReadyToPlay ? 'play' : 'hold';
 }
 
 export function surfaceReadinessAfterSwap(args: {

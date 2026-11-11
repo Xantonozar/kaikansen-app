@@ -1,7 +1,11 @@
 import { describe, expect, it } from '@jest/globals';
 import {
+  AUDIO_STALL_GRACE_MS,
   PLAYBACK_STALL_WATCHDOG_MS,
+  VIDEO_STALL_GRACE_MS,
   createPreloadTicket,
+  failureAttributionDecision,
+  markFailureHandled,
   firstCandidateIsVideo,
   mediaKindForUrl,
   pickPreloadCandidate,
@@ -13,6 +17,8 @@ import {
   queuePreloadKey,
   shouldPreloadNext,
   stabilizeProgress,
+  stallShouldTrip,
+  videoLoadAction,
   surfaceReadinessAfterSwap,
   tagCandidates,
   watchArtworkUnderPlayer,
@@ -374,5 +380,263 @@ describe('surface-readiness gate — the 2026-11-11 video fix', () => {
     expect(watchdogShouldTrip(snap)).toBe(true);
     // Before the window: no trip — the gate gets its chance.
     expect(watchdogShouldTrip({ ...snap, now: 1_000 })).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Watch-fix (2026-11-11): failure attribution, single load, the     */
+/* rebuilt stall watchdog and the gate's readyToPlay release.        */
+/* Diagnosis: specs/WATCH-102-FAILURE-DIAGNOSIS.md (H1 + H2).        */
+/* ------------------------------------------------------------------ */
+
+const VIDEO_B = 'https://v.animethemes.moe/ChainsawMan-OP1.webm';
+
+describe('failureAttributionDecision (T1 — one failure, one candidate)', () => {
+  it('the KICK BACK sequence: A fails by promise, advances, then A’s duplicate status error must NOT kill B', () => {
+    // 1. Candidate A's load promise rejects → handled, against A.
+    let handled: ReadonlySet<string> = new Set<string>();
+    expect(
+      failureAttributionDecision({
+        channel: 'promise',
+        reportUrl: VIDEO,
+        currentUrl: VIDEO,
+        currentLoadSettled: false,
+        handledUrls: handled,
+      }),
+    ).toBe('handle');
+    handled = markFailureHandled(handled, VIDEO);
+
+    // 2. The chain advanced: B is now the current load, in flight.
+    //    A duplicate error for A arrives on the status channel —
+    //    the channel cannot name its source, so it is attributed
+    //    against the CURRENT load, whose promise has not settled:
+    //    the promise channel owns in-flight failures → ignore.
+    expect(
+      failureAttributionDecision({
+        channel: 'status',
+        reportUrl: VIDEO_B,
+        currentUrl: VIDEO_B,
+        currentLoadSettled: false,
+        handledUrls: handled,
+      }),
+    ).toBe('ignore');
+    //    …and a report that names A while B is current is stale
+    //    by currency alone → ignore.
+    expect(
+      failureAttributionDecision({
+        channel: 'status',
+        reportUrl: VIDEO,
+        currentUrl: VIDEO_B,
+        currentLoadSettled: false,
+        handledUrls: handled,
+      }),
+    ).toBe('ignore');
+
+    // 3. B survives: it settles, plays, and only a failure that is
+    //    genuinely B's (post-settle status error) may handle it.
+    expect(
+      failureAttributionDecision({
+        channel: 'status',
+        reportUrl: VIDEO_B,
+        currentUrl: VIDEO_B,
+        currentLoadSettled: true,
+        handledUrls: handled,
+      }),
+    ).toBe('handle');
+  });
+
+  it('a second report against an already-handled URL is ignored on every channel', () => {
+    const handled = markFailureHandled(new Set<string>(), VIDEO);
+    for (const channel of ['promise', 'status', 'watchdog', 'sync'] as const) {
+      expect(
+        failureAttributionDecision({
+          channel,
+          reportUrl: VIDEO,
+          currentUrl: VIDEO,
+          currentLoadSettled: true,
+          handledUrls: handled,
+        }),
+      ).toBe('ignore');
+    }
+  });
+
+  it('reports against a superseded URL are ignored; a watchdog report against the current URL handles', () => {
+    expect(
+      failureAttributionDecision({
+        channel: 'promise',
+        reportUrl: VIDEO,
+        currentUrl: VIDEO_B,
+        currentLoadSettled: false,
+        handledUrls: new Set<string>(),
+      }),
+    ).toBe('ignore');
+    expect(
+      failureAttributionDecision({
+        channel: 'watchdog',
+        reportUrl: VIDEO_B,
+        currentUrl: VIDEO_B,
+        currentLoadSettled: false,
+        handledUrls: new Set<string>(),
+      }),
+    ).toBe('handle');
+    expect(
+      failureAttributionDecision({
+        channel: 'promise',
+        reportUrl: null,
+        currentUrl: VIDEO_B,
+        currentLoadSettled: false,
+        handledUrls: new Set<string>(),
+      }),
+    ).toBe('ignore');
+  });
+
+  it('markFailureHandled never mutates the previous set', () => {
+    const before = new Set<string>();
+    const after = markFailureHandled(before, VIDEO);
+    expect(before.size).toBe(0);
+    expect(after.has(VIDEO)).toBe(true);
+  });
+});
+
+describe('videoLoadAction (T3 — exactly one load per URL)', () => {
+  it('activation over a settled preload ADOPTS it — no second load is issued', () => {
+    expect(
+      videoLoadAction({
+        candidateUrl: VIDEO,
+        issuedUrl: VIDEO,
+        issuedSettled: true,
+      }),
+    ).toBe('adopt');
+  });
+
+  it('activation while the preload is still in flight WAITS for that same load', () => {
+    expect(
+      videoLoadAction({
+        candidateUrl: VIDEO,
+        issuedUrl: VIDEO,
+        issuedSettled: false,
+      }),
+    ).toBe('wait');
+  });
+
+  it('a fresh candidate (or a different URL in the player) ISSUES its load', () => {
+    expect(
+      videoLoadAction({
+        candidateUrl: VIDEO,
+        issuedUrl: null,
+        issuedSettled: false,
+      }),
+    ).toBe('issue');
+    expect(
+      videoLoadAction({
+        candidateUrl: VIDEO_B,
+        issuedUrl: VIDEO,
+        issuedSettled: true,
+      }),
+    ).toBe('issue');
+  });
+});
+
+describe('stallShouldTrip (T2 — the rebuilt watchdog, owner numbers)', () => {
+  const audioBase = {
+    kind: 'audio' as const,
+    stallSince: 0,
+    hasStarted: false,
+    hasSource: true,
+    failed: false,
+    disabled: false,
+  };
+
+  it('uses the owner grace: 30s audio / 60s video — never the old 4s', () => {
+    expect(AUDIO_STALL_GRACE_MS).toBe(30_000);
+    expect(VIDEO_STALL_GRACE_MS).toBe(60_000);
+    // The old 4s budget would have tripped long ago; the new one
+    // must not.
+    expect(stallShouldTrip({ ...audioBase, now: 4_001 })).toBe(false);
+    expect(stallShouldTrip({ ...audioBase, now: 29_999 })).toBe(false);
+    expect(stallShouldTrip({ ...audioBase, now: 30_000 })).toBe(true);
+    const videoBase = { ...audioBase, kind: 'video' as const };
+    expect(stallShouldTrip({ ...videoBase, now: 30_000 })).toBe(false);
+    expect(stallShouldTrip({ ...videoBase, now: 59_999 })).toBe(false);
+    expect(stallShouldTrip({ ...videoBase, now: 60_000 })).toBe(true);
+  });
+
+  it('a source that has STARTED is never killed for buffering, however long the stall', () => {
+    // Playing, then a 20s mid-playback buffering episode (the
+    // Dara Dara field case) — and even far beyond the grace.
+    expect(
+      stallShouldTrip({
+        ...audioBase,
+        hasStarted: true,
+        stallSince: 100_000,
+        now: 120_000,
+      }),
+    ).toBe(false);
+    expect(
+      stallShouldTrip({
+        ...audioBase,
+        kind: 'video',
+        hasStarted: true,
+        stallSince: 0,
+        now: 600_000,
+      }),
+    ).toBe(false);
+  });
+
+  it('a progress blip restarts the stall clock (the episode is continuous-silence only)', () => {
+    // Stalling since t=0, but progress at t=29s re-stamps the
+    // episode start: at t=58.999s the CONTINUOUS silence is only
+    // 29.999s → no trip; a full further second of silence trips.
+    expect(stallShouldTrip({ ...audioBase, stallSince: 29_000, now: 58_999 })).toBe(
+      false,
+    );
+    expect(stallShouldTrip({ ...audioBase, stallSince: 29_000, now: 59_000 })).toBe(
+      true,
+    );
+  });
+
+  it('never trips without a live, unfailed, never-started source in a stall', () => {
+    expect(stallShouldTrip({ ...audioBase, stallSince: null, now: 99_000 })).toBe(false);
+    expect(stallShouldTrip({ ...audioBase, hasSource: false, now: 99_000 })).toBe(false);
+    expect(stallShouldTrip({ ...audioBase, failed: true, now: 99_000 })).toBe(false);
+    expect(stallShouldTrip({ ...audioBase, disabled: true, now: 99_000 })).toBe(false);
+  });
+});
+
+describe('watchSurfaceGateDecision — readyToPlay also releases (fix 4)', () => {
+  it('a primary video play held for a frame is released when the player reports readyToPlay', () => {
+    expect(
+      watchSurfaceGateDecision({
+        kind: 'video',
+        role: 'primary',
+        surfaceReady: false,
+        playerReadyToPlay: true,
+      }),
+    ).toBe('play');
+    expect(
+      watchSurfaceGateDecision({
+        kind: 'video',
+        role: 'primary',
+        surfaceReady: false,
+        playerReadyToPlay: false,
+      }),
+    ).toBe('hold');
+    // Default (argument omitted) keeps the pre-fix behaviour.
+    expect(
+      watchSurfaceGateDecision({
+        kind: 'video',
+        role: 'primary',
+        surfaceReady: false,
+      }),
+    ).toBe('hold');
+    // Non-primary roles were never gated and stay ungated.
+    expect(
+      watchSurfaceGateDecision({
+        kind: 'video',
+        role: 'hidden-video',
+        surfaceReady: false,
+        playerReadyToPlay: false,
+      }),
+    ).toBe('play');
   });
 });

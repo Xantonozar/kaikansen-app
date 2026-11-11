@@ -28,16 +28,20 @@ import {
 import { downloadFileUri, useDownloads, type DownloadRecord } from './downloads';
 import {
   WATCHDOG_POLL_INTERVAL_MS,
+  failureAttributionDecision,
+  markFailureHandled,
   mediaKindForUrl,
   progressFraction,
   queuePreloadKey,
   shouldPreloadNext,
   stabilizeProgress,
+  stallShouldTrip,
   surfaceReadinessAfterSwap,
   tagCandidates,
+  videoLoadAction,
   watchSurfaceGateDecision,
   watchdogPollActive,
-  watchdogShouldTrip,
+  type FailureChannel,
   type MediaCandidate,
 } from './mediaEngine';
 import {
@@ -128,9 +132,15 @@ import {
  *   preloaded player/source (no re-create, no re-download) and
  *   starts near-instantly. A preload is keyed by slug+entry+mode;
  *   switching the mode or entry re-keys and discards it.
- * - STALL WATCHDOG (~4s, PLAYBACK_STALL_WATCHDOG_MS): a source
- *   stuck in `loading` advances the chain through the SAME
- *   failure path a hard error takes (see src/mediaEngine.ts).
+ * - STALL WATCHDOG (rebuilt 2026-11-11 watch fix — owner
+ *   numbers): a NEVER-STARTED source stuck in one continuous
+ *   no-progress stall advances the chain through the SAME
+ *   failure path a hard error takes, but only after the kind
+ *   grace (audio 30s / video 60s of continuous silence, any
+ *   progress restarts the clock); a source that has started is
+ *   NEVER killed for buffering (see stallShouldTrip in
+ *   src/mediaEngine.ts). The quiz engine keeps its own 4s
+ *   watchdog; this engine no longer uses it.
  * - PROBLEM 3 (queue next-track preload): while a queue track
  *   plays, the provider passes the NEXT queue item's resolved
  *   listen chain as `nextPreload`; the engine preloads its .ogg
@@ -179,6 +189,17 @@ import {
  * gated (it plays sound-only with no frame by design); a surface
  * that never signals keeps the engine in `loading`, so the
  * stall watchdog fails through the existing chain as before.
+ *
+ * Watch fix (2026-11-11 evening — WATCH-102 diagnosis H1/H2):
+ * the gate ALSO releases a held load/adopt/retry play when the
+ * player reports 'readyToPlay' for the current source (a
+ * post-detach resume still waits for the new surface's first
+ * frame); the video load is issued EXACTLY ONCE per URL — the
+ * inactive preload's load is recorded, and activation ADOPTS it
+ * instead of replaceAsync-ing the same URL again; and failures
+ * are attributed PER URL through failureAttributionDecision, so
+ * one source's failure (reported on both the promise and the
+ * status channel) is handled once, against that source only.
  */
 
 export interface PlaybackPreloadRequest {
@@ -279,16 +300,23 @@ export function usePlayback(args: {
       ? listenCandidates
       : watchCandidates;
   const [candidateIndex, setCandidateIndex] = useState(0);
-  // The URL whose failure was already handled (advanced past or
+  // The URLs whose failure was already handled (advanced past or
   // surfaced) — a failing source reports through BOTH the load
-  // promise and the status listener; this keeps one failure from
-  // advancing the chain twice.
-  const failedUrlRef = useRef<string | null>(null);
+  // promise and the status listener; PER-URL attribution (watch
+  // fix, mediaEngine.failureAttributionDecision) keeps one
+  // failure from advancing the chain twice or being counted
+  // against the NEXT candidate after an advance.
+  const handledFailureUrlsRef = useRef<ReadonlySet<string>>(new Set());
+  // The ONE load this engine has issued into the video player
+  // (by the inactive preload or by an activation — never both):
+  // activation consults it via videoLoadAction so a preloaded
+  // URL is adopted, not re-loaded from zero.
+  const videoLoadRef = useRef<{ url: string; settled: boolean } | null>(null);
   // A different theme/entry/mode restarts the chain from the top.
   useEffect(() => {
     setCandidateIndex(0);
     setAudioFallback(false);
-    failedUrlRef.current = null;
+    handledFailureUrlsRef.current = new Set();
   }, [slug, mode, entry?.atEntryId]);
 
   // W2, the empty-chain case: watch was claimed but the entry has
@@ -351,6 +379,11 @@ export function usePlayback(args: {
   // outside any render's closure).
   const candidateRef = useRef<MediaCandidate | null>(candidate);
   candidateRef.current = candidate;
+  // Live mirror of `active` for the preload settle handlers: a
+  // preload issued while inactive may settle after the claim
+  // activated, and its handler must know which world it woke in.
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   /* ---------------- the two native players ---------------- */
   const videoPlayer = useVideoPlayer(null, (p) => {
@@ -427,6 +460,11 @@ export function usePlayback(args: {
   const surfacePlayer: VideoPlayer = videoPlayer;
   const surfaceStatus = videoStatus;
   const surfaceIsPlaying = videoIsPlaying;
+  // Ref mirror of the video player's status — the gate decision
+  // (a stable callback) reads the CURRENT status: 'readyToPlay'
+  // is the gate's second release signal (watch fix, fix 4).
+  const videoStatusRef = useRef(videoStatus);
+  videoStatusRef.current = videoStatus;
 
   /* ---------------- surface-readiness gate (2026-11-11) -------
      A WATCH play must not reach the video player until the
@@ -470,6 +508,33 @@ export function usePlayback(args: {
     resume: (() => void) | null;
   }>({ load: null, adopt: null, retry: null, resume: null });
 
+  // Drain the remembered gate-held plays; the callbacks
+  // re-check their own load's currency before touching the
+  // player, so releasing a stale slot is harmless. A RESUME held
+  // for a post-detach surface is only drained by that surface's
+  // own first frame (the detach discipline), never by the
+  // readyToPlay release.
+  const releaseHeldPlays = useCallback((includeResume: boolean) => {
+    const held = heldPlaysRef.current;
+    heldPlaysRef.current = {
+      load: null,
+      adopt: null,
+      retry: null,
+      resume: includeResume ? null : held.resume,
+    };
+    const releases = includeResume
+      ? [held.load, held.adopt, held.retry, held.resume]
+      : [held.load, held.adopt, held.retry];
+    for (const release of releases) {
+      if (!release) continue;
+      try {
+        release();
+      } catch {
+        // Player released — nothing to start.
+      }
+    }
+  }, []);
+
   const playVideoGated = useCallback(
     (
       slot: 'load' | 'adopt' | 'retry' | 'resume',
@@ -480,6 +545,11 @@ export function usePlayback(args: {
         kind: forCandidate.kind,
         role: forCandidate.role,
         surfaceReady: surfaceReadyRef.current,
+        // Fix 4: 'readyToPlay' for the current source also
+        // releases a fresh play. The resume slot is exempt — it
+        // exists to wait for the NEW surface after a detach.
+        playerReadyToPlay:
+          slot !== 'resume' && videoStatusRef.current === 'readyToPlay',
       });
       if (decision === 'play') {
         heldPlaysRef.current[slot] = null;
@@ -501,27 +571,22 @@ export function usePlayback(args: {
       if (surfaceReadyPlayerKeyRef.current === surfacePlayerKey) return;
       surfaceReadyPlayerKeyRef.current = surfacePlayerKey;
       setSurfaceReadyPlayerKey(surfacePlayerKey);
-      // Release every remembered play, newest state first: the
-      // callbacks re-check their own load's currency before
-      // touching the player.
-      const held = heldPlaysRef.current;
-      heldPlaysRef.current = {
-        load: null,
-        adopt: null,
-        retry: null,
-        resume: null,
-      };
-      for (const release of [held.load, held.adopt, held.retry, held.resume]) {
-        if (!release) continue;
-        try {
-          release();
-        } catch {
-          // Player released — nothing to start.
-        }
-      }
+      // Release every remembered play, newest state first.
+      releaseHeldPlays(true);
     },
-    [],
+    [releaseHeldPlays],
   );
+
+  // Fix 4, the release side: when the player reaches
+  // 'readyToPlay' for the current source, any load/adopt/retry
+  // play the gate is holding is released even if no first frame
+  // has rendered yet (the source is loaded and playable — the
+  // safety the frame was proxying for). Resume plays are NOT
+  // released here (see releaseHeldPlays).
+  useEffect(() => {
+    if (videoStatus !== 'readyToPlay') return;
+    releaseHeldPlays(false);
+  }, [videoStatus, releaseHeldPlays]);
 
   /* Surface detach discipline (2026-11-11 restructure): a
      surface calls this as it unmounts — a mode switch unmounts
@@ -621,18 +686,42 @@ export function usePlayback(args: {
    * One source failure: hand over to the next chain candidate, or —
    * on the last candidate (or a local file) — surface the error
    * state. A failure is reported through BOTH the load promise's
-   * rejection and the player's status 'error'; failedUrlRef makes
-   * sure each failing source is handled exactly once. (Load
-   * rejections used to be swallowed entirely, which let a failed
-   * watch source sit on a silent black surface — no frames, no
-   * error, no retry.)
+   * rejection and the player's status 'error'; the report is
+   * vetted through failureAttributionDecision (watch fix) —
+   * currency + per-URL attribution + status-channel
+   * subordination — so each failing source is handled exactly
+   * once, against itself only. Callers that know their load pass
+   * `{ url, channel }`; bare calls attribute to the current load
+   * on the 'sync' channel (the watchdog, synchronous throws).
+   * (Load rejections used to be swallowed entirely, which let a
+   * failed watch source sit on a silent black surface — no
+   * frames, no error, no retry.)
    */
-  const handleFailureRef = useRef<(message?: string) => void>(() => {});
-  handleFailureRef.current = (message?: string) => {
-    const failedUrl = loadedUrlRef.current;
-    if (failedUrl !== null) {
-      if (failedUrlRef.current === failedUrl) return;
-      failedUrlRef.current = failedUrl;
+  const handleFailureRef = useRef<
+    (
+      message?: string,
+      attribution?: { url: string | null; channel: FailureChannel },
+    ) => void
+  >(() => {});
+  handleFailureRef.current = (message, attribution) => {
+    const reportUrl = attribution ? attribution.url : loadedUrlRef.current;
+    const channel: FailureChannel = attribution?.channel ?? 'sync';
+    const decision = failureAttributionDecision({
+      channel,
+      reportUrl,
+      currentUrl: loadedUrlRef.current,
+      currentLoadSettled:
+        videoLoadRef.current !== null &&
+        videoLoadRef.current.url === loadedUrlRef.current &&
+        videoLoadRef.current.settled,
+      handledUrls: handledFailureUrlsRef.current,
+    });
+    if (decision === 'ignore') return;
+    if (reportUrl !== null) {
+      handledFailureUrlsRef.current = markFailureHandled(
+        handledFailureUrlsRef.current,
+        reportUrl,
+      );
     }
     // A remembered gate-held play belongs to the source that
     // just failed — never let it fire onto the next candidate.
@@ -655,10 +744,10 @@ export function usePlayback(args: {
     ) {
       // W2: the watch chain is exhausted — degrade to the listen
       // chain (the .ogg first) rather than a dead error. The
-      // failed-URL guard resets so the audio chain's own failures
-      // are handled fresh; the consumer renders the artwork and
-      // the audio-only note off `audioFallback`.
-      failedUrlRef.current = null;
+      // handled-failure set resets so the audio chain's own
+      // failures are handled fresh; the consumer renders the
+      // artwork and the audio-only note off `audioFallback`.
+      handledFailureUrlsRef.current = new Set();
       setCandidateIndex(0);
       setAudioFallback(true);
       return;
@@ -674,24 +763,63 @@ export function usePlayback(args: {
 
   /* ---------------- per-engine load machinery ---------------- */
   // Video: loaded through replaceAsync; its promise rejection and
-  // its statusChange 'error' both feed handleFailure (deduped).
-  // The play that follows the load is SURFACE-GATED (2026-11-11
-  // video fix): a watch candidate's play is held until the bound
-  // surface renders its first frame for this player; the
-  // hidden-video listen candidate plays straight through.
+  // its statusChange 'error' both feed handleFailure (attributed
+  // per URL — see handleFailure). The play that follows the load
+  // is SURFACE-GATED (2026-11-11 video fix): a watch candidate's
+  // play is held until the bound surface renders its first frame
+  // for this player (or the player reports readyToPlay — fix 4);
+  // the hidden-video listen candidate plays straight through.
+  //
+  // SINGLE LOAD (watch fix, fix 1): the load below consults
+  // videoLoadAction against videoLoadRef — the ONE load this
+  // engine has issued into the player. If the inactive preload
+  // already issued a load for this exact URL, activation ADOPTS
+  // it (settled → gated play, no second replaceAsync) or WAITS
+  // for it (in flight → its settle handler, in the preload
+  // effect, performs the gated play / failure). Only a URL with
+  // no issued load is loaded here.
   useEffect(() => {
     if (!active || !candidate || candidate.kind !== 'video') return;
-    if (loadedUrlRef.current === candidate.url) return;
     const url = candidate.url;
     const forCandidate = candidate;
+    const action = videoLoadAction({
+      candidateUrl: url,
+      issuedUrl: videoLoadRef.current?.url ?? null,
+      issuedSettled: videoLoadRef.current?.settled ?? false,
+    });
+    if (action === 'wait') return;
+    if (action === 'adopt') {
+      if (loadedUrlRef.current === url) {
+        // Already adopted once — a re-run must not replay a
+        // source the consumer has since paused.
+        return;
+      }
+      loadedUrlRef.current = url;
+      loadedEngineRef.current = 'video';
+      setPlayerError(null);
+      setEnded(false);
+      setProgress({ current: 0, duration: 0 });
+      playVideoGated(
+        'adopt',
+        () => {
+          if (loadedUrlRef.current === url) videoPlayer.play();
+        },
+        forCandidate,
+      );
+      return;
+    }
+    if (loadedUrlRef.current === url) return;
     loadedUrlRef.current = url;
     loadedEngineRef.current = 'video';
     setPlayerError(null);
     setEnded(false);
     setProgress({ current: 0, duration: 0 });
+    const issued = { url, settled: false };
+    videoLoadRef.current = issued;
     void videoPlayer
       .replaceAsync(url)
       .then(() => {
+        if (videoLoadRef.current === issued) issued.settled = true;
         if (!mountedRef.current) return;
         // A superseded load must not start the source that
         // replaced it — the release re-checks currency.
@@ -704,6 +832,7 @@ export function usePlayback(args: {
         );
       })
       .catch((e: unknown) => {
+        if (videoLoadRef.current === issued) issued.settled = true;
         // A superseded load (a newer source already took over)
         // must not fail the source that replaced it.
         if (!mountedRef.current || loadedUrlRef.current !== url) {
@@ -711,6 +840,7 @@ export function usePlayback(args: {
         }
         handleFailureRef.current(
           e instanceof Error ? e.message : undefined,
+          { url, channel: 'promise' },
         );
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -761,6 +891,12 @@ export function usePlayback(args: {
     }
     loadedUrlRef.current = target;
     loadedEngineRef.current = 'audio';
+    // An audio takeover retires the video load record: if the
+    // chain later returns to a video candidate (the hidden-video
+    // last resort is often the SAME URL that failed as a watch
+    // candidate), it must load FRESH, not "adopt" a load that
+    // already failed once.
+    videoLoadRef.current = null;
     setPlayerError(null);
     setEnded(false);
     setProgress({ current: 0, duration: 0 });
@@ -805,7 +941,8 @@ export function usePlayback(args: {
     }
     loadedUrlRef.current = null;
     loadedEngineRef.current = null;
-    failedUrlRef.current = null;
+    videoLoadRef.current = null;
+    handledFailureUrlsRef.current = new Set();
     setAudioFallback(false);
     setPlayerError(null);
     setEnded(false);
@@ -818,7 +955,17 @@ export function usePlayback(args: {
     // Chain: a failed candidate hands over to the next one instead
     // of dying — only the LAST candidate's failure surfaces as the
     // error state. One failure, one handling (see handleFailure).
-    handleFailureRef.current(error?.message);
+    // CURRENCY (watch fix, fix 2): this channel cannot name its
+    // source, so the report is attributed to the CURRENT load and
+    // vetted by failureAttributionDecision — while that load is
+    // still in flight its promise channel owns the failure, and
+    // a stale duplicate of the PREVIOUS candidate's error (the
+    // 1.0.2 chain-killer) is ignored instead of failing the
+    // candidate that replaced it.
+    handleFailureRef.current(error?.message, {
+      url: loadedUrlRef.current,
+      channel: 'status',
+    });
   });
 
   useEventListener(videoPlayer, 'timeUpdate', ({ currentTime }) => {
@@ -879,15 +1026,48 @@ export function usePlayback(args: {
     [kind, videoPlayer],
   );
 
-  /* ---------------- stall watchdog ---------------- */
-  // A source stuck in `loading` advances the chain through the
-  // failure path. The arm moment is the load's start (the detail /
-  // player surfaces have no intentional hold; the countdown-hold
-  // guard lives in the QUIZ engine, whose playAtMs arms it).
-  const loadStartedAtRef = useRef(0);
+  /* ---------------- stall watchdog (rebuilt, watch fix) ------- */
+  // Owner rules (2026-11-11): the clock measures ONE CONTINUOUS
+  // no-progress stall — it starts when a buffering episode BEGINS
+  // (the buffering rising edge), and any progress (leaving
+  // 'loading', an advancing tick, a known duration, playing)
+  // restarts it. A source that has STARTED is never killed for
+  // buffering at all; a never-started source gets the kind grace
+  // (audio 30s / video 60s) of continuous silence before the
+  // chain advances through the failure path. (The QUIZ engine
+  // keeps its own watchdog — mediaEngine.watchdogShouldTrip.)
+  const stallSinceRef = useRef<number | null>(null);
+  const startedUrlRef = useRef<string | null>(null);
+  // Started = genuinely under way for THIS source: playing, or
+  // position past 0, or (video) frames on screen.
   useEffect(() => {
-    loadStartedAtRef.current = Date.now();
-  }, [url, active]);
+    if (!url) return;
+    if (
+      isPlaying ||
+      progress.current > 0 ||
+      (kind === 'video' && framesRendered)
+    ) {
+      startedUrlRef.current = url;
+    }
+  }, [url, isPlaying, progress.current, kind, framesRendered]);
+  // The stall episode: stamped on the buffering rising edge,
+  // cleared the moment buffering ends.
+  useEffect(() => {
+    if (buffering) {
+      if (stallSinceRef.current === null) {
+        stallSinceRef.current = Date.now();
+      }
+    } else {
+      stallSinceRef.current = null;
+    }
+  }, [buffering]);
+  // A newly-known duration mid-stall is progress too: restart
+  // the episode clock (the stall continues, its silence doesn't).
+  useEffect(() => {
+    if (progress.duration > 0 && stallSinceRef.current !== null) {
+      stallSinceRef.current = Date.now();
+    }
+  }, [progress.duration]);
   const watchdogArmed = watchdogPollActive({
     active,
     hasSource: url !== null,
@@ -897,10 +1077,11 @@ export function usePlayback(args: {
     if (!watchdogArmed) return;
     const id = setInterval(() => {
       if (
-        watchdogShouldTrip({
+        stallShouldTrip({
           now: Date.now(),
-          loadingSince: buffering ? loadStartedAtRef.current : null,
-          armedFrom: loadStartedAtRef.current,
+          kind,
+          stallSince: stallSinceRef.current,
+          hasStarted: url !== null && startedUrlRef.current === url,
           hasSource: true,
           failed: false,
           disabled: false,
@@ -910,7 +1091,7 @@ export function usePlayback(args: {
       }
     }, WATCHDOG_POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [watchdogArmed, buffering, url]);
+  }, [watchdogArmed, kind, url]);
 
   /* ---------------- mode-matched preload (inactive) ---------------- */
   // While the claim is INACTIVE, preload the claim mode's media:
@@ -937,23 +1118,78 @@ export function usePlayback(args: {
       return;
     }
     if (preloadedVideoUrlRef.current === preloadCandidateUrl) return;
+    // SINGLE LOAD (watch fix, fix 1): this preload load is THE
+    // load for its URL — it is recorded in videoLoadRef as it is
+    // issued, so a later activation ADOPTS it (videoLoadAction)
+    // instead of issuing a second replaceAsync of the same URL.
+    if (
+      videoLoadAction({
+        candidateUrl: preloadCandidateUrl,
+        issuedUrl: videoLoadRef.current?.url ?? null,
+        issuedSettled: videoLoadRef.current?.settled ?? false,
+      }) !== 'issue'
+    ) {
+      preloadedVideoUrlRef.current = preloadCandidateUrl;
+      return;
+    }
     preloadedVideoUrlRef.current = preloadCandidateUrl;
+    const issued = { url: preloadCandidateUrl, settled: false };
+    videoLoadRef.current = issued;
     void videoPlayer
       .replaceAsync(preloadCandidateUrl)
       .then(() => {
-        // Preload only — NEVER autoplay an inactive claim.
-        try {
-          videoPlayer.pause();
-        } catch {
-          // Released — nothing to hold.
+        if (videoLoadRef.current === issued) issued.settled = true;
+        if (!mountedRef.current) return;
+        if (!activeRef.current) {
+          // Preload only — NEVER autoplay an inactive claim.
+          try {
+            videoPlayer.pause();
+          } catch {
+            // Released — nothing to hold.
+          }
+          return;
         }
+        // The claim activated while this preload was in flight
+        // and the activation's load effect deferred to this load
+        // (videoLoadAction 'wait'): its settle performs the
+        // adoption — mark the source loaded and play, gated.
+        if (preloadedVideoUrlRef.current !== preloadCandidateUrl) return;
+        const forCandidate = candidateRef.current;
+        if (!forCandidate || forCandidate.url !== preloadCandidateUrl) return;
+        preloadedVideoUrlRef.current = null;
+        loadedUrlRef.current = preloadCandidateUrl;
+        loadedEngineRef.current = 'video';
+        setPlayerError(null);
+        setEnded(false);
+        playVideoGated(
+          'adopt',
+          () => {
+            if (loadedUrlRef.current === preloadCandidateUrl) {
+              videoPlayer.play();
+            }
+          },
+          forCandidate,
+        );
       })
-      .catch(() => {
-        // A failed preload is silent: the tap re-runs the normal
-        // load path and surfaces any real error there.
+      .catch((e: unknown) => {
+        if (videoLoadRef.current === issued) videoLoadRef.current = null;
         if (preloadedVideoUrlRef.current === preloadCandidateUrl) {
           preloadedVideoUrlRef.current = null;
         }
+        // A failed preload while INACTIVE stays silent: the tap
+        // re-runs the normal load path and surfaces any real
+        // error there. If the claim already activated over this
+        // load (the 'wait' case), the failure is the current
+        // candidate's own — report it, attributed to its URL.
+        if (!mountedRef.current || !activeRef.current) return;
+        if (candidateRef.current?.url !== preloadCandidateUrl) return;
+        if (loadedUrlRef.current !== null && loadedUrlRef.current !== preloadCandidateUrl) return;
+        loadedUrlRef.current = preloadCandidateUrl;
+        loadedEngineRef.current = 'video';
+        handleFailureRef.current(
+          e instanceof Error ? e.message : undefined,
+          { url: preloadCandidateUrl, channel: 'promise' },
+        );
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, preloadKey, preloadCandidateUrl]);
@@ -974,36 +1210,13 @@ export function usePlayback(args: {
     };
   }, []);
 
-  // Watch activation over a preloaded video: the video load effect
-  // above sees the URL already loaded (loadedUrlRef is only set
-  // there) — this effect is what makes the activation cheap: when
-  // the claim turns active with exactly the preloaded URL, mark it
-  // loaded and just play.
-  useEffect(() => {
-    if (!active || !candidate || candidate.kind !== 'video') return;
-    if (preloadedVideoUrlRef.current !== candidate.url) return;
-    if (loadedUrlRef.current === candidate.url) return;
-    const url = candidate.url;
-    const forCandidate = candidate;
-    loadedUrlRef.current = url;
-    loadedEngineRef.current = 'video';
-    preloadedVideoUrlRef.current = null;
-    setPlayerError(null);
-    setEnded(false);
-    // The adoption play is surface-gated like any watch play
-    // (2026-11-11 video fix): the preload loaded into the player
-    // while its surface situation was unsettled — exactly the
-    // surfaceless start this gate exists to prevent. The
-    // hidden-video listen candidate plays straight through.
-    playVideoGated(
-      'adopt',
-      () => {
-        if (loadedUrlRef.current === url) videoPlayer.play();
-      },
-      forCandidate,
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, candidate, videoPlayer]);
+  // Watch activation over a preloaded video needs NO separate
+  // effect any more (watch fix, fix 1): the video load effect
+  // adopts the recorded preload load via videoLoadAction, and a
+  // preload that settles after activation performs the adoption
+  // play from its own settle handler in the preload effect. (The
+  // former adoption effect here always lost its race with the
+  // load effect's second replaceAsync — diagnosis §1.3.)
 
   /* ---------------- problem 3: next-track preload ---------------- */
   // Once the current track is stably playing (isPlaying AND not
@@ -1193,7 +1406,7 @@ export function usePlayback(args: {
     // from its first candidate (the state change reloads it).
     if (audioFallback) {
       setPlayerError(null);
-      failedUrlRef.current = null;
+      handledFailureUrlsRef.current = new Set();
       setCandidateIndex(0);
       setAudioFallback(false);
       return;
@@ -1203,15 +1416,18 @@ export function usePlayback(args: {
     // first candidate is already the one showing.
     if (!localUsable && candidates.length > 0 && candidateIndex !== 0) {
       setPlayerError(null);
-      failedUrlRef.current = null;
+      handledFailureUrlsRef.current = new Set();
       setCandidateIndex(0);
       return;
     }
     if (!url) return;
     setPlayerError(null);
-    failedUrlRef.current = null;
+    handledFailureUrlsRef.current = new Set();
     loadedUrlRef.current = null;
     loadedEngineRef.current = null;
+    videoLoadRef.current = null;
+    startedUrlRef.current = null;
+    stallSinceRef.current = null;
     if (candidate && candidate.kind === 'audio') {
       const audio = audioPlayerRef.current;
       loadedUrlRef.current = url;
@@ -1228,9 +1444,12 @@ export function usePlayback(args: {
     }
     loadedUrlRef.current = url;
     const retryCandidate = candidate;
+    const issued = { url, settled: false };
+    videoLoadRef.current = issued;
     void videoPlayer
       .replaceAsync(url)
       .then(() => {
+        if (videoLoadRef.current === issued) issued.settled = true;
         if (!mountedRef.current) return;
         // The retry play is surface-gated like any watch play.
         if (retryCandidate) {
@@ -1246,9 +1465,11 @@ export function usePlayback(args: {
         }
       })
       .catch((e: unknown) => {
-        if (!mountedRef.current) return;
+        if (videoLoadRef.current === issued) issued.settled = true;
+        if (!mountedRef.current || loadedUrlRef.current !== url) return;
         handleFailureRef.current(
           e instanceof Error ? e.message : undefined,
+          { url, channel: 'promise' },
         );
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
