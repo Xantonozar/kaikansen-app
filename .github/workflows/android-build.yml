@@ -66,5 +66,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view apk-latest >/dev/null 2>&1 || gh release create apk-latest --prerelease --title "Kaikansen Android — latest Actions build" --notes "Rolling APK built by GitHub Actions (eas build --local, preview profile). Signed with the EAS keystore; installs over the EAS builds."
-          gh release upload apk-latest kaikansen.apk --clobber
+          gh release view apk-beta >/dev/null 2>&1 || gh release create apk-beta --prerelease --title "Kaikansen Android — latest Actions build" --notes "Rolling APK built by GitHub Actions (eas build --local, preview profile). Signed with the EAS keystore; installs over the EAS builds."
+          gh release upload apk-beta kaikansen.apk --clobber
