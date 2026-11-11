@@ -20,13 +20,16 @@ import {
   quantizeProgress,
   QUIZ_QUESTION_STALL_BUDGET_MS,
   createQuizStallTracker,
+  quizAudioPhase,
   quizFailedShouldClear,
   quizProgressSignature,
   quizQuestionStallShouldTrip,
   quizSampleStarted,
   quizStallObserve,
+  quizVideoStatusAfterLoadIssued,
   type QuizProgressSample,
   type QuizStallTracker,
+  type QuizVideoStatus,
   soloClockStartsOnPhase,
   soloLoadSafetyMs,
   queuePreloadKey,
@@ -1024,6 +1027,235 @@ describe('solo clock rules (v2 — the clock obeys the song)', () => {
         now,
       });
     }
+  });
+});
+
+describe('video-leg status discipline (clock-stall fix, 2026-11-12)', () => {
+  /** The phase QuizAudioOnly reports for a video candidate in
+      the given status state (unfailed, has a URL, no hold) —
+      the value the solo clock effect consumes. */
+  const phaseOf = (status: QuizVideoStatus) =>
+    quizAudioPhase({
+      failed: false,
+      hasUrl: true,
+      holdPending: false,
+      status,
+    });
+
+  it('field regression — consecutive video-carried questions: the issuance stamp re-creates the edge the second question publishes no loading event for', () => {
+    // Q_N (video-carried) ends playing: the shared player sits
+    // at 'readyToPlay'. WITHOUT the stamp, Q_{N+1}'s phase would
+    // read 'playing' before, during and after its load — no
+    // value change, no report, no clock (the field bug).
+    expect(phaseOf('readyToPlay')).toBe('playing');
+
+    // Q_{N+1} (video-carried) issues its load: the hook stamps
+    // the status synchronously, so the phase dips to
+    // 'buffering' — a value that must NOT start the clock…
+    const phases: string[] = ['playing'];
+    const stamped = quizVideoStatusAfterLoadIssued();
+    phases.push(phaseOf(stamped));
+    expect(soloClockStartsOnPhase(phaseOf(stamped))).toBe(false);
+
+    // …and when the new source's genuine readyToPlay event
+    // lands (the player published NO intervening 'loading'
+    // event — the stamp WAS the interlude), the phase edges
+    // back to 'playing' and the clock starts, exactly once.
+    phases.push(phaseOf('readyToPlay'));
+    expect(phases).toEqual(['playing', 'buffering', 'playing']);
+    expect(soloClockStartsOnPhase(phaseOf('readyToPlay'))).toBe(true);
+  });
+
+  it('fallback-seat inheritance: a chain advance onto an already-readyToPlay video seat is stamped too', () => {
+    // The chain sits down on a video seat the player already
+    // holds at 'readyToPlay' (left warm by an earlier question
+    // or an earlier seat). The seat's own load issuance stamps
+    // it like any other: buffering first, then the genuine
+    // event re-edges to playing — the clock cannot hang on the
+    // inherited status.
+    let status: QuizVideoStatus = 'readyToPlay';
+    expect(phaseOf(status)).toBe('playing'); // inherited — the hazard
+    status = quizVideoStatusAfterLoadIssued();
+    expect(phaseOf(status)).toBe('buffering');
+    status = 'readyToPlay'; // the seat's genuine event
+    expect(phaseOf(status)).toBe('playing');
+  });
+
+  it('per-ending invariance: correct / wrong / skip / timeout produce identical next-question start sequences', () => {
+    // solo.tsx funnels all four endings through the same
+    // submit → feedback → advance → startQuestion path, and the
+    // stamp machinery takes no ending input at all — so the
+    // next video-carried question's phase sequence off the
+    // stamp + genuine event is byte-identical for every ending.
+    const sequenceFor = (_ending: string) => {
+      const seq: string[] = [];
+      seq.push(phaseOf(quizVideoStatusAfterLoadIssued()));
+      seq.push(phaseOf('readyToPlay'));
+      return seq;
+    };
+    const endings = ['correct', 'wrong', 'skip', 'timeout'] as const;
+    const sequences = endings.map(sequenceFor);
+    for (const seq of sequences) {
+      expect(seq).toEqual(['buffering', 'playing']);
+      expect(seq).toEqual(sequences[0]);
+    }
+  });
+
+  it('no early start: the stamp alone can never start the clock, at mount or mid-question', () => {
+    // Fresh mount (Q1): the player starts 'idle' — buffering,
+    // so Q1's first start is a genuine edge, never inherited.
+    expect(phaseOf('idle')).toBe('buffering');
+    // Post-issuance, pre-event: any number of re-reads of the
+    // stamped status stay 'buffering' — only a genuine
+    // readyToPlay event (or the verdict) may start the clock.
+    const stamped = quizVideoStatusAfterLoadIssued();
+    for (let i = 0; i < 5; i++) {
+      expect(phaseOf(stamped)).toBe('buffering');
+      expect(soloClockStartsOnPhase(phaseOf(stamped))).toBe(false);
+    }
+    // The verdict routes are untouched by the stamp: failed
+    // and empty still start the clock (the question is
+    // answerable without its song).
+    expect(
+      quizAudioPhase({
+        failed: true,
+        hasUrl: true,
+        holdPending: false,
+        status: stamped,
+      }),
+    ).toBe('failed');
+    expect(
+      quizAudioPhase({
+        failed: false,
+        hasUrl: false,
+        holdPending: false,
+        status: stamped,
+      }),
+    ).toBe('empty');
+  });
+
+  it('sighting 2 — phantom playing is foreclosed: with no post-issuance event, playing is unreachable', () => {
+    // Pre-fix shape: a question whose new (dead) source never
+    // plays could still report 'playing' off the predecessor's
+    // stale readyToPlay — timer running over silence, no
+    // warning. Under the stamp, the status after issuance is
+    // 'loading' and ONLY a genuine statusChange event can move
+    // it: a source that publishes nothing leaves the phase at
+    // 'buffering' at every read, forever — the question
+    // resolves through the stall verdict instead (next test).
+    let status: QuizVideoStatus = 'readyToPlay'; // predecessor's leftover
+    status = quizVideoStatusAfterLoadIssued();
+    for (let read = 0; read < 10; read++) {
+      expect(phaseOf(status)).toBe('buffering');
+      expect(soloClockStartsOnPhase(phaseOf(status))).toBe(false);
+    }
+  });
+
+  /** One solo watchdog poll for a video candidate, built the
+      way the hook builds it: the tracker's observation from a
+      progress sample, and the trip decision with `loading`
+      read off the (stamped) status ref. */
+  function pollVideo(
+    tracker: QuizStallTracker,
+    input: {
+      status: QuizVideoStatus;
+      sample: QuizProgressSample;
+      now: number;
+    },
+  ): { tracker: QuizStallTracker; tripped: boolean } {
+    const next = quizStallObserve(tracker, {
+      mediaKey: 'game:7',
+      candidateKey: 'game:7:video',
+      signature: quizProgressSignature(input.sample),
+      started: quizSampleStarted(input.sample),
+      now: input.now,
+    });
+    return {
+      tracker: next,
+      tripped: quizQuestionStallShouldTrip({
+        now: input.now,
+        loading: input.status === 'loading',
+        lastProgressAt: next.lastProgressAt,
+        hasStarted: next.started,
+        hasSource: true,
+        failed: false,
+        disabled: false,
+      }),
+    };
+  }
+
+  it('verdict integrity: a stamped load that never progresses still trips at exactly the 10s budget', () => {
+    const frozen: QuizProgressSample = {
+      duration: 0,
+      currentTime: 0,
+      bufferedPosition: 0,
+      playing: false,
+    };
+    let r = pollVideo(createQuizStallTracker(), {
+      status: quizVideoStatusAfterLoadIssued(),
+      sample: frozen,
+      now: 0,
+    });
+    expect(r.tripped).toBe(false);
+    r = pollVideo(r.tracker, {
+      status: 'loading',
+      sample: frozen,
+      now: QUIZ_QUESTION_STALL_BUDGET_MS - 1,
+    });
+    expect(r.tripped).toBe(false);
+    r = pollVideo(r.tracker, {
+      status: 'loading',
+      sample: frozen,
+      now: QUIZ_QUESTION_STALL_BUDGET_MS,
+    });
+    expect(r.tripped).toBe(true);
+  });
+
+  it('sighting 1: a video candidate whose progress advances is never declared stalled, however long it loads', () => {
+    // The stamped status keeps the watchdog's loading
+    // observation truthful; the candidate's buffer grows at
+    // every poll for 12s — past the whole 10s budget — and no
+    // poll may trip: progress re-stamps the silence clock.
+    let tracker = createQuizStallTracker();
+    for (let now = 0; now <= 12_000; now += 500) {
+      const r = pollVideo(tracker, {
+        status: quizVideoStatusAfterLoadIssued(),
+        sample: {
+          duration: 90,
+          currentTime: 0,
+          bufferedPosition: now / 1000,
+          playing: false,
+        },
+        now,
+      });
+      tracker = r.tracker;
+      expect(r.tripped).toBe(false);
+    }
+  });
+
+  it('sighting 1: a video candidate whose status advances to readyToPlay latches started and is immune thereafter', () => {
+    let r = pollVideo(createQuizStallTracker(), {
+      status: quizVideoStatusAfterLoadIssued(),
+      sample: { duration: 0, currentTime: 0, bufferedPosition: 0, playing: false },
+      now: 0,
+    });
+    expect(r.tripped).toBe(false);
+    // The status event lands: the clip starts (playing), and
+    // from then on even a frozen signature cannot trip — a
+    // started candidate is never killed for buffering.
+    r = pollVideo(r.tracker, {
+      status: 'readyToPlay',
+      sample: { duration: 90, currentTime: 0.2, bufferedPosition: 5, playing: true },
+      now: 3_000,
+    });
+    expect(r.tracker.started).toBe(true);
+    expect(r.tripped).toBe(false);
+    r = pollVideo(r.tracker, {
+      status: 'readyToPlay',
+      sample: { duration: 90, currentTime: 0.2, bufferedPosition: 5, playing: true },
+      now: 30_000,
+    });
+    expect(r.tripped).toBe(false);
   });
 });
 

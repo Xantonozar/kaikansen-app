@@ -3,12 +3,13 @@ import {
   ActivityIndicator,
   Pressable,
   StyleSheet,
+  Text,
   View,
 } from 'react-native';
 import { VideoView } from 'expo-video';
 import { Pause, Play, RotateCcw } from 'lucide-react-native';
 import type { PlaybackSlow } from '../usePlayback';
-import { radii, spacing, type Theme } from '../theme';
+import { radii, spacing, typeStyles, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
 import { AppImage } from './AppImage';
 import { DetailListenProgress } from './DetailProgress';
@@ -29,6 +30,15 @@ import { DetailListenProgress } from './DetailProgress';
  * the design's lavender card holding the centred square artwork
  * with the play/pause disc hanging off its bottom-right corner,
  * then the progress half (waveform + time row).
+ *
+ * BUFFER PACKAGE (2026-11-11 evening): while the claim waits
+ * on its prepare download (the whole .ogg fetched resumably
+ * into the cache instead of streamed — see src/detailAudio.ts),
+ * the hero shows the transfer's HONEST byte-% under the artwork
+ * (from the engine slow channel's prepareProgress) instead of a
+ * bare spinner lying about "buffering". The caption exists only
+ * while a total is known and the transfer is still fetching;
+ * once the file lands and plays, it is gone.
  *
  * ⚠️ UNTOUCHABLE — THE HIDDEN-VIDEO AUDIO FALLBACK: when the
  * listen chain reaches a VIDEO file as an audio candidate
@@ -70,6 +80,20 @@ export const DetailListenHero = memo(function DetailListenHero({
     () => () => detachRef.current({ resume: true }),
     [],
   );
+
+  /* Buffer package: the prepare download's honest % (see the
+     header) — only while the engine is in its loading state
+     BECAUSE of the wait: transfer still fetching, total known.
+     A null fraction (server gave no total) shows no number at
+     all rather than a fabricated one. */
+  const prepare = playback.prepareProgress;
+  const prepareLabel =
+    playback.buffering &&
+    prepare !== null &&
+    prepare.status === 'fetching' &&
+    prepare.fraction !== null
+      ? `Downloading audio… ${Math.floor(prepare.fraction * 100)}%`
+      : null;
 
   return (
     <View style={styles.listenCard}>
@@ -116,6 +140,9 @@ export const DetailListenHero = memo(function DetailListenHero({
           )}
         </Pressable>
       </View>
+      {prepareLabel !== null ? (
+        <Text style={styles.prepareLabel}>{prepareLabel}</Text>
+      ) : null}
       <DetailListenProgress
         waveHeights={waveHeights}
         seekToRatio={playback.seekToRatio}
@@ -181,5 +208,11 @@ const createStyles = (theme: Theme) =>
     },
     pressed: {
       opacity: 0.85,
+    },
+    prepareLabel: {
+      ...typeStyles.caption,
+      color: theme.secondary,
+      textAlign: 'center',
+      marginTop: spacing.md,
     },
   });

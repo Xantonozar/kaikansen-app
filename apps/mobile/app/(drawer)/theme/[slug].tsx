@@ -515,8 +515,9 @@ export default function ThemeDetailScreen() {
      detail lands and NO live session is playing another slug,
      claim the session INACTIVE in the open mode — the provider
      turns that into the mode-matched preload (Listen: the whole
-     .ogg through expo-audio; Watch: the video through
-     expo-video), with no autoplay. The Watch/Listen tap then
+     .ogg as a resumable download into the prepare cache —
+     buffer package, src/detailAudio.ts; Watch: the video
+     through expo-video), with no autoplay. The Watch/Listen tap then
      activates through startPlayback above and adopts the
      preload. Leaving for another slug ends the session as
      before (the detail effect's endSession), which drops the

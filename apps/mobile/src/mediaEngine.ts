@@ -724,6 +724,78 @@ export function soloLoadSafetyMs(limitSeconds: number): number {
 }
 
 /* ------------------------------------------------------------------ */
+/* Video-leg status discipline (clock-stall fix, 2026-11-12)           */
+/*                                                                     */
+/* Field bug (diagnosis QUIZ-CLOCK-STALL-DIAGNOSIS-2026-11-12): on     */
+/* the video leg the solo clock never started while the song           */
+/* audibly played. The audio leg cannot do this — every load builds    */
+/* a fresh player and stamps the status ref synchronously, so a        */
+/* 'loading' interlude always precedes the 'playing' edge the          */
+/* clock's edge-triggered phase report consumes. The video player,     */
+/* by contrast, is created ONCE for the hook's life and its status     */
+/* is purely event-fed: nothing reset it when a new question's load    */
+/* was issued, so a predecessor's 'readyToPlay' could sit across       */
+/* the switch — phase 'playing' before, during and after — and no      */
+/* edge ever fired.                                                    */
+/*                                                                     */
+/* The fix mirrors the audio bridge for video: the hook keeps the      */
+/* video status in a ref fed by a statusChange listener, and STAMPS    */
+/* the ref to 'loading' synchronously at load issuance (the player     */
+/* IS loading at that moment, by construction). The genuine            */
+/* readyToPlay event then always crosses a buffering interlude,        */
+/* so the report edge — and with it the clock AND the server's         */
+/* playback-start signal, one shared consumer — always fires. The      */
+/* stamp never invents a start: it writes only 'loading', so the       */
+/* clock still starts solely on a genuine readyToPlay (or the          */
+/* failed/empty verdict), and a load that never reports still          */
+/* reaches the unchanged 10s stall verdict / 20s safety. The           */
+/* machinery below takes no input about how the previous question      */
+/* ended — correct, wrong, skip and timeout funnel through the         */
+/* same issuance stamp — so its behaviour cannot vary by ending.       */
+/* The watchdog's video `loading` observation reads the same ref,      */
+/* so its progress judgement is made against the stamped truth         */
+/* rather than a leftover status from the previous question.           */
+/* ------------------------------------------------------------------ */
+
+/** The quiz hook's video status vocabulary — expo-video's
+    VideoPlayerStatus, restated so the pure layer needs no
+    native import. */
+export type QuizVideoStatus = 'idle' | 'loading' | 'readyToPlay' | 'error';
+
+/** The status of a video player the instant a new load is
+    issued for it: loading, by construction — whatever the
+    previous question left behind. The hook stamps its status
+    ref with this synchronously in the load path, before the
+    native player can publish anything about the new source. */
+export function quizVideoStatusAfterLoadIssued(): QuizVideoStatus {
+  return 'loading';
+}
+
+/** The solo audio phase QuizAudioOnly reports, from the hook's
+    derived status — the screen's clock effect starts the clock
+    on every phase but 'buffering' (soloClockStartsOnPhase):
+    'failed' / 'empty' are the verdict, 'playing' a genuine
+    start, and a held (countdown) or still-loading/idle source
+    is 'buffering' — the wait is never the player's time. */
+export function quizAudioPhase(input: {
+  failed: boolean;
+  hasUrl: boolean;
+  holdPending: boolean;
+  status: QuizVideoStatus;
+}): 'buffering' | 'playing' | 'failed' | 'empty' {
+  if (input.failed) return 'failed';
+  if (!input.hasUrl) return 'empty';
+  if (
+    input.holdPending ||
+    input.status === 'loading' ||
+    input.status === 'idle'
+  ) {
+    return 'buffering';
+  }
+  return 'playing';
+}
+
+/* ------------------------------------------------------------------ */
 /* Progress/state reference stability (problem 8)                      */
 /* ------------------------------------------------------------------ */
 
