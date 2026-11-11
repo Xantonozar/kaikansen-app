@@ -6,7 +6,7 @@ name: Android APK (EAS local build)
 # secret — so the APK is signed with the same keystore as the EAS
 # cloud builds (SHA-256 98:95:A6:28:...:66:8A) and installs over
 # them with no uninstall. The APK is saved as a run artifact and
-# attached to the rolling `apk-latest` prerelease for a direct
+# attached to the rolling `apk-beta` prerelease for a direct
 # download link.
 
 on:
@@ -35,6 +35,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Run #16 died of runner "Disk quota exceeded" mid-Gradle, so
+      # free space BEFORE anything is installed. This step must stay
+      # above the installs: an earlier version of it ran after
+      # "Install EAS CLI" and deleted $AGENT_TOOLSDIRECTORY, which is
+      # where npm's global eas-cli lives — the build then died with
+      # "eas: command not found" (runs #20/#21). The tool cache is
+      # never deleted; only unrelated preinstalled weight goes.
+      - name: Free disk space for the build
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          docker system prune -af || true
+          df -h
+
       - name: Install dependencies
         run: npm ci
 
@@ -49,20 +65,12 @@ jobs:
       - name: Install EAS CLI
         run: npm install --global eas-cli
 
-      - name: Free disk space for the build
-        run: |
-          df -h        
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          docker system prune -af || true
-          df -h
-
       - name: Build APK (preview profile, local)
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          # EAS builds under /tmp by default; /tmp is quota'd on the
+          # runner (run #16), so point it at the workspace disk.
           TMPDIR: ${{ github.workspace }}/.eas-tmp
         run: |
           mkdir -p "$TMPDIR"
