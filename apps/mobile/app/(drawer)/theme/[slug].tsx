@@ -64,7 +64,10 @@ import { AddToPlaylistSheet } from '../../../src/components/AddToPlaylistSheet';
 import { DetailListenHero } from '../../../src/components/DetailListenHero';
 import { DetailWatchHero } from '../../../src/components/DetailWatchHero';
 import { AppImage } from '../../../src/components/AppImage';
-import { detailBackendForMode } from '../../../src/detailPlayer';
+import {
+  detailBackendForMode,
+  resolveShownMode,
+} from '../../../src/detailPlayer';
 import { useAuth } from '../../../src/auth';
 import {
   applyFavoriteState,
@@ -276,15 +279,30 @@ export default function ThemeDetailScreen() {
      the hero then becomes the player (the shared session, see
      src/playback-context.tsx). */
   const [playMode, setPlayMode] = useState<PlaybackMode | null>(null);
+  /* The pre-play toggle flip (2026-11-11 field fix): tapping
+     the NOT-shown arm before play records the flip here, so the
+     shown side moves immediately (previously the flip only
+     retargeted the preload and the toggle looked dead until
+     playback started). Cleared wherever playMode is reset, and
+     when a live session is adopted on focus — the session's
+     mode wins via playMode. */
+  const [flippedMode, setFlippedMode] = useState<PlaybackMode | null>(
+    null,
+  );
   /* Playback plan (2026-11-10): the page OPENS on the saved
      "Open themes as" side (Settings → Playback; default Listen).
      The toggle shows that side selected from the first paint,
      and the engine preloads that mode's media in the background
      (preload only — NO autoplay) so the eventual tap starts
      near-instantly. The toggle's selected side is therefore
-     `playMode ?? openMode` everywhere below. */
+     resolveShownMode (playMode > flippedMode > openMode)
+     everywhere below. */
   const { mode: openMode } = useOpenThemesAs();
-  const shownMode: PlaybackMode = playMode ?? openMode;
+  const shownMode: PlaybackMode = resolveShownMode(
+    playMode,
+    flippedMode,
+    openMode,
+  );
 
   /* Similar themes (Slice S8): 'loading' until the read settles;
      a failed fetch resolves to an empty list (the web's empty
@@ -306,6 +324,7 @@ export default function ThemeDetailScreen() {
     setDetail(null);
     setSelectedEntryIndex(0);
     setPlayMode(null);
+    setFlippedMode(null);
     fetchThemeBySlug(slug)
       .then((data) => {
         if (!live) return;
@@ -545,7 +564,12 @@ export default function ThemeDetailScreen() {
   useFocusEffect(
     useCallback(() => {
       if (session.active && session.slug === slug) {
-        if (playMode === null) setPlayMode(session.mode);
+        if (playMode === null) {
+          setPlayMode(session.mode);
+          /* The adopted session's mode wins — a pre-play flip
+             from before must not resurface over it. */
+          setFlippedMode(null);
+        }
         if (detail && session.entry) {
           const entryId = session.entry.atEntryId;
           const idx = detail.entries.findIndex(
@@ -555,6 +579,7 @@ export default function ThemeDetailScreen() {
         }
       } else if (playMode !== null) {
         setPlayMode(null);
+        setFlippedMode(null);
       }
     }, [
       session.active,
@@ -580,6 +605,10 @@ export default function ThemeDetailScreen() {
       return;
     }
     if (mode !== shownMode && detail && selectedEntry) {
+      /* Record the flip FIRST so the shown side (toggle, FAB,
+         preload key) moves with this same tap — the startSession
+         below retargets the preload, as before. */
+      setFlippedMode(mode);
       startSession(
         {
           slug: detail.slug,

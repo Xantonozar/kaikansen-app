@@ -17,6 +17,7 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEvent, useEventListener } from 'expo';
 import { Music2, Volume2, VolumeX } from 'lucide-react-native';
 import { isPlausibleUrl } from '../playback';
+import { isQuizSliceUri, prefetchQuizSlice } from '../quizPrefetch';
 import {
   adoptPreloadedPlayer,
   createAudioPlayer,
@@ -38,11 +39,19 @@ function audioTickStatus(
 }
 import {
   WATCHDOG_POLL_INTERVAL_MS,
+  createQuizStallTracker,
   firstCandidateIsVideo,
   pickPreloadCandidate,
+  quizFailedShouldClear,
+  quizProgressSignature,
+  quizQuestionStallShouldTrip,
+  quizSampleStarted,
+  quizStallObserve,
   tagCandidates,
   watchdogPollActive,
   watchdogShouldTrip,
+  type QuizProgressSample,
+  type QuizStallTracker,
 } from '../mediaEngine';
 import { radii, spacing, typeStyles, withOpacity, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
@@ -82,20 +91,43 @@ import { useTheme } from '../theme-context';
  * a round whose FIRST candidate is a video file keeps the
  * original expo-video hold exactly as before.
  *
- * Stall watchdog (~4s): a source stuck in `loading` advances the
- * chain exactly like a hard error. On the held (countdown) path
- * the watchdog arms from the intended start moment (playAtMs),
+ * Stall watchdog — two paths, selected by the absence of a hold
+ * moment. The held (countdown) path keeps the original ~4s
+ * watchdog, armed from the intended start moment (playAtMs),
  * never from the preload — time spent intentionally held does
- * not count (mediaEngine.watchdogShouldTrip).
+ * not count (mediaEngine.watchdogShouldTrip). The SOLO path
+ * (2026-11-11 fix v2 — field failures: healthy .oggs executed
+ * at 4s on slow loads; then a dead-silent question outliving
+ * its verdict-less 30s grace) judges CONTINUOUS NO-PROGRESS
+ * against a PER-QUESTION budget instead: a progress value
+ * sampled live from the player (duration / position / buffered)
+ * re-stamps the question's silence clock, a candidate switch
+ * does NOT (the silence accrues across the chain), 10s of
+ * unbroken silence advances the chain / delivers the verdict,
+ * and a progressing or started clip is never killed
+ * (mediaEngine.quizStallObserve / quizQuestionStallShouldTrip).
+ * On both paths a hard error still advances the chain
+ * immediately.
+ *
+ * Resurrection (solo, v2): `failed` is not terminal. Nothing
+ * pauses or unloads the last candidate's player when the
+ * verdict lands — it keeps its play-intent — and the hook keeps
+ * listening: if that player later genuinely starts (the video
+ * fallback finally buffering through; a slow .ogg finally
+ * loading), the latch clears and the question reports
+ * 'playing' again (mediaEngine.quizFailedShouldClear). The
+ * countdown path's verdict stays latched, exactly as before.
  *
  * `nextCandidates` + `nextMediaKey` (solo next-question preload,
- * playback plan): while the current question plays, the NEXT
- * question's first audio candidate preloads into the shared slot
- * under the next mediaKey; when that question starts, its player
- * adopts the preload instead of loading fresh. The current
- * question keeps playing throughout — the slot is a separate
- * player. Discarded automatically when the question changes or
- * the component unmounts.
+ * playback plan; part 6 rework 2026-11-11): while the current
+ * question plays, the NEXT question's first audio candidate is
+ * prefetched as a partial-file SLICE into the prefetch cache
+ * (src/quizPrefetch.ts) under the next mediaKey; when that
+ * question starts, its chain leads with the local slice instead
+ * of loading fresh. (The countdown path keeps the original
+ * shared-slot preload + adoption, unchanged.) The current
+ * question keeps playing throughout — the prefetch is a
+ * background download, not a player.
  */
 function useQuizMediaPlayer(
   candidates: (string | null)[],
@@ -105,7 +137,11 @@ function useQuizMediaPlayer(
   nextMediaKey?: string,
 ) {
   const sources = useMemo(
-    () => candidates.filter(isPlausibleUrl),
+    () =>
+      candidates.filter(
+        (url): url is string =>
+          url !== null && (isPlausibleUrl(url) || isQuizSliceUri(url)),
+      ),
     [candidates],
   );
   const tagged = useMemo(
@@ -137,6 +173,10 @@ function useQuizMediaPlayer(
   const { status: videoStatus } = useEvent(videoPlayer, 'statusChange', {
     status: videoPlayer.status,
   });
+  // Ref mirror so the watchdog poll reads the CURRENT video
+  // status at tick time, not the status at the poll's creation.
+  const videoStatusRef = useRef(videoStatus);
+  videoStatusRef.current = videoStatus;
 
   /* ---- audio engine state ---- */
   // The live audio player for the current candidate: a player
@@ -178,6 +218,23 @@ function useQuizMediaPlayer(
           setAudioTick((t) => t + 1);
           if (status.error) advanceRef.current();
           if (status.isLoaded) releaseHoldRef.current();
+          // Resurrection (solo, v2): a late genuine start of the
+          // candidate the chain sits on clears a 'failed'
+          // verdict — a loaded status IS this hook's 'playing'
+          // signal for audio (releaseHold has just commanded
+          // play), so the question is playing again.
+          if (
+            quizFailedShouldClear({
+              failed: failedRef.current,
+              held: playAtRef.current !== undefined,
+              currentKind: kindRef.current,
+              signalKind: 'audio',
+              started:
+                status.isLoaded || status.playing || status.currentTime > 0,
+            })
+          ) {
+            setFailed(false);
+          }
         },
       );
     } catch {
@@ -231,6 +288,15 @@ function useQuizMediaPlayer(
   };
   const kindRef = useRef(kind);
   kindRef.current = kind;
+  /* Ref mirrors the stall poll and the resurrection listeners
+     read at event time: which candidate the chain sits on
+     (mediaKey + url), and whether the verdict has latched. */
+  const urlRef = useRef(url);
+  urlRef.current = url;
+  const mediaKeyRef = useRef(mediaKey);
+  mediaKeyRef.current = mediaKey;
+  const failedRef = useRef(failed);
+  failedRef.current = failed;
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -252,14 +318,21 @@ function useQuizMediaPlayer(
       holdTimerRef.current = null;
     }
     loadStartedAtRef.current = Date.now();
+    // The solo stall tracker is NOT reset here (v2): it belongs
+    // to the QUESTION — its resets / re-baselines happen inside
+    // the poll's observations, keyed by mediaKey + candidate,
+    // so a candidate switch inside a question cannot restart
+    // the silence clock.
 
     if (current.kind === 'audio') {
       ensureAudioMode();
       // Release the previous candidate's audio player.
       releaseAudioOwned();
-      // Adopt a preload made for THIS mediaKey (the solo
-      // next-question preload, or the countdown slot preload) —
-      // its bytes move with the player.
+      // Adopt a preload made for THIS mediaKey (the countdown
+      // slot preload) — its bytes move with the player. Solo no
+      // longer fills the slot (part 6 prefetches a file slice
+      // instead, which leads the candidate chain), so for solo
+      // this simply misses and the player loads the chain head.
       let player = adoptPreloadedPlayer(mediaKey, url);
       const adopted = player !== null;
       if (!player) {
@@ -321,8 +394,27 @@ function useQuizMediaPlayer(
     }
   };
 
-  /* ---- video error → chain advance ---- */
+  /* ---- video error → chain advance; late ready → resurrection ---- */
   useEventListener(videoPlayer, 'statusChange', ({ status: next }) => {
+    if (next === 'readyToPlay') {
+      // Resurrection (solo, v2): the candidate the chain sits on
+      // reached readyToPlay AFTER the verdict — its load kept
+      // its play-intent (the pending replace resolves into
+      // releaseHold → play), so the question is playing again;
+      // clear the latch. A no-op in every other state.
+      if (
+        quizFailedShouldClear({
+          failed: failedRef.current,
+          held: playAtRef.current !== undefined,
+          currentKind: kindRef.current,
+          signalKind: 'video',
+          started: true,
+        })
+      ) {
+        setFailed(false);
+      }
+      return;
+    }
     if (next !== 'error') return;
     if (kind !== 'video') return;
     advanceRef.current();
@@ -339,9 +431,55 @@ function useQuizMediaPlayer(
   void audioPlayer;
 
   /* ---- stall watchdog ---- */
-  // Armed from the intended start: with a countdown hold, the
-  // budget starts at playAtMs; without one, at the load moment.
+  // Two paths, selected by the absence of a hold moment:
+  // - countdown (playAtMs set, multiplayer): the original
+  //   watchdog — armed from the intended start, so the budget
+  //   starts at playAtMs, never at the preload. UNCHANGED.
+  // - solo (no playAtMs): the stall decision below.
   const loadStartedAtRef = useRef(0);
+  /* Solo stall tracker (v2): the question-scoped silence memory
+     — the chain's last progress signature / stamp / started
+     latch — advanced ONLY through quizStallObserve in the poll
+     below, so every transition follows the pure budget rules.
+     The countdown path never reads it. */
+  const stallTrackerRef = useRef<QuizStallTracker>(createQuizStallTracker());
+  /** Sample the current candidate's progress VALUE live from its
+      player, with its loading flag: audio reads the status
+      bridge's latest AudioStatus (duration is its progress
+      signal — expo-audio exposes no buffered position, so 0);
+      video reads the player's own duration / position /
+      bufferedPosition. Null only when the video player has been
+      released mid-poll — nothing left to judge. */
+  const sampleQuizProgress = (): {
+    progress: QuizProgressSample;
+    loading: boolean;
+  } | null => {
+    if (kindRef.current === 'audio') {
+      const s = audioStatusRef.current;
+      return {
+        progress: {
+          duration: s?.duration ?? 0,
+          currentTime: s?.currentTime ?? 0,
+          bufferedPosition: 0,
+          playing: s?.playing ?? false,
+        },
+        loading: audioTickStatus(s) === 'loading',
+      };
+    }
+    try {
+      return {
+        progress: {
+          duration: videoPlayer.duration,
+          currentTime: videoPlayer.currentTime,
+          bufferedPosition: videoPlayer.bufferedPosition,
+          playing: videoPlayer.playing,
+        },
+        loading: videoStatusRef.current === 'loading',
+      };
+    } catch {
+      return null;
+    }
+  };
   const watchdogArmed = watchdogPollActive({
     active: url !== null,
     hasSource: url !== null,
@@ -350,6 +488,42 @@ function useQuizMediaPlayer(
   useEffect(() => {
     if (!watchdogArmed) return;
     const id = setInterval(() => {
+      if (playAtRef.current === undefined) {
+        // SOLO path (v2): judge the QUESTION's continuous
+        // no-progress against its 10s budget, fed by the sampled
+        // progress VALUE — never the load's age. The observation
+        // advances the tracker (progress re-stamps the silence
+        // clock; a candidate switch re-baselines the signature
+        // only, so the silence accrues across the chain); the
+        // pure decision then says whether the current candidate
+        // has stalled out.
+        const sample = sampleQuizProgress();
+        if (!sample) return;
+        const now = Date.now();
+        const tracker = quizStallObserve(stallTrackerRef.current, {
+          mediaKey: mediaKeyRef.current,
+          candidateKey: `${mediaKeyRef.current}:${urlRef.current ?? ''}`,
+          signature: quizProgressSignature(sample.progress),
+          started: quizSampleStarted(sample.progress),
+          now,
+        });
+        stallTrackerRef.current = tracker;
+        if (
+          quizQuestionStallShouldTrip({
+            now,
+            loading: sample.loading,
+            lastProgressAt: tracker.lastProgressAt,
+            hasStarted: tracker.started,
+            hasSource: true,
+            failed: false,
+            disabled: false,
+          })
+        ) {
+          advanceRef.current();
+        }
+        return;
+      }
+      // Countdown path: the original watchdog, exactly as before.
       if (
         watchdogShouldTrip({
           now: Date.now(),
@@ -364,6 +538,7 @@ function useQuizMediaPlayer(
       }
     }, WATCHDOG_POLL_INTERVAL_MS);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watchdogArmed, status, url, mediaKey]);
 
   /* ---- solo next-question preload ---- */
@@ -379,8 +554,23 @@ function useQuizMediaPlayer(
   }, [nextCandidates, nextMediaKey]);
   useEffect(() => {
     if (!nextAudioUrl || !nextMediaKey) return;
-    preloadAudio(nextMediaKey, nextAudioUrl);
-  }, [nextAudioUrl, nextMediaKey]);
+    if (playAtMs !== undefined) {
+      // Countdown path (multiplayer): unchanged — the round's
+      // .ogg loads into the shared slot during the countdown and
+      // is adopted at the start moment. (Rooms do not pass
+      // nextCandidates today, so this branch is inert there; it
+      // guards the contract, not a live flow.)
+      preloadAudio(nextMediaKey, nextAudioUrl);
+      return;
+    }
+    // Solo path (part 6, 2026-11-11): prefetch a SLICE of the
+    // next song into the prefetch cache instead of loading the
+    // whole file into the slot — the next question's chain then
+    // leads with the local slice (see quizPrefetch.ts). Both
+    // reveals (part-5 early, feedback) arrive through these same
+    // props; the prefetch dedupes by mediaKey + URL.
+    prefetchQuizSlice(nextMediaKey, nextAudioUrl);
+  }, [nextAudioUrl, nextMediaKey, playAtMs]);
 
   /* ---- mute + teardown ---- */
   const mutedRef = useRef(muted);
@@ -624,11 +814,12 @@ export interface QuizAudioState {
  * a video-first round keeps the expo-video hold. Either way the
  * phase reports 'buffering' until the clip actually starts.
  *
- * Solo passes `nextCandidates`/`nextMediaKey` (playback plan):
- * the next question's .ogg preloads while this one plays, and
- * the next question adopts it — the solo clock still starts at
- * ACTUAL playback (the preloaded clip reports 'playing' the
- * moment it starts, exactly like a fresh load that was fast).
+ * Solo passes `nextCandidates`/`nextMediaKey` (playback plan;
+ * part 6): a slice of the next question's .ogg prefetches while
+ * this one plays, and the next question's chain leads with that
+ * local slice — the solo clock still starts at ACTUAL playback
+ * (the sliced clip reports 'playing' the moment it starts,
+ * exactly like a fresh load that was fast).
  */
 export function QuizAudioOnly({
   candidates,

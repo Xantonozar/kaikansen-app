@@ -5,6 +5,7 @@ import {
   detailSurfaceMount,
   hiddenVideoCandidate,
   mountedDetailBackends,
+  resolveShownMode,
   seekRatioForTap,
   splitPlaybackChannels,
   wavePlayedBars,
@@ -129,6 +130,33 @@ describe('detailBackendForMode / mountedDetailBackends', () => {
       mountedDetailBackends(m),
     );
     expect(sequence).toEqual([['watch'], ['listen'], ['watch']]);
+  });
+});
+
+describe('resolveShownMode — the pre-play toggle flip (2026-11-11 field fix)', () => {
+  it('no flip, nothing playing → the Settings open mode, either side', () => {
+    expect(resolveShownMode(null, null, 'watch')).toBe('watch');
+    expect(resolveShownMode(null, null, 'listen')).toBe('listen');
+  });
+
+  it('flipped before play → the flipped mode shows, both directions', () => {
+    // The field report: Settings = Watch, tap Listen pre-play —
+    // the shown side must move to Listen.
+    expect(resolveShownMode(null, 'listen', 'watch')).toBe('listen');
+    expect(resolveShownMode(null, 'watch', 'listen')).toBe('watch');
+  });
+
+  it('playing → playMode wins over a stale flip', () => {
+    expect(resolveShownMode('watch', 'listen', 'listen')).toBe('watch');
+    expect(resolveShownMode('listen', 'watch', 'watch')).toBe('listen');
+    expect(resolveShownMode('watch', null, 'listen')).toBe('watch');
+  });
+
+  it('flip back to the open side → the open mode again', () => {
+    // Flipping back stores flippedMode === openMode; a cleared
+    // flip (null, e.g. after a slug change) resolves the same.
+    expect(resolveShownMode(null, 'watch', 'watch')).toBe('watch');
+    expect(resolveShownMode(null, 'listen', 'listen')).toBe('listen');
   });
 });
 

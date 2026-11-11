@@ -30,6 +30,12 @@ import {
   type ThemeCacheDocument,
 } from '../themes/theme-cache.schema';
 import { resolveAudioUrl } from '../themes/audio-url';
+import {
+  HttpAudioProbe,
+  UNKNOWN_AUDIO_PROBE,
+  type AudioProbe,
+  type AudioProbeResult,
+} from './audio-probe';
 import { QuizAttempt, type QuizAttemptDocument } from './quiz-attempt.schema';
 import {
   buildSoloOptions,
@@ -51,6 +57,18 @@ const POOL_MIN_THEMES = 10;
 /** Idle solo games are dropped after this long (in-process sessions). */
 const SESSION_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * Verified dealing (total solution part 7, 2026-11-11): the
+ * wall-clock budget for ALL probing inside ONE question draw,
+ * and how many definite-404 candidates a single draw may reject
+ * before it deals the next one unverified. The budget is a hard
+ * cap, not a target: probes pass only their remaining share of
+ * it as their timeout, and once it is spent the draw proceeds
+ * unverified — game flow never hangs on verification.
+ */
+const VERIFY_BUDGET_MS = 1000;
+const VERIFY_MAX_REDRAWS = 3;
+
 const QUIZ_TYPES: QuizGuessType[] = ['anime', 'title', 'artist'];
 
 /** The fields of a theme document the solo quiz reads. */
@@ -67,6 +85,19 @@ type ThemeDoc = ThemeCache &
     entries: { atEntryId: number }[];
   };
 
+/**
+ * One fully drawn question that is not live yet: the theme,
+ * its shuffled options, and the withheld correct value. Held
+ * by the session as the pre-drawn NEXT question (part 5) until
+ * it is committed as current — its measurement stamps are only
+ * taken at commit time, never at draw time.
+ */
+interface DrawnQuestion {
+  theme: ThemeDoc;
+  options: string[];
+  correctValue: string;
+}
+
 interface SoloSession {
   userId: string;
   quizType: QuizGuessType;
@@ -74,6 +105,14 @@ interface SoloSession {
   /** The named pool's $or clauses, resolved once at game creation. */
   poolOr: Record<string, unknown>[] | null;
   usedThemeIds: string[];
+  /**
+   * The pre-drawn next question (part 5): drawn when the live
+   * question's playback-start signal arrives, so its audio can
+   * be revealed — and preloaded — during the current question.
+   * Promoted to `current` by the next answer. Null when not
+   * drawn yet (the answer then draws on the spot, as before).
+   */
+  next: DrawnQuestion | null;
   answeredCount: number;
   correctCount: number;
   streak: number;
@@ -177,6 +216,24 @@ interface SoloModels {
  *    number to forge. No signal → measured from the draw, as
  *    before. The web measures in the browser entirely, so it
  *    has no equivalent either way.
+ * 6. Verified dealing (total solution part 7, 2026-11-11): a
+ *    dealt question's derived .ogg is range-probed before it is
+ *    served; a definite 404 redraws the question from the same
+ *    pool, while any doubt (timeout, network, budget spent)
+ *    keeps the song. The web serves whatever it samples; the
+ *    ~3% of themes whose AnimeThemes audio twin does not exist
+ *    (the derived address 404s) otherwise burn the client's
+ *    first candidate and dump it onto a 40–60 MB video fallback.
+ *    The probe verdicts are cached in memory only (audio-probe
+ *    .ts) — nothing is written to the shared database.
+ * 7. Earlier reveal (total solution part 5, 2026-11-11): the
+ *    next question is pre-drawn at the live question's
+ *    playback-start signal and its audio URL rides the signal's
+ *    response, so the client preloads during the current
+ *    question instead of only the feedback pause. The web has
+ *    no server-held game, hence no equivalent. The pre-drawn
+ *    question is measured from its promotion (the answer), not
+ *    its draw — preload time is never answer time.
  *
  * Models are OPTIONAL like everywhere else in this API: booted
  * without MONGODB_URI, every method answers 503.
@@ -185,6 +242,14 @@ interface SoloModels {
 export class SoloQuizService {
   private readonly sessions = new Map<string, SoloSession>();
   private sessionSeq = 0;
+  /**
+   * The verified-dealing probe (part 7). Optional in DI: the
+   * module registers the real HTTP probe; anywhere the service
+   * is constructed without one (model-less boots, unit tests)
+   * the no-op probe keeps every song, which is exactly the
+   * pre-part-7 behaviour and never touches the network.
+   */
+  private readonly audioProbe: AudioProbe;
 
   constructor(
     @Optional()
@@ -199,7 +264,11 @@ export class SoloQuizService {
     @Optional()
     @InjectModel(WatchHistory.name)
     private readonly watchHistoryModel?: Model<WatchHistoryDocument>,
-  ) {}
+    @Optional()
+    httpAudioProbe?: HttpAudioProbe,
+  ) {
+    this.audioProbe = httpAudioProbe ?? UNKNOWN_AUDIO_PROBE;
+  }
 
   private requireModels(): SoloModels {
     if (
@@ -320,10 +389,10 @@ export class SoloQuizService {
     return theme ?? null;
   }
 
-  private async drawQuestion(
-    models: SoloModels,
-    session: SoloSession,
-  ): Promise<SoloQuestion> {
+  /** The draw's pool filter, rebuilt per sampling attempt so
+      the exclusion set (used + rejected themes) is always the
+      session's current one. */
+  private poolFilter(session: SoloSession): Record<string, unknown> {
     const filter = this.basePoolFilter(session.quizType);
     if (session.source === 'random') {
       filter.isPopular = true;
@@ -333,51 +402,173 @@ export class SoloQuizService {
     if (session.usedThemeIds.length > 0) {
       filter._id = { $nin: session.usedThemeIds };
     }
+    return filter;
+  }
 
-    const correctTheme = await this.sampleOne(models, filter);
-    if (!correctTheme) {
-      throw new NotFoundException('No themes found matching your pool');
+  /**
+   * One verification verdict for a resolved audio URL, bounded
+   * by the draw's remaining budget: once the budget is spent
+   * the answer is 'unknown' (the song is kept) WITHOUT a probe
+   * firing — verification can never make a draw hang. A probe
+   * that misbehaves (throws despite its contract) is doubt too.
+   */
+  private async verifyAudio(
+    audioUrl: string,
+    deadline: number,
+  ): Promise<AudioProbeResult> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return 'unknown';
+    try {
+      return await this.audioProbe.probe(audioUrl, remaining);
+    } catch {
+      return 'unknown';
     }
+  }
 
-    // Distractors: always from the popular pool (the web route).
+  /**
+   * Sample the question's correct theme, with verified dealing
+   * (part 7): resolve the candidate's audio and probe the
+   * derived .ogg BEFORE the question is built. A definite 404
+   * excludes the theme from the rest of this game and redraws
+   * from the same pool; doubt of any kind keeps the song.
+   * Redraws are capped and the whole verification shares one
+   * ~1s budget (verifyAudio), after which the draw deals
+   * unverified — and if a redraw finds the pool drained, the
+   * last rejected candidate is dealt unverified rather than
+   * failing the game (fill, don't fail). A theme whose audio
+   * does not resolve at all has nothing to probe and deals as
+   * before.
+   */
+  private async sampleVerifiedCandidate(
+    models: SoloModels,
+    session: SoloSession,
+  ): Promise<ThemeDoc> {
+    const deadline = Date.now() + VERIFY_BUDGET_MS;
+    let lastRejected: ThemeDoc | null = null;
+    let redraws = 0;
+    for (;;) {
+      const sampled = await this.sampleOne(models, this.poolFilter(session));
+      if (!sampled) {
+        if (lastRejected) return lastRejected;
+        throw new NotFoundException('No themes found matching your pool');
+      }
+      // Excluded from later draws either way: the dealt theme
+      // is this question; a rejected phantom must never be
+      // re-dealt within the game.
+      session.usedThemeIds.push(String(sampled._id));
+      const audioUrl = resolveAudioUrl(sampled.audioUrl, sampled.videoUrl);
+      const verdict = audioUrl
+        ? await this.verifyAudio(audioUrl, deadline)
+        : 'ok';
+      if (verdict === 'missing' && redraws < VERIFY_MAX_REDRAWS) {
+        redraws += 1;
+        lastRejected = sampled;
+        continue;
+      }
+      return sampled;
+    }
+  }
+
+  /** Build a drawn question around a sampled theme: the
+      distractors (always from the popular pool — the web route)
+      and the withheld answer. No session state changes here. */
+  private async buildDrawn(
+    models: SoloModels,
+    session: SoloSession,
+    correctTheme: ThemeDoc,
+  ): Promise<DrawnQuestion> {
     const distractors = (await models.themes
       .aggregate([
         { $match: distractorFilterFor(correctTheme, session.quizType) },
         { $sample: { size: 3 } },
       ])
       .exec()) as ThemeDoc[];
-
-    const options = buildSoloOptions(correctTheme, session.quizType, distractors);
-    const index = session.answeredCount + 1;
-    session.current = {
+    return {
       theme: correctTheme,
-      options,
+      options: buildSoloOptions(correctTheme, session.quizType, distractors),
       correctValue: getThemeValue(correctTheme, session.quizType),
-      startedAt: new Date(),
-      playbackStartedAt: null,
-      index,
     };
-    session.usedThemeIds.push(String(correctTheme._id));
+  }
 
+  /** The wire projection of a drawn question (the playable,
+      answer-free shape every serve of a question uses). */
+  private questionProjection(
+    drawn: DrawnQuestion,
+    index: number,
+  ): SoloQuestion {
+    const theme = drawn.theme;
     return {
       index,
       theme: {
-        slug: correctTheme.slug,
-        videoUrl: correctTheme.videoUrl,
+        slug: theme.slug,
+        videoUrl: theme.videoUrl,
         // The resolved audio (audio-url.ts, owner doctrine
         // 2026-11-10): the derived .ogg twin whenever the theme's
         // video link derives — a stored audioUrl is only a fallback
         // and a stored video link is never served as audio. The
         // client falls back to the videoUrl (audio-only) when this
         // is null or fails.
-        audioUrl: resolveAudioUrl(correctTheme.audioUrl, correctTheme.videoUrl),
+        audioUrl: resolveAudioUrl(theme.audioUrl, theme.videoUrl),
         coverImage:
-          correctTheme.animeCoverImage ?? correctTheme.animeCoverImageSmall ?? null,
-        type: correctTheme.type,
-        sequence: correctTheme.sequence,
+          theme.animeCoverImage ?? theme.animeCoverImageSmall ?? null,
+        type: theme.type,
+        sequence: theme.sequence,
       },
-      options,
+      options: drawn.options,
     };
+  }
+
+  /**
+   * Make a drawn question the live one: the measurement stamps
+   * (draw time, playback signal) are taken HERE — at commit —
+   * so a question pre-drawn early (part 5) is still measured
+   * from the moment it is actually served, never from its
+   * pre-draw.
+   */
+  private commitDrawn(
+    session: SoloSession,
+    drawn: DrawnQuestion,
+  ): SoloQuestion {
+    const index = session.answeredCount + 1;
+    session.current = {
+      theme: drawn.theme,
+      options: drawn.options,
+      correctValue: drawn.correctValue,
+      startedAt: new Date(),
+      playbackStartedAt: null,
+      index,
+    };
+    return this.questionProjection(drawn, index);
+  }
+
+  private async drawQuestion(
+    models: SoloModels,
+    session: SoloSession,
+  ): Promise<SoloQuestion> {
+    const correctTheme = await this.sampleVerifiedCandidate(models, session);
+    const drawn = await this.buildDrawn(models, session, correctTheme);
+    return this.commitDrawn(session, drawn);
+  }
+
+  /**
+   * The session's pre-drawn next question (part 5), drawn on
+   * first need: the playback-start signal draws it so its audio
+   * can be revealed during the current question. Returns null
+   * when the live question is the last one — there is no next.
+   * The drawn theme is already excluded from later draws (the
+   * sampler records every sampled id), and the question is
+   * only MEASURED when the answer promotes it (commitDrawn).
+   */
+  private async ensureNextDrawn(
+    models: SoloModels,
+    session: SoloSession,
+  ): Promise<DrawnQuestion | null> {
+    if (session.next) return session.next;
+    if (!session.current) return null;
+    if (session.current.index >= SOLO_QUESTION_COUNT) return null;
+    const correctTheme = await this.sampleVerifiedCandidate(models, session);
+    session.next = await this.buildDrawn(models, session, correctTheme);
+    return session.next;
   }
 
   /* ---------------------------------------------------------------- */
@@ -423,6 +614,7 @@ export class SoloQuizService {
           ? null
           : await this.buildNamedPool(models, userId, quizType, source),
       usedThemeIds: [],
+      next: null,
       answeredCount: 0,
       correctCount: 0,
       streak: 0,
@@ -490,7 +682,7 @@ export class SoloQuizService {
     userId: string,
     gameId: string,
   ): Promise<SoloPlaybackStartedResponse> {
-    this.requireModels();
+    const models = this.requireModels();
     const session = this.findSession(userId, gameId);
     const current = session.current;
     if (!current) {
@@ -500,7 +692,28 @@ export class SoloQuizService {
       current.playbackStartedAt = new Date();
       session.lastTouchedAt = Date.now();
     }
-    return { playbackStartedAt: current.playbackStartedAt.toISOString() };
+    /* Earlier reveal (part 5): the signal also pre-draws the
+       NEXT question and returns its resolved audio URL, so the
+       client can preload that song during the whole current
+       question instead of only the feedback pause. Audio only —
+       no options or theme metadata cross the wire here. The
+       pre-draw is an optimisation riding on a timing signal: a
+       failure to draw must never fail the signal itself, so it
+       is best-effort — the answer call will draw (and surface
+       any real problem) exactly as before. */
+    let nextAudioUrl: string | null = null;
+    try {
+      const next = await this.ensureNextDrawn(models, session);
+      if (next) {
+        nextAudioUrl = resolveAudioUrl(next.theme.audioUrl, next.theme.videoUrl);
+      }
+    } catch {
+      nextAudioUrl = null;
+    }
+    return {
+      playbackStartedAt: current.playbackStartedAt.toISOString(),
+      nextAudioUrl,
+    };
   }
 
   async submitAnswer(
@@ -557,6 +770,14 @@ export class SoloQuizService {
     let nextQuestion: SoloQuestion | null = null;
     if (gameOver) {
       session.current = null;
+      session.next = null;
+    } else if (session.next) {
+      // Promote the pre-drawn question (part 5): committing it
+      // stamps its measurement from NOW — the pre-draw bought
+      // preload time, never answer time.
+      const drawn = session.next;
+      session.next = null;
+      nextQuestion = this.commitDrawn(session, drawn);
     } else {
       nextQuestion = await this.drawQuestion(models, session);
     }

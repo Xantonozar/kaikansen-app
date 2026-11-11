@@ -15,10 +15,14 @@
  * that stays in `loading` for this long without reaching playing
  * is treated as failed — the chain advances through the same
  * failure path a hard error takes. As of the 2026-11-11 watch
- * fix this budget governs the QUIZ surfaces (whose countdown
- * arming is built on it); the detail/player engine uses the
- * kind-based grace + started-source immunity in the watch-fix
- * section below (stallShouldTrip).
+ * fix this budget governs the quiz MULTIPLAYER countdown path
+ * (whose arming is built on it, via watchdogShouldTrip below);
+ * the detail/player engine uses the kind-based grace +
+ * started-source immunity in the watch-fix section
+ * (stallShouldTrip), and the quiz SOLO path judges stalls by
+ * a per-question budget through the quiz-solo section
+ * (quizStallObserve / quizQuestionStallShouldTrip) further
+ * below.
  */
 export const PLAYBACK_STALL_WATCHDOG_MS = 4000;
 
@@ -155,6 +159,58 @@ export function firstCandidateIsVideo(
   candidates: readonly MediaCandidate[],
 ): boolean {
   return candidates.length > 0 && candidates[0].kind === 'video';
+}
+
+/** The next-question preload target the solo screen hands the
+    quiz hook: candidates + the mediaKey they belong to. */
+export interface SoloNextPreload {
+  candidates: (string | null)[];
+  mediaKey: string;
+}
+
+/**
+ * Which NEXT question the solo screen preloads right now (the
+ * playback plan + quiz total solution parts 5/6, 2026-11-11).
+ *
+ * Two reveals can name the next question:
+ * - the FEEDBACK reveal: the answer response carries the whole
+ *   next question, so its full chain (audio, then the video
+ *   fallback) is the preload source — the original mechanism;
+ * - the EARLY reveal (part 5): the playback-start signal's
+ *   response carries only the next question's audio URL, known
+ *   a whole question earlier.
+ * The feedback reveal wins when both exist (fresher, full
+ * chain). The early reveal counts only when it names the
+ * question immediately after the CURRENT one — a stale early
+ * reveal from an earlier question is ignored. Neither reveal →
+ * no preload (the next question loads fresh, as before either
+ * existed). Both reveals feed the SAME downstream mechanism
+ * (the hook's next-question effect → the part-6 slice prefetch),
+ * deduped there by mediaKey + URL.
+ */
+export function resolveSoloNextPreload(input: {
+  gameKey: string;
+  currentIndex: number;
+  feedbackNext: {
+    index: number;
+    audioUrl: string | null;
+    videoUrl: string | null;
+  } | null;
+  earlyNext: { index: number; audioUrl: string } | null;
+}): SoloNextPreload | null {
+  if (input.feedbackNext) {
+    return {
+      candidates: [input.feedbackNext.audioUrl, input.feedbackNext.videoUrl],
+      mediaKey: `${input.gameKey}:${input.feedbackNext.index}`,
+    };
+  }
+  if (input.earlyNext && input.earlyNext.index === input.currentIndex + 1) {
+    return {
+      candidates: [input.earlyNext.audioUrl],
+      mediaKey: `${input.gameKey}:${input.earlyNext.index}`,
+    };
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -346,6 +402,325 @@ export function stallShouldTrip(snap: StallSnapshot): boolean {
   if (snap.hasStarted) return false;
   if (snap.stallSince === null) return false;
   return snap.now - snap.stallSince >= stallGraceMs(snap.kind);
+}
+
+/* ------------------------------------------------------------------ */
+/* Quiz SOLO stall watchdog (2026-11-11 fix; v2 question budget,     */
+/* later the same night)                                               */
+/*                                                                   */
+/* Field failure, v1: on the installed 1.0.2, solo Q1 AND Q2 both    */
+/* showed 'This theme could not be played' on fast net while every   */
+/* derived .ogg probed healthy — the quiz watchdog stamped its 4s    */
+/* clock at LOAD START and executed loads still in flight (the quiz  */
+/* audio status is also read through a 500ms polled tick, which      */
+/* trails reality further). v1 answered with the detail engine's     */
+/* doctrine — judge CONTINUOUS NO-PROGRESS via a sampled progress    */
+/* VALUE — but kept the detail engine's per-candidate graces         */
+/* (30s audio / 60s video).                                          */
+/*                                                                   */
+/* Field failure, v2 (owner's Expo test of v1, same night): Q1       */
+/* showed the warning, then the clip SPOKE at ~15–17s; Q2 was        */
+/* silent for its whole 20s with NO warning at all. Two lessons:     */
+/* a per-candidate 30s grace OUTLIVES a 20s question — a dead-       */
+/* silent question can receive no verdict inside its own lifetime    */
+/* — and the 'failed' latch was one-way even when the clip later     */
+/* started. v2 therefore replaces the per-candidate graces with a    */
+/* PER-QUESTION stall budget (owner ruling):                         */
+/*                                                                   */
+/* - the question may accumulate at most                               */
+/*   QUIZ_QUESTION_STALL_BUDGET_MS (10s) of CONTINUOUS no-progress   */
+/*   across its WHOLE chain. Progress is still the v1 signature      */
+/*   (duration / position / buffered / playing changes on the        */
+/*   CURRENT candidate); any progress resets the budget; switching   */
+/*   candidates does NOT — a fresh candidate's first sample only     */
+/*   re-baselines its signature, so silence accrues across the       */
+/*   chain. Hard errors never touch the budget: they advance the     */
+/*   chain instantly, exactly as before. Budget exhaustion on a      */
+/*   candidate advances the chain; on the LAST candidate it is       */
+/*   the question's 'failed' verdict.                                */
+/* - a candidate that is MAKING progress is never killed, however    */
+/*   long the question runs, and a candidate that has genuinely      */
+/*   STARTED is immune, forever (v1 semantics, kept).                */
+/* - the verdict is not a life sentence: quizFailedShouldClear       */
+/*   (resurrection, below) lets a late genuine start un-fail the     */
+/*   question.                                                       */
+/*                                                                   */
+/* The MULTIPLAYER countdown path does NOT use this section: it      */
+/* keeps watchdogShouldTrip + PLAYBACK_STALL_WATCHDOG_MS with its    */
+/* playAtMs arming, byte-for-byte. The hook selects by the ABSENCE   */
+/* of a hold moment (solo never passes one).                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One progress sample of a loading quiz candidate, built by the
+ * hook from the richest signals the two players actually expose:
+ *
+ * - expo-audio's AudioStatus carries `duration` (0 until the
+ *   metadata is parsed — its arrival means bytes flowed),
+ *   `currentTime` and `playing`. It exposes NO buffered position,
+ *   so audio samples pass 0 there; for an .ogg the duration's
+ *   arrival is the load-progress signal.
+ * - expo-video's player carries `duration`, `currentTime`,
+ *   `playing` AND `bufferedPosition` (seconds of media buffered
+ *   ahead; -1 when indeterminate) — the buffered position
+ *   advancing is a continuous byte-flow signal for the solo
+ *   chain's hidden-video candidate.
+ */
+export interface QuizProgressSample {
+  duration: number;
+  currentTime: number;
+  bufferedPosition: number;
+  playing: boolean;
+}
+
+/**
+ * The comparable form of a progress sample: two samples with the
+ * same signature are observationally identical — no byte of
+ * progress can be inferred between them. Any change IS progress
+ * (metadata arrived, the buffer grew, the position moved,
+ * playback began). Non-finite readings (a NaN duration before
+ * metadata, the video player's -1 indeterminate buffer) are
+ * normalised so they read as "no value" and cannot churn the
+ * signature on their own.
+ */
+export function quizProgressSignature(sample: QuizProgressSample): string {
+  const n = (v: number): number => (Number.isFinite(v) && v > 0 ? v : 0);
+  return [
+    n(sample.duration),
+    n(sample.currentTime),
+    n(sample.bufferedPosition),
+    sample.playing ? 1 : 0,
+  ].join('|');
+}
+
+/** Has this candidate genuinely started? Playing, or a position
+    past zero — the same "started" test the detail engine's
+    immunity uses (a merely-buffered candidate has NOT started:
+    its buffered position alone never immunises it). */
+export function quizSampleStarted(sample: QuizProgressSample): boolean {
+  return sample.playing || sample.currentTime > 0;
+}
+
+/**
+ * The per-QUESTION continuous no-progress budget for a solo quiz
+ * question (v2, owner ruling 2026-11-11): the whole candidate
+ * chain together may sit in unbroken silence for at most this
+ * long before the current candidate is declared stalled. 10s
+ * sits well inside the standard 20s question window, so a
+ * dead-silent question always receives its verdict while it can
+ * still be answered — the v1 per-candidate 30s audio grace
+ * could outlive the question and leave it verdict-less.
+ */
+export const QUIZ_QUESTION_STALL_BUDGET_MS = 10_000;
+
+/**
+ * The solo stall tracker: the hook's whole memory of a
+ * question's silence, advanced ONLY through quizStallObserve so
+ * every transition is a pure, testable decision.
+ *
+ * - `mediaKey` / `candidateKey`: which question / candidate the
+ *   remembered signature belongs to (the hook keys candidates by
+ *   `${mediaKey}:${url}`).
+ * - `signature`: the last progress signature observed for the
+ *   current candidate (null before its first sample).
+ * - `lastProgressAt`: epoch ms of the most recent PROGRESS —
+ *   the last moment the current chain observably moved. It is
+ *   stamped by a fresh question's first sample and by every
+ *   signature change, and by NOTHING else: in particular not by
+ *   a candidate switch and not by a hard error.
+ * - `started`: latched once the CURRENT candidate has genuinely
+ *   started (its immunity); resets when the candidate changes.
+ */
+export interface QuizStallTracker {
+  mediaKey: string;
+  candidateKey: string;
+  signature: string | null;
+  lastProgressAt: number;
+  started: boolean;
+}
+
+/** A tracker that has seen nothing yet (app start / hook mount). */
+export function createQuizStallTracker(): QuizStallTracker {
+  return {
+    mediaKey: '',
+    candidateKey: '',
+    signature: null,
+    lastProgressAt: 0,
+    started: false,
+  };
+}
+
+/** One observation of the current candidate, sampled by the hook
+    each poll: the progress signature + started flag of the
+    candidate the chain sits on NOW, and the poll's clock. */
+export interface QuizStallObservation {
+  mediaKey: string;
+  candidateKey: string;
+  signature: string;
+  started: boolean;
+  now: number;
+}
+
+/**
+ * Advance the tracker by one observation. The three transitions
+ * ARE the v2 budget rules:
+ *
+ * - NEW QUESTION (mediaKey changed): everything re-baselines —
+ *   the first sample is the comparison point and the silence
+ *   clock starts at the observation. Yesterday's silence must
+ *   never execute today's first load.
+ * - CANDIDATE SWITCH (same question): the new candidate's first
+ *   sample re-baselines the SIGNATURE only. `lastProgressAt` is
+ *   deliberately KEPT — silence accrues across the chain, so a
+ *   question that has heard nothing for 9s does not grant its
+ *   fallback a fresh 10s. The started latch resets (immunity
+ *   belongs to the candidate that earned it).
+ * - SAME CANDIDATE: a changed signature is progress — the clock
+ *   re-stamps; an unchanged signature changes nothing but the
+ *   started latch, which only ever latches ON.
+ */
+export function quizStallObserve(
+  tracker: QuizStallTracker,
+  obs: QuizStallObservation,
+): QuizStallTracker {
+  if (obs.mediaKey !== tracker.mediaKey) {
+    return {
+      mediaKey: obs.mediaKey,
+      candidateKey: obs.candidateKey,
+      signature: obs.signature,
+      lastProgressAt: obs.now,
+      started: obs.started,
+    };
+  }
+  if (obs.candidateKey !== tracker.candidateKey) {
+    return {
+      ...tracker,
+      candidateKey: obs.candidateKey,
+      signature: obs.signature,
+      started: obs.started,
+    };
+  }
+  return {
+    ...tracker,
+    signature: obs.signature,
+    lastProgressAt:
+      obs.signature !== tracker.signature ? obs.now : tracker.lastProgressAt,
+    started: tracker.started || obs.started,
+  };
+}
+
+/**
+ * The solo stall snapshot the hook builds each poll:
+ * - `loading`: the candidate is still in `loading` (the audio
+ *   tick status / the video status). Outside `loading` there is
+ *   no stall to judge.
+ * - `lastProgressAt`: from the tracker — the question's most
+ *   recent progress observation.
+ * - `hasStarted`: the tracker's latch for the current candidate.
+ */
+export interface QuizQuestionStallSnapshot {
+  now: number;
+  loading: boolean;
+  lastProgressAt: number;
+  hasStarted: boolean;
+  hasSource: boolean;
+  failed: boolean;
+  disabled: boolean;
+}
+
+/**
+ * Should the SOLO chain advance NOW because the question's
+ * continuous no-progress has exhausted its budget? Trips only
+ * when ALL hold:
+ * - a live, unfailed source is loaded;
+ * - it has never started (a started clip is never killed for
+ *   buffering — only real player errors advance it);
+ * - it is still in `loading`;
+ * - the question's unbroken silence has reached
+ *   QUIZ_QUESTION_STALL_BUDGET_MS, measured from the last
+ *   progress observation ANYWHERE in the chain.
+ */
+export function quizQuestionStallShouldTrip(
+  snap: QuizQuestionStallSnapshot,
+): boolean {
+  if (snap.disabled || snap.failed || !snap.hasSource) return false;
+  if (snap.hasStarted) return false;
+  if (!snap.loading) return false;
+  return snap.now - snap.lastProgressAt >= QUIZ_QUESTION_STALL_BUDGET_MS;
+}
+
+/**
+ * Resurrection (v2): a 'failed' verdict is a statement about the
+ * chain SO FAR, not a life sentence — ozar's Q1 heard its clip
+ * speak seconds after the warning appeared. When the LAST
+ * candidate's player later genuinely starts, the latch clears
+ * and the question reports 'playing' again (the solo screen
+ * derives its warning from the phase, so the warning clears
+ * with it — no screen change is needed).
+ *
+ * The guards keep the resurrection honest:
+ * - solo only (`held` false): a multiplayer round's verdict is
+ *   final — rounds are server-timed and a late start must not
+ *   rewrite a round the room has moved past;
+ * - the signal must come from the candidate the chain SITS on:
+ *   the solo hook keeps an orphaned earlier candidate's player
+ *   alive (an .ogg abandoned for the video fallback), and its
+ *   late load must never resurrect a question it no longer
+ *   owns;
+ * - the start must be genuine (the caller's per-engine "started"
+ *   reading — never a mere status shuffle).
+ */
+export interface QuizResurrectionSignal {
+  failed: boolean;
+  held: boolean;
+  currentKind: MediaEngineKind;
+  signalKind: MediaEngineKind;
+  started: boolean;
+}
+
+export function quizFailedShouldClear(sig: QuizResurrectionSignal): boolean {
+  if (!sig.failed || sig.held) return false;
+  if (!sig.started) return false;
+  return sig.signalKind === sig.currentKind;
+}
+
+/* ------------------------------------------------------------------ */
+/* Solo clock rules (v2 — the clock obeys the song)                    */
+/*                                                                     */
+/* Owner ruling (2026-11-11): the solo answer clock is SUPPOSED to   */
+/* start when the audio starts — the question's media wait is not    */
+/* part of the player's 20s. Solo already starts it from the         */
+/* playback-started path (phase 'playing') and from the verdict      */
+/* ('failed' / 'empty'); v2 removes the blind 10s timer start that   */
+/* fired mid-load on slow connections and stole the window the       */
+/* ruling protects. What remains of that timer is pure anti-hang     */
+/* insurance (soloLoadSafetyMs), sized so it can only fire when      */
+/* the media layer has produced NEITHER a start NOR a verdict for    */
+/* a whole answer window — a state the phase machine + the 10s       */
+/* verdict make unreachable for any load that ever reports, and      */
+/* that only a never-reporting load (or one trickling progress       */
+/* forever without ever starting) can reach.                         */
+/* ------------------------------------------------------------------ */
+
+/** Does this reported media phase start the solo answer clock?
+    Playing starts it (the song is on); 'failed' and 'empty'
+    start it (the verdict — the question is answerable without
+    its song); 'buffering' never does (the wait is not the
+    player's time). Mirrors solo.tsx's clock effect exactly. */
+export function soloClockStartsOnPhase(
+  phase: 'buffering' | 'playing' | 'failed' | 'empty',
+): boolean {
+  return phase !== 'buffering';
+}
+
+/** The solo anti-hang safety, in ms: one FULL answer window
+    (the question's own time limit). Any load that plays, stalls
+    or errors resolves through the phase machine long before
+    this — the verdict alone bounds a true stall to ~10s — so
+    the safety firing at all means the media layer never
+    reported, and the question must still not hang. */
+export function soloLoadSafetyMs(limitSeconds: number): number {
+  return limitSeconds * 1000;
 }
 
 /* ------------------------------------------------------------------ */
@@ -590,6 +965,124 @@ export function surfaceReadinessAfterSwap(args: {
     ready: args.readyPlayerKey === args.nextPlayerKey,
     readyPlayerKey: args.readyPlayerKey,
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Buffer package (2026-11-11 evening) — NetInfo-aware buffer        */
+/* cushions for the detail/player video player.                      */
+/*                                                                   */
+/* Field report (1.0.3 APK, peak hour): BOTH detail modes froze /    */
+/* buffered / stuck while the media edge probed perfectly healthy    */
+/* from a datacenter — the choke is the single-flow phone→edge       */
+/* road, and expo-video's defaults (Android: ~20s forward buffer,    */
+/* 2s to start) leave almost no cushion for a dipping flow to ride   */
+/* out. The cushion is therefore sized by the CONNECTION: an          */
+/* unmetered road buffers toward the whole file; a metered one       */
+/* keeps a bounded runway. These are the player's BufferOptions      */
+/* (expo-video: a player property the engine sets as each load is    */
+/* issued — see usePlayback); this section is only the pure          */
+/* decision of WHICH options a given load gets.                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The connection sample the buffer decision reads — the fields
+ * of a NetInfo state the engine extracts (the hook maps the
+ * native state onto this shape; nothing native lives here).
+ */
+export interface BufferConnectionSample {
+  /** NetInfo's connection type ('wifi' | 'cellular' | 'ethernet'
+      | 'none' | 'unknown' | …), null before the first sample. */
+  type: string | null;
+  isInternetReachable: boolean | null;
+  /** NetInfo details.isConnectionExpensive where the platform
+      reports it (a metered Wi-Fi / a metered cellular plan);
+      null when unreported. */
+  isConnectionExpensive: boolean | null;
+}
+
+export type BufferConnectionKind = 'unmetered' | 'metered';
+
+/**
+ * Classify the connection for buffering. Unmetered = a Wi-Fi /
+ * ethernet type (unless the platform explicitly marks it
+ * expensive — metered Wi-Fi is metered), or any connection the
+ * platform explicitly reports as NOT expensive while the
+ * internet is reachable. Everything else — cellular without a
+ * cheap report, unknown, no sample yet — is metered: when in
+ * doubt the bounded profile applies, never the greedy one.
+ */
+export function bufferConnectionKind(
+  sample: BufferConnectionSample | null,
+): BufferConnectionKind {
+  if (!sample) return 'metered';
+  if (sample.isConnectionExpensive === true) return 'metered';
+  if (sample.type === 'wifi' || sample.type === 'ethernet') {
+    return 'unmetered';
+  }
+  if (
+    sample.isInternetReachable === true &&
+    sample.isConnectionExpensive === false
+  ) {
+    return 'unmetered';
+  }
+  return 'metered';
+}
+
+/** expo-video's BufferOptions, structurally (seconds). */
+export interface VideoBufferOptions {
+  waitsToMinimizeStalling: boolean;
+  minBufferForPlayback: number;
+  preferredForwardBufferDuration: number;
+}
+
+/**
+ * The forward buffer for the unmetered profile: an hour of
+ * media — beyond any theme file in the catalogue (~90s), so in
+ * effect the player buffers TO COMPLETE and a mid-play dip in
+ * the road has the whole rest of the song to ride out on.
+ * (Android's LoadControl turns this into its target buffer and
+ * simply stops at end-of-file; the byte cap stays unset.)
+ */
+export const UNMETERED_FORWARD_BUFFER_S = 3600;
+
+/**
+ * The Watch buffer profile for a connection kind (owner's
+ * network-aware sketch, 2026-11-11): playback starts once a
+ * small cushion exists (2.5s unmetered / 5s metered — enough
+ * that the first seconds never starve), then keeps the runway
+ * ahead as large as the connection class allows.
+ */
+export function watchBufferOptions(
+  kind: BufferConnectionKind,
+): VideoBufferOptions {
+  return kind === 'unmetered'
+    ? {
+        waitsToMinimizeStalling: true,
+        minBufferForPlayback: 2.5,
+        preferredForwardBufferDuration: UNMETERED_FORWARD_BUFFER_S,
+      }
+    : {
+        waitsToMinimizeStalling: true,
+        minBufferForPlayback: 5,
+        preferredForwardBufferDuration: 50,
+      };
+}
+
+/**
+ * The buffer options for ONE video load: a watch candidate gets
+ * its connection's Watch profile; the hidden-video listen
+ * fallback ALWAYS gets the metered profile, whatever the
+ * connection — it is an audio-only rescue, and letting it pull
+ * a whole 40–60 MB video ahead on an unmetered road would gorge
+ * the very road the rescue exists to survive (its audible part
+ * needs seconds, not the file).
+ */
+export function videoBufferOptionsFor(args: {
+  role: MediaCandidate['role'];
+  connection: BufferConnectionKind;
+}): VideoBufferOptions {
+  if (args.role === 'hidden-video') return watchBufferOptions('metered');
+  return watchBufferOptions(args.connection);
 }
 
 /**

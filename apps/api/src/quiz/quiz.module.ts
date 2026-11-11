@@ -18,6 +18,7 @@ import { QuizAttempt, QuizAttemptSchema } from './quiz-attempt.schema';
 import { QuizRoom, QuizRoomSchema } from './quiz-room.schema';
 import { RankHistory, RankHistorySchema } from './rank-history.schema';
 import { UserRank, UserRankSchema } from './user-rank.schema';
+import { HttpAudioProbe } from './audio-probe';
 import { QuizController } from './quiz.controller';
 import { QuizGateway } from './quiz.gateway';
 import { QuizRoomsService } from './quiz-rooms.service';
@@ -71,6 +72,7 @@ export class QuizModule {
       controllers: [QuizController],
       providers: [
         SoloQuizService,
+        HttpAudioProbe,
         QuizRoomsService,
         RankService,
         RoomBroadcaster,

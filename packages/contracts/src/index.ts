@@ -943,6 +943,21 @@ export interface SoloAnswerRequest {
 export interface SoloPlaybackStartedResponse {
   /** ISO timestamp the server recorded for the playback start. */
   playbackStartedAt: string;
+  /**
+   * Earlier reveal (total solution part 5, 2026-11-11): the
+   * NEXT question's resolved audio URL, revealed at playback
+   * start so the client can preload it during the whole current
+   * question instead of only the ~2.8s feedback pause. Audio
+   * only — no options, no theme metadata: the filename exposure
+   * is the same class the answer response already creates when
+   * it carries the full next question at feedback time. Null
+   * when there is no next question (the last one is live) or
+   * the next theme has no resolvable audio (its chain is
+   * video-only). OPTIONAL: APIs predating part 5 omit the field
+   * entirely, and clients must behave exactly as before then —
+   * the two sides deploy in any order.
+   */
+  nextAudioUrl?: string | null;
 }
 
 /** Full theme reveal shown after answering (the web's post-answer reveal). */

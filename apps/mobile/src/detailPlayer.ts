@@ -65,6 +65,33 @@ export function detailBackendForMode(
 }
 
 /**
+ * The mode the Theme Detail page SHOWS as selected (toggle arm,
+ * FAB target, preload mode) — resolved from three layers:
+ * - `playMode`: the mode actually playing. Once set it wins over
+ *   everything (a stale pre-play flip must never resurface over
+ *   live playback).
+ * - `flippedMode`: the user's pre-play toggle flip. The page
+ *   opens on the Settings side (`openMode`); tapping the other
+ *   arm before pressing play records the flip here so the shown
+ *   side — and the preload that follows it — actually moves.
+ *   (Field report 2026-11-11: the flip used to retarget the
+ *   preload only, leaving the shown side stuck on `openMode`
+ *   until playback started, so the tap looked dead.)
+ * - `openMode`: the Settings "Open themes as" side the page
+ *   opens on when nothing has been flipped or played.
+ * Flipping back to the open side stores `flippedMode ===
+ * openMode`, which resolves to the open mode again — the same
+ * value as clearing the flip.
+ */
+export function resolveShownMode(
+  playMode: PlaybackMode | null,
+  flippedMode: PlaybackMode | null,
+  openMode: PlaybackMode,
+): PlaybackMode {
+  return playMode ?? flippedMode ?? openMode;
+}
+
+/**
  * The player backends mounted for a play mode — always ZERO or
  * ONE, never both: the inactive mode's backend is unmounted, not
  * hidden. (Before the split both backends sat mounted-but-hidden

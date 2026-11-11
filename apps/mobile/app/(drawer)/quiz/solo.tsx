@@ -37,6 +37,18 @@ import type {
   UserRankProfile,
 } from '@kaikansen/contracts';
 import { ApiRequestError } from '../../../src/api';
+import { warmAudioEngine } from '../../../src/audioEngine';
+import {
+  resolveSoloNextPreload,
+  soloClockStartsOnPhase,
+  soloLoadSafetyMs,
+} from '../../../src/mediaEngine';
+import {
+  clearQuizSlices,
+  getQuizSliceUri,
+  pinQuizSlice,
+  quizSliceCandidates,
+} from '../../../src/quizPrefetch';
 import {
   createSoloGame,
   markSoloPlaybackStarted,
@@ -45,6 +57,8 @@ import {
 import { fetchMyRank } from '../../../src/socialApi';
 import { RankResultCard } from '../../../src/components/RankCard';
 import { CountdownRing } from '../../../src/components/CountdownRing';
+import { QuizGenerating } from '../../../src/components/QuizGenerating';
+import { GENERATING_MIN_DISPLAY_MS } from '../../../src/quizGenerating';
 import {
   QuizAudioOnly,
   type QuizAudioState,
@@ -65,11 +79,16 @@ type Phase = 'creating' | 'question' | 'feedback' | 'over' | 'fatal';
 const FEEDBACK_MS = 2800;
 
 /**
- * Safety net for the playback-start clock (below): a load that
- * neither plays nor errors within this long starts the clock
- * anyway — a question must never hang forever.
+ * Anti-hang safety for the playback-start clock (below; v2 —
+ * the clock obeys the song): the clock starts on the media
+ * phase — playing, or the failed / empty verdict
+ * (mediaEngine.soloClockStartsOnPhase). The per-question safety
+ * timer (mediaEngine.soloLoadSafetyMs — one full answer window)
+ * is insurance only, for a media layer that never reports a
+ * phase at all; the earlier blind 10s start fired mid-load on
+ * slow connections and stole the window it protected, so it is
+ * gone as a normal path. A question must never hang forever.
  */
-const LOAD_SAFETY_MS = 10_000;
 
 /**
  * The question prompt per guess type — the Quiz Question v2 mock's
@@ -106,9 +125,12 @@ const RESULTS_GUESS_LABEL: Record<QuizGuessType, string> = {
  * full while the hidden audio loads, the screen signals the
  * moment playback begins (or the media proves unplayable) via
  * POST …/playback-started, and the server measures from the
- * draw plus the credited load, capped server-side. A load that
- * neither plays nor errors within LOAD_SAFETY_MS starts the
- * clock through the same path, so a question can never hang. The answer
+ * draw plus the credited load, capped server-side. (v2,
+ * 2026-11-11: the blind 10s safety start was removed — the
+ * clock starts ONLY through that path, at playback or at the
+ * media verdict; an anti-hang timer of one full answer window
+ * remains solely for a media layer that never reports a phase
+ * at all, so a question can still never hang.) The answer
  * response drives the feedback state (correct option revealed,
  * points + streak), then the game auto-advances (a Next button
  * skips the wait). The end screen is the designed results screen
@@ -165,6 +187,16 @@ export default function SoloQuizScreen() {
     null,
   );
   const [rankLoading, setRankLoading] = useState(false);
+  // Earlier reveal (part 5, 2026-11-11): the playback-start
+  // signal's response can carry the NEXT question's audio URL a
+  // whole question before the answer response would. Held as
+  // {index, audioUrl} and consumed by resolveSoloNextPreload
+  // below; null whenever the API is older, the question is the
+  // last, or the next theme has no resolvable audio.
+  const [earlyNext, setEarlyNext] = useState<{
+    index: number;
+    audioUrl: string;
+  } | null>(null);
   // The hidden question audio's reported state (QuizAudioOnly):
   // drives the status line and the ring's mute toggle.
   const [audioState, setAudioState] = useState<QuizAudioState>({
@@ -190,13 +222,30 @@ export default function SoloQuizScreen() {
   const limitRef = useRef(20);
   const loadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [clockRunning, setClockRunning] = useState(false);
+  // Part 6: the live question's candidate chain, frozen when the
+  // question starts. The slice lookup happens once, at the
+  // freeze; a slice that lands mid-question must not swap the
+  // chain under a candidate that is already loading/playing
+  // (that would restart its load) — it simply serves the NEXT
+  // time this question would start, and the remote chain covers
+  // this one, exactly as before slices existed.
+  const chainSnapshotRef = useRef<{ key: string; list: string[] } | null>(
+    null,
+  );
 
   useEffect(() => {
     mountedRef.current = true;
+    // Cold-start fix (v2): warm the audio engine on mount, so
+    // the first question's load doesn't pay the native start-up
+    // inside its media wait — the create-game round trip below
+    // covers the cost.
+    warmAudioEngine();
     return () => {
       mountedRef.current = false;
       if (advanceTimerRef.current) clearTimeout(advanceTimerRef.current);
       if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+      // Part 6 hygiene: no prefetched slice outlives the screen.
+      clearQuizSlices();
     };
   }, []);
 
@@ -206,7 +255,12 @@ export default function SoloQuizScreen() {
    * moves to now + the limit (the ring unpauses onto it) and the
    * server is signalled so its measurement opens at the same
    * moment. Fire-and-forget: a lost signal only means the server
-   * measures from the draw (the pre-fix behaviour).
+   * measures from the draw (the pre-fix behaviour). The signal's
+   * RESPONSE is part 5's earlier reveal: when it carries the
+   * next question's audio URL, that is remembered so the slice
+   * prefetch (part 6) starts a whole question early — an absent
+   * field (older API) or null (last question / no audio) simply
+   * leaves the feedback-phase reveal as the only trigger.
    */
   const startClock = useCallback((qIndex: number) => {
     if (clockStartedForRef.current === qIndex) return;
@@ -219,12 +273,29 @@ export default function SoloQuizScreen() {
     setClockRunning(true);
     const gid = gameIdRef.current;
     if (gid) {
-      void markSoloPlaybackStarted(gid).catch(() => {});
+      void markSoloPlaybackStarted(gid)
+        .then((res) => {
+          if (!mountedRef.current) return;
+          if (res?.nextAudioUrl) {
+            setEarlyNext({
+              index: qIndex + 1,
+              audioUrl: res.nextAudioUrl,
+            });
+          }
+        })
+        .catch(() => {});
     }
   }, []);
 
   const startQuestion = useCallback(
     (q: SoloQuestion, limitSeconds: number) => {
+      // Part 6: pin this question's prefetched slice — its
+      // player may read the file, so the next prefetch's
+      // eviction must not delete it from under the player — and
+      // drop an early reveal that named this (or an older)
+      // question: it has done its job.
+      pinQuizSlice(`${gameIdRef.current ?? 'game'}:${q.index}`);
+      setEarlyNext((e) => (e && e.index <= q.index ? null : e));
       setQuestion(q);
       setPicked(null);
       setFeedback(null);
@@ -234,14 +305,17 @@ export default function SoloQuizScreen() {
       // Hold the clock until this question's audio starts: reset
       // the started marker, treat the media as loading again (a
       // stale 'playing' from the previous question must not
-      // start this one early), and arm the safety start.
+      // start this one early), and arm the anti-hang safety —
+      // one full answer window, so it can only fire if the
+      // media layer never reports a phase at all; playback and
+      // the verdict start the clock long before it.
       clockStartedForRef.current = 0;
       setClockRunning(false);
       setAudioState((s) => ({ ...s, phase: 'buffering' }));
       if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
       loadTimerRef.current = setTimeout(
         () => startClock(q.index),
-        LOAD_SAFETY_MS,
+        soloLoadSafetyMs(limitSeconds),
       );
       setDeadlineMs(Date.now() + limitSeconds * 1000);
       setPhase('question');
@@ -252,6 +326,29 @@ export default function SoloQuizScreen() {
   /* Create the game (and recreate on Play again via runId). */
   useEffect(() => {
     let live = true;
+    let applyTimer: ReturnType<typeof setTimeout> | null = null;
+    /* Generating-screen pacing (approved design cfc7c9ac): the
+       creating phase now shows the designed "Setting up your
+       quiz" screen, and a create that resolves near-instantly
+       would flash it for a frame — so the RESULT is applied
+       only once the screen has been up for
+       GENERATING_MIN_DISPLAY_MS. The request itself is never
+       delayed, and no game timing hangs off this: it paces the
+       phase transition, nothing else. */
+    const shownAt = Date.now();
+    const applyResult = (fn: () => void) => {
+      const wait = Math.max(
+        0,
+        GENERATING_MIN_DISPLAY_MS - (Date.now() - shownAt),
+      );
+      if (wait <= 0) {
+        fn();
+        return;
+      }
+      applyTimer = setTimeout(() => {
+        if (live) fn();
+      }, wait);
+    };
     setPhase('creating');
     setError(null);
     feedbackRef.current = null;
@@ -262,38 +359,54 @@ export default function SoloQuizScreen() {
     setCorrectCount(0);
     setRankProfile(null);
     setRankLoading(false);
+    // Part 5/6 hygiene: a new game starts with no early reveal
+    // and an empty prefetch cache — nothing leaks across games.
+    setEarlyNext(null);
+    clearQuizSlices();
     createSoloGame({ quizType, source })
       .then((state) => {
         if (!live) return;
-        gameIdRef.current = state.gameId;
-        setGameId(state.gameId);
-        setTotalQuestions(state.totalQuestions);
-        setTimeLimit(state.timeLimitSeconds);
-        if (state.question) {
-          startQuestion(state.question, state.timeLimitSeconds);
-        } else {
-          setFatalMessage('The game could not be started.');
-          setPhase('fatal');
-        }
+        applyResult(() => {
+          gameIdRef.current = state.gameId;
+          setGameId(state.gameId);
+          setTotalQuestions(state.totalQuestions);
+          setTimeLimit(state.timeLimitSeconds);
+          if (state.question) {
+            startQuestion(state.question, state.timeLimitSeconds);
+          } else {
+            setFatalMessage('The game could not be started.');
+            setPhase('fatal');
+          }
+        });
       })
       .catch((e: unknown) => {
         if (!live) return;
-        setFatalMessage(
-          e instanceof Error ? e.message : 'Could not start the game.',
-        );
-        setPhase('fatal');
+        applyResult(() => {
+          setFatalMessage(
+            e instanceof Error ? e.message : 'Could not start the game.',
+          );
+          setPhase('fatal');
+        });
       });
     return () => {
       live = false;
+      if (applyTimer) clearTimeout(applyTimer);
     };
   }, [quizType, source, runId, startQuestion]);
 
-  /* The clock starts when the media wait ends: the audio
-     actually playing, or known-unplayable ('failed' / 'empty') —
-     either way the question is live from that moment. */
+  /* The clock starts when the media wait ends (v2 — the clock
+     obeys the song): the audio actually playing, or
+     known-unplayable ('failed' / 'empty') — either way the
+     question is live from that moment. While the media still
+     reports 'buffering' the clock NEVER starts: the load does
+     not eat the player's window (the pure rule is
+     mediaEngine.soloClockStartsOnPhase). A verdict followed by
+     a late start (resurrection) re-reports 'playing' — the
+     clock is already running from the verdict by then, and
+     startClock's once-per-question guard keeps it so. */
   useEffect(() => {
     if (phase !== 'question' || !question) return;
-    if (audioState.phase === 'buffering') return;
+    if (!soloClockStartsOnPhase(audioState.phase)) return;
     startClock(question.index);
   }, [audioState.phase, phase, question, startClock]);
 
@@ -445,14 +558,7 @@ export default function SoloQuizScreen() {
   );
 
   let body: React.ReactNode;
-  if (phase === 'creating') {
-    body = (
-      <View style={styles.center}>
-        <ActivityIndicator color={theme.accent} size="large" />
-        <Text style={styles.centerText}>Dealing your questions…</Text>
-      </View>
-    );
-  } else if (phase === 'fatal') {
+  if (phase === 'fatal') {
     body = (
       <View style={styles.center}>
         <Text style={styles.fatalText}>{fatalMessage}</Text>
@@ -572,42 +678,56 @@ export default function SoloQuizScreen() {
     const inFeedback = phase === 'feedback' && feedback !== null;
     const audioFailed = audioState.phase === 'failed';
     const audioEmpty = audioState.phase === 'empty';
+    const mediaKey = `${gameId ?? 'game'}:${question.index}`;
+    // Part 6: this question's chain, frozen at its start — its
+    // prefetched slice (when one landed in time) leads, then the
+    // remote chain in doctrine order (the API-resolved audio —
+    // the derived .ogg — first, then the theme's video file
+    // played audio-only as the last resort; the question reports
+    // unplayable only after all fail).
+    if (chainSnapshotRef.current?.key !== mediaKey) {
+      chainSnapshotRef.current = {
+        key: mediaKey,
+        list: quizSliceCandidates(getQuizSliceUri(mediaKey), [
+          question.theme.audioUrl,
+          question.theme.videoUrl,
+        ]),
+      };
+    }
+    const questionCandidates = chainSnapshotRef.current.list;
+    // The next question's preload target (parts 5+6): the
+    // feedback reveal when it exists, else the early reveal from
+    // this question's playback-start signal — both feed the same
+    // slice prefetch inside the quiz hook, deduped by key.
+    const nextPreload = resolveSoloNextPreload({
+      gameKey: gameId ?? 'game',
+      currentIndex: question.index,
+      feedbackNext: feedback?.nextQuestion
+        ? {
+            index: feedback.nextQuestion.index,
+            audioUrl: feedback.nextQuestion.theme.audioUrl,
+            videoUrl: feedback.nextQuestion.theme.videoUrl,
+          }
+        : null,
+      earlyNext,
+    });
     body = (
       <>
-        {/* Audio candidates in doctrine order (owner, 2026-11-10):
-            the API-resolved audio (the derived .ogg) first, then
-            the theme's video file played audio-only as the last
-            resort — the question reports unplayable only after
-            both fail. QuizAudioOnly renders no surface either way. */}
         <QuizAudioOnly
-          candidates={[
-            question.theme.audioUrl,
-            question.theme.videoUrl,
-          ].filter(
-            (url, i, all): url is string =>
-              url !== null && all.indexOf(url) === i,
-          )}
-          mediaKey={`${gameId ?? 'game'}:${question.index}`}
+          candidates={questionCandidates}
+          mediaKey={mediaKey}
           onStateChange={handleAudioState}
-          /* Playback plan (2026-11-10): the NEXT question's .ogg
-             preloads while this one plays (the answer response
-             already carries nextQuestion), so the advance starts
-             it near-instantly. The clock still starts at actual
-             playback — a preloaded clip simply reaches 'playing'
+          /* Playback plan (2026-11-10) + parts 5/6 (2026-11-11):
+             the NEXT question's audio prefetches as a file slice
+             while this one plays — triggered by the early reveal
+             at this question's playback start when available, and
+             by the feedback reveal (the answer response's
+             nextQuestion) otherwise — so the advance starts it
+             near-instantly. The clock still starts at actual
+             playback — a sliced clip simply reaches 'playing'
              sooner, through the same phase signal. */
-          nextCandidates={
-            feedback?.nextQuestion
-              ? [
-                  feedback.nextQuestion.theme.audioUrl,
-                  feedback.nextQuestion.theme.videoUrl,
-                ]
-              : undefined
-          }
-          nextMediaKey={
-            feedback?.nextQuestion
-              ? `${gameId ?? 'game'}:${feedback.nextQuestion.index}`
-              : undefined
-          }
+          nextCandidates={nextPreload?.candidates}
+          nextMediaKey={nextPreload?.mediaKey}
         />
         <ScrollView
           contentContainerStyle={styles.gameContent}
@@ -789,9 +909,20 @@ export default function SoloQuizScreen() {
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.column}>
-        {phase !== 'over' && header}
-        {(phase === 'question' || phase === 'feedback') && scoreBlock}
-        {body}
+        {phase === 'creating' ? (
+          /* The generating screen is a full-column design of
+             its own (approved cfc7c9ac): it carries its own top
+             row — the same leave-game ✕ on goBack, plus the
+             Solo Run chip — so the shared header stands down
+             for this phase only. */
+          <QuizGenerating onExit={goBack} />
+        ) : (
+          <>
+            {phase !== 'over' && header}
+            {(phase === 'question' || phase === 'feedback') && scoreBlock}
+            {body}
+          </>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -1022,10 +1153,6 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
       gap: spacing.md,
       padding: spacing.xxl,
-    },
-    centerText: {
-      ...typeStyles.body,
-      color: theme.muted,
     },
     fatalText: {
       ...typeStyles.body,

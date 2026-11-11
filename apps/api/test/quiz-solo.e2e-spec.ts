@@ -205,7 +205,7 @@ function makeFakeModels() {
   };
   const watchHistoryModel = { distinct: () => queryOf([]) };
 
-  return { themeModel, attemptModel, userModel, watchHistoryModel, attempts };
+  return { themeModel, attemptModel, userModel, watchHistoryModel, attempts, themes };
 }
 
 const E2E_SECRET = ['e2e', 'quiz', 'access', 'secret'].join('-');
@@ -275,6 +275,11 @@ process.env.JWT_SECRET = E2E_SECRET;
       .set(auth())
       .expect(200);
     expect(typeof signalled.body.playbackStartedAt).toBe('string');
+    // Part 5's field is present but null here: these fixtures
+    // have no resolvable audio (a stored video-link "audioUrl"
+    // and a non-derivable videoUrl), so there is nothing to
+    // reveal — the additive field must not invent a candidate.
+    expect(signalled.body.nextAudioUrl).toBeNull();
 
     const answered = await http
       .post(`/quiz/solo/games/${gameId}/answers`)
@@ -344,5 +349,113 @@ process.env.JWT_SECRET = E2E_SECRET;
       .post('/quiz/solo/games/nope/playback-started')
       .set(auth())
       .expect(404);
+  });
+});
+
+describe('Solo quiz earlier reveal with derivable audio (e2e, part 5)', () => {
+  let app: INestApplication;
+  const models = makeFakeModels();
+  // Derivable AnimeThemes catalogue: the served audio is the
+  // derived .ogg twin of each video link — the shape the live
+  // catalogue actually has (the other suites' fixtures cannot
+  // derive, which is exactly why their reveal is null).
+  models.themes.forEach((t, i) => {
+    t.videoUrl = `https://v.animethemes.moe/Anime${i + 1}-OP1.webm`;
+    t.audioUrl = null;
+  });
+
+  const token = () =>
+    jwt.sign(
+      {
+        userId: USER_1,
+        username: 'alice',
+        email: 'alice@example.com',
+        tokenType: 'access',
+      },
+      E2E_SECRET,
+      { expiresIn: '15m' },
+    );
+  const auth = () => ({ Authorization: `Bearer ${token()}` });
+
+  beforeAll(async () => {
+    process.env.JWT_SECRET = E2E_SECRET;
+    process.env.JWT_REFRESH_SECRET = E2E_REFRESH_SECRET;
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [ConfigModule.forRoot({ isGlobal: true })],
+      controllers: [QuizController],
+      providers: [
+        SoloQuizService,
+        AuthService,
+        AccessTokenGuard,
+        AnilistClient,
+        { provide: getModelToken(ThemeCache.name), useValue: models.themeModel },
+        { provide: getModelToken(QuizAttempt.name), useValue: models.attemptModel },
+        { provide: getModelToken(User.name), useValue: models.userModel },
+        { provide: getModelToken(WatchHistory.name), useValue: models.watchHistoryModel },
+      ],
+    }).compile();
+    app = moduleFixture.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    delete process.env.JWT_SECRET;
+    delete process.env.JWT_REFRESH_SECRET;
+  });
+
+  it('the signal reveals the next .ogg; the answer serves that very question; the last question reveals null', async () => {
+    const http = request(app.getHttpServer());
+
+    const created = await http
+      .post('/quiz/solo/games')
+      .set(auth())
+      .send({ quizType: 'anime' })
+      .expect(201);
+    const gameId = created.body.gameId as string;
+    expect(created.body.question.theme.slug).toBe('anime-1-op1');
+
+    const signalled = await http
+      .post(`/quiz/solo/games/${gameId}/playback-started`)
+      .set(auth())
+      .expect(200);
+    expect(typeof signalled.body.playbackStartedAt).toBe('string');
+    expect(signalled.body.nextAudioUrl).toBe(
+      'https://a.animethemes.moe/Anime2-OP1.ogg',
+    );
+    // The reveal is audio only — no options/theme data leaks.
+    expect(signalled.body.nextQuestion).toBeUndefined();
+    expect(signalled.body.options).toBeUndefined();
+
+    const answered = await http
+      .post(`/quiz/solo/games/${gameId}/answers`)
+      .set(auth())
+      .send({ answer: null })
+      .expect(200);
+    expect(answered.body.nextQuestion.theme.slug).toBe('anime-2-op1');
+    expect(answered.body.nextQuestion.theme.audioUrl).toBe(
+      'https://a.animethemes.moe/Anime2-OP1.ogg',
+    );
+
+    // Play out to the last question (answers 2..9 serve Q3..Q10).
+    for (let i = 0; i < 8; i++) {
+      await http
+        .post(`/quiz/solo/games/${gameId}/answers`)
+        .set(auth())
+        .send({ answer: null })
+        .expect(200);
+    }
+    const lastSignal = await http
+      .post(`/quiz/solo/games/${gameId}/playback-started`)
+      .set(auth())
+      .expect(200);
+    expect(lastSignal.body.nextAudioUrl).toBeNull();
+
+    const final = await http
+      .post(`/quiz/solo/games/${gameId}/answers`)
+      .set(auth())
+      .send({ answer: null })
+      .expect(200);
+    expect(final.body.gameOver).toBe(true);
   });
 });

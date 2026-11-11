@@ -3,6 +3,10 @@ import {
   AUDIO_STALL_GRACE_MS,
   PLAYBACK_STALL_WATCHDOG_MS,
   VIDEO_STALL_GRACE_MS,
+  UNMETERED_FORWARD_BUFFER_S,
+  bufferConnectionKind,
+  videoBufferOptionsFor,
+  watchBufferOptions,
   createPreloadTicket,
   failureAttributionDecision,
   markFailureHandled,
@@ -14,7 +18,19 @@ import {
   progressFraction,
   progressValueChanged,
   quantizeProgress,
+  QUIZ_QUESTION_STALL_BUDGET_MS,
+  createQuizStallTracker,
+  quizFailedShouldClear,
+  quizProgressSignature,
+  quizQuestionStallShouldTrip,
+  quizSampleStarted,
+  quizStallObserve,
+  type QuizProgressSample,
+  type QuizStallTracker,
+  soloClockStartsOnPhase,
+  soloLoadSafetyMs,
   queuePreloadKey,
+  resolveSoloNextPreload,
   shouldPreloadNext,
   stabilizeProgress,
   stallShouldTrip,
@@ -638,5 +654,584 @@ describe('watchSurfaceGateDecision — readyToPlay also releases (fix 4)', () =>
         playerReadyToPlay: false,
       }),
     ).toBe('play');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Quiz solo stall watchdog (2026-11-11 fix): the quiz's SOLO path   */
+/* gets the same stall doctrine as the detail engine — continuous    */
+/* no-progress against the owner grace (30s audio / 60s video), a    */
+/* started clip is immune, and progress is a VALUE sampled from the  */
+/* player (duration / position / buffered), not a status flag. The   */
+/* multiplayer countdown path keeps watchdogShouldTrip untouched     */
+/* (its pins above pass unchanged).                                  */
+/*                                                                   */
+/* Field replay (2026-11-11, installed 1.0.2): solo Q1 AND Q2 both   */
+/* showed 'This theme could not be played' on fast net while every   */
+/* derived .ogg probed healthy — the old quiz watchdog stamped its   */
+/* 4s clock at load start and executed loads still in flight.        */
+/* ------------------------------------------------------------------ */
+
+describe('quizProgressSignature', () => {
+  const silent: QuizProgressSample = {
+    duration: 0,
+    currentTime: 0,
+    bufferedPosition: 0,
+    playing: false,
+  };
+
+  it('is stable while nothing observable changes', () => {
+    expect(quizProgressSignature(silent)).toBe(quizProgressSignature(silent));
+    expect(quizProgressSignature({ ...silent })).toBe(
+      quizProgressSignature(silent),
+    );
+  });
+
+  it('changes when the duration becomes known (metadata arrived = bytes flowed)', () => {
+    expect(quizProgressSignature({ ...silent, duration: 90 })).not.toBe(
+      quizProgressSignature(silent),
+    );
+    expect(quizProgressSignature({ ...silent, duration: 91 })).not.toBe(
+      quizProgressSignature({ ...silent, duration: 90 }),
+    );
+  });
+
+  it('changes when the buffered position advances (video bytes arriving)', () => {
+    expect(quizProgressSignature({ ...silent, bufferedPosition: 12.5 })).not.toBe(
+      quizProgressSignature(silent),
+    );
+    expect(quizProgressSignature({ ...silent, bufferedPosition: 13 })).not.toBe(
+      quizProgressSignature({ ...silent, bufferedPosition: 12.5 }),
+    );
+  });
+
+  it('changes when the position advances or playback starts', () => {
+    expect(quizProgressSignature({ ...silent, currentTime: 0.4 })).not.toBe(
+      quizProgressSignature(silent),
+    );
+    expect(quizProgressSignature({ ...silent, playing: true })).not.toBe(
+      quizProgressSignature(silent),
+    );
+  });
+
+  it('treats non-finite readings as no reading (a NaN duration cannot churn the signature)', () => {
+    const nan = { ...silent, duration: Number.NaN, bufferedPosition: -1 };
+    expect(quizProgressSignature(nan)).toBe(quizProgressSignature(nan));
+    expect(quizProgressSignature({ ...silent, duration: 0 })).toBe(
+      quizProgressSignature({ ...silent, duration: Number.NaN }),
+    );
+  });
+});
+
+describe('quizSampleStarted', () => {
+  it('a playing sample or an advanced position means the clip genuinely started', () => {
+    expect(
+      quizSampleStarted({
+        duration: 90,
+        currentTime: 0,
+        bufferedPosition: 0,
+        playing: true,
+      }),
+    ).toBe(true);
+    expect(
+      quizSampleStarted({
+        duration: 90,
+        currentTime: 0.25,
+        bufferedPosition: 0,
+        playing: false,
+      }),
+    ).toBe(true);
+    expect(
+      quizSampleStarted({
+        duration: 0,
+        currentTime: 0,
+        bufferedPosition: 40,
+        playing: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('quiz question stall budget (solo v2 — per-question verdict)', () => {
+  const SILENT: QuizProgressSample = {
+    duration: 0,
+    currentTime: 0,
+    bufferedPosition: 0,
+    playing: false,
+  };
+  const Q = 'game:1';
+  const A = 'game:1:https://a.animethemes.moe/FateZero-OP1.ogg';
+  const B = 'game:1:https://v.animethemes.moe/FateZero-OP1.webm';
+
+  const observe = (
+    tracker: QuizStallTracker,
+    candidateKey: string,
+    sample: QuizProgressSample,
+    now: number,
+    mediaKey: string = Q,
+  ): QuizStallTracker =>
+    quizStallObserve(tracker, {
+      mediaKey,
+      candidateKey,
+      signature: quizProgressSignature(sample),
+      started: quizSampleStarted(sample),
+      now,
+    });
+
+  const trip = (
+    tracker: QuizStallTracker,
+    now: number,
+    extra: Partial<{
+      loading: boolean;
+      hasSource: boolean;
+      failed: boolean;
+      disabled: boolean;
+    }> = {},
+  ): boolean =>
+    quizQuestionStallShouldTrip({
+      now,
+      loading: true,
+      lastProgressAt: tracker.lastProgressAt,
+      hasStarted: tracker.started,
+      hasSource: true,
+      failed: false,
+      disabled: false,
+      ...extra,
+    });
+
+  it('the budget is the owner number: 10s of continuous no-progress per QUESTION', () => {
+    expect(QUIZ_QUESTION_STALL_BUDGET_MS).toBe(10_000);
+    let t = observe(createQuizStallTracker(), A, SILENT, 1_000);
+    expect(t.lastProgressAt).toBe(1_000);
+    expect(trip(t, 10_999)).toBe(false);
+    expect(trip(t, 11_000)).toBe(true);
+  });
+
+  it('Q2 replay: total silence earns the verdict inside the question (~10s), never “no verdict”', () => {
+    // v1 failure: the 30s per-candidate grace outlived the 20s
+    // question, so a dead-silent question got NO verdict at all.
+    // Poll at the hook's 500ms cadence with a frozen signature:
+    // the trip must land at the budget plus at most one poll.
+    let t = createQuizStallTracker();
+    let trippedAt: number | null = null;
+    for (let now = 500; now <= 30_000; now += 500) {
+      t = observe(t, A, SILENT, now);
+      if (trip(t, now)) {
+        trippedAt = now;
+        break;
+      }
+    }
+    expect(trippedAt).not.toBeNull();
+    expect(trippedAt!).toBeGreaterThanOrEqual(10_000);
+    expect(trippedAt!).toBeLessThanOrEqual(11_000);
+  });
+
+  it('progress resets the budget: a signal at 9.5s buys a fresh 10s', () => {
+    let t = observe(createQuizStallTracker(), A, SILENT, 0);
+    t = observe(t, A, SILENT, 9_000);
+    // Metadata lands at 9.5s — bytes flowed, the silence ends.
+    t = observe(t, A, { ...SILENT, duration: 90 }, 9_500);
+    expect(t.lastProgressAt).toBe(9_500);
+    expect(trip(t, 10_000)).toBe(false);
+    expect(trip(t, 19_499)).toBe(false);
+    expect(trip(t, 19_500)).toBe(true);
+  });
+
+  it('stall accrues across candidates: advancing the chain does NOT reset the silence clock', () => {
+    let t = observe(createQuizStallTracker(), A, SILENT, 0);
+    for (let now = 500; now <= 6_000; now += 500) {
+      t = observe(t, A, SILENT, now);
+    }
+    // The chain advances at ~6s; the new candidate's first sample
+    // only re-baselines its signature — the question has still
+    // heard nothing but silence since t=0.
+    t = observe(t, B, SILENT, 6_500);
+    expect(t.lastProgressAt).toBe(0);
+    expect(trip(t, 9_999)).toBe(false);
+    expect(trip(t, 10_000)).toBe(true);
+  });
+
+  it('a hard-error advance leaves the budget untouched: silence is measured from the question, not the error', () => {
+    let t = observe(createQuizStallTracker(), A, SILENT, 0);
+    // A hard-errors at t=1s: errors never touch the tracker (the
+    // hook advances instantly without an observation). B's first
+    // sample re-baselines at t=1.5s; the silence still dates
+    // from the question's start.
+    t = observe(t, B, SILENT, 1_500);
+    expect(t.lastProgressAt).toBe(0);
+    expect(trip(t, 10_000)).toBe(true);
+    // …but B making progress at t=3s resets it, as always.
+    let t2 = observe(createQuizStallTracker(), A, SILENT, 0);
+    t2 = observe(t2, B, SILENT, 1_500);
+    t2 = observe(t2, B, { ...SILENT, bufferedPosition: 4 }, 3_000);
+    expect(t2.lastProgressAt).toBe(3_000);
+    expect(trip(t2, 10_000)).toBe(false);
+    expect(trip(t2, 13_000)).toBe(true);
+  });
+
+  it('a progressing candidate is never killed, however long the question runs', () => {
+    // The video fallback trickles: the buffered position creeps
+    // every ~2.5s for a full minute of wall time (a 58MB file on
+    // a bad connection). Every creep is progress; the budget
+    // only ever measures the CURRENT silence.
+    let t = createQuizStallTracker();
+    let trippedAt: number | null = null;
+    for (let now = 500; now <= 60_000; now += 500) {
+      const buffered = Math.floor(now / 2_500) * 0.5;
+      t = observe(t, B, { ...SILENT, bufferedPosition: buffered }, now);
+      if (trip(t, now)) {
+        trippedAt = now;
+        break;
+      }
+    }
+    expect(trippedAt).toBeNull();
+    // Then the connection dies silently: death comes 10s after
+    // the LAST progress, not a moment sooner.
+    const frozenAt = t.lastProgressAt;
+    expect(trip(t, frozenAt + 9_999)).toBe(false);
+    expect(trip(t, frozenAt + 10_000)).toBe(true);
+  });
+
+  it('a started candidate is immune at any elapsed silence', () => {
+    let t = observe(createQuizStallTracker(), A, SILENT, 0);
+    t = observe(t, A, { ...SILENT, playing: true }, 2_000);
+    expect(t.started).toBe(true);
+    expect(trip(t, 600_000)).toBe(false);
+  });
+
+  it('never trips when not loading, failed, source-less or disabled', () => {
+    const t = observe(createQuizStallTracker(), A, SILENT, 0);
+    expect(trip(t, 600_000, { loading: false })).toBe(false);
+    expect(trip(t, 600_000, { failed: true })).toBe(false);
+    expect(trip(t, 600_000, { hasSource: false })).toBe(false);
+    expect(trip(t, 600_000, { disabled: true })).toBe(false);
+  });
+
+  it('a new question re-baselines: the verdict clock restarts with the mediaKey', () => {
+    let t = createQuizStallTracker();
+    for (let now = 500; now <= 10_500; now += 500) {
+      t = observe(t, A, SILENT, now);
+    }
+    expect(trip(t, 10_500)).toBe(true);
+    // The next question (new mediaKey) starts a fresh budget —
+    // yesterday's silence must not execute today's first load.
+    t = observe(t, A, SILENT, 50_000, 'game:2');
+    expect(t.lastProgressAt).toBe(50_000);
+    expect(trip(t, 59_999)).toBe(false);
+    expect(trip(t, 60_000)).toBe(true);
+  });
+});
+
+describe('quizFailedShouldClear (solo resurrection — a late start un-fails the question)', () => {
+  const base = {
+    failed: true,
+    held: false,
+    currentKind: 'video' as const,
+    signalKind: 'video' as const,
+    started: true,
+  };
+
+  it('ozar’s Q1: the video fallback speaks after the verdict — the latch clears', () => {
+    expect(quizFailedShouldClear(base)).toBe(true);
+  });
+
+  it('an audio last candidate that loads late clears it too', () => {
+    expect(
+      quizFailedShouldClear({
+        ...base,
+        currentKind: 'audio',
+        signalKind: 'audio',
+      }),
+    ).toBe(true);
+  });
+
+  it('a stale signal from the OTHER engine never clears it (orphaned .ogg while the chain sits on video)', () => {
+    expect(quizFailedShouldClear({ ...base, signalKind: 'audio' })).toBe(
+      false,
+    );
+    expect(
+      quizFailedShouldClear({
+        ...base,
+        currentKind: 'audio',
+        signalKind: 'video',
+      }),
+    ).toBe(false);
+  });
+
+  it('multiplayer is never resurrected by this rule (held rounds keep the latched verdict)', () => {
+    expect(quizFailedShouldClear({ ...base, held: true })).toBe(false);
+  });
+
+  it('no clear without a genuine start, and no clear when not failed', () => {
+    expect(quizFailedShouldClear({ ...base, started: false })).toBe(false);
+    expect(quizFailedShouldClear({ ...base, failed: false })).toBe(false);
+  });
+});
+
+describe('solo clock rules (v2 — the clock obeys the song)', () => {
+  it('the clock starts on playing, and on the verdict (failed / empty) — never while buffering', () => {
+    expect(soloClockStartsOnPhase('playing')).toBe(true);
+    expect(soloClockStartsOnPhase('failed')).toBe(true);
+    expect(soloClockStartsOnPhase('empty')).toBe(true);
+    expect(soloClockStartsOnPhase('buffering')).toBe(false);
+  });
+
+  it('the anti-hang safety is one full answer window — it can never pre-empt the 10s verdict', () => {
+    expect(soloLoadSafetyMs(20)).toBe(20_000);
+    expect(soloLoadSafetyMs(15)).toBe(15_000);
+    expect(soloLoadSafetyMs(20)).toBeGreaterThan(
+      QUIZ_QUESTION_STALL_BUDGET_MS,
+    );
+  });
+
+  it('a load still progressing at 10s starts no clock: no trip, phase stays buffering', () => {
+    // End-to-end at the pure level: progress observations land
+    // at 0s / 4s / 8s; at the old blind-safety moment (10s) the
+    // budget has NOT tripped and the phase is still 'buffering',
+    // so the clock-start rule keeps the ring held.
+    let t = observe2(createQuizStallTracker(), 0);
+    t = observe2(t, 4_000, 30);
+    t = observe2(t, 8_000, 61);
+    expect(
+      quizQuestionStallShouldTrip({
+        now: 10_000,
+        loading: true,
+        lastProgressAt: t.lastProgressAt,
+        hasStarted: t.started,
+        hasSource: true,
+        failed: false,
+        disabled: false,
+      }),
+    ).toBe(false);
+    expect(soloClockStartsOnPhase('buffering')).toBe(false);
+
+    function observe2(
+      tracker: QuizStallTracker,
+      now: number,
+      buffered = 0,
+    ): QuizStallTracker {
+      const sample: QuizProgressSample = {
+        duration: 0,
+        currentTime: 0,
+        bufferedPosition: buffered,
+        playing: false,
+      };
+      return quizStallObserve(tracker, {
+        mediaKey: 'game:1',
+        candidateKey: 'game:1:video',
+        signature: quizProgressSignature(sample),
+        started: quizSampleStarted(sample),
+        now,
+      });
+    }
+  });
+});
+
+describe('resolveSoloNextPreload (parts 5+6 — which next question preloads)', () => {
+  const base = { gameKey: 'game-9', currentIndex: 3 };
+
+  it('the feedback reveal yields the full next chain under its key', () => {
+    expect(
+      resolveSoloNextPreload({
+        ...base,
+        feedbackNext: {
+          index: 4,
+          audioUrl: 'https://a.example/q4.ogg',
+          videoUrl: 'https://v.example/q4.webm',
+        },
+        earlyNext: null,
+      }),
+    ).toEqual({
+      candidates: ['https://a.example/q4.ogg', 'https://v.example/q4.webm'],
+      mediaKey: 'game-9:4',
+    });
+  });
+
+  it('part 5 wiring: a present nextAudioUrl becomes the early preload', () => {
+    expect(
+      resolveSoloNextPreload({
+        ...base,
+        feedbackNext: null,
+        earlyNext: { index: 4, audioUrl: 'https://a.example/q4.ogg' },
+      }),
+    ).toEqual({
+      candidates: ['https://a.example/q4.ogg'],
+      mediaKey: 'game-9:4',
+    });
+  });
+
+  it('part 5 wiring: an absent field leaves behaviour unchanged (null)', () => {
+    expect(
+      resolveSoloNextPreload({
+        ...base,
+        feedbackNext: null,
+        earlyNext: null,
+      }),
+    ).toBeNull();
+  });
+
+  it('a stale early reveal (not the immediate next question) is ignored', () => {
+    expect(
+      resolveSoloNextPreload({
+        ...base,
+        feedbackNext: null,
+        earlyNext: { index: 2, audioUrl: 'https://a.example/q2.ogg' },
+      }),
+    ).toBeNull();
+    expect(
+      resolveSoloNextPreload({
+        ...base,
+        feedbackNext: null,
+        earlyNext: { index: 5, audioUrl: 'https://a.example/q5.ogg' },
+      }),
+    ).toBeNull();
+  });
+
+  it('the feedback reveal wins over the early reveal', () => {
+    expect(
+      resolveSoloNextPreload({
+        ...base,
+        feedbackNext: {
+          index: 4,
+          audioUrl: 'https://a.example/q4.ogg',
+          videoUrl: 'https://v.example/q4.webm',
+        },
+        earlyNext: { index: 4, audioUrl: 'https://a.example/q4.ogg' },
+      })?.candidates,
+    ).toEqual(['https://a.example/q4.ogg', 'https://v.example/q4.webm']);
+  });
+
+  it('a feedback reveal with no audio still yields its (video) chain', () => {
+    expect(
+      resolveSoloNextPreload({
+        ...base,
+        feedbackNext: {
+          index: 4,
+          audioUrl: null,
+          videoUrl: 'https://v.example/q4.webm',
+        },
+        earlyNext: null,
+      }),
+    ).toEqual({
+      candidates: [null, 'https://v.example/q4.webm'],
+      mediaKey: 'game-9:4',
+    });
+  });
+});
+
+describe('buffer package — connection kind + video buffer profiles', () => {
+  it('wifi and ethernet classify unmetered', () => {
+    expect(
+      bufferConnectionKind({
+        type: 'wifi',
+        isInternetReachable: true,
+        isConnectionExpensive: null,
+      }),
+    ).toBe('unmetered');
+    expect(
+      bufferConnectionKind({
+        type: 'ethernet',
+        isInternetReachable: true,
+        isConnectionExpensive: null,
+      }),
+    ).toBe('unmetered');
+  });
+
+  it('an explicitly expensive connection is metered, whatever the type', () => {
+    expect(
+      bufferConnectionKind({
+        type: 'wifi',
+        isInternetReachable: true,
+        isConnectionExpensive: true,
+      }),
+    ).toBe('metered');
+    expect(
+      bufferConnectionKind({
+        type: 'cellular',
+        isInternetReachable: true,
+        isConnectionExpensive: true,
+      }),
+    ).toBe('metered');
+  });
+
+  it('an explicitly cheap + reachable connection classifies unmetered', () => {
+    expect(
+      bufferConnectionKind({
+        type: 'cellular',
+        isInternetReachable: true,
+        isConnectionExpensive: false,
+      }),
+    ).toBe('unmetered');
+    expect(
+      bufferConnectionKind({
+        type: 'unknown',
+        isInternetReachable: true,
+        isConnectionExpensive: false,
+      }),
+    ).toBe('unmetered');
+  });
+
+  it('cellular without a cheap report, unknown, and no sample are metered', () => {
+    expect(
+      bufferConnectionKind({
+        type: 'cellular',
+        isInternetReachable: true,
+        isConnectionExpensive: null,
+      }),
+    ).toBe('metered');
+    expect(
+      bufferConnectionKind({
+        type: 'unknown',
+        isInternetReachable: null,
+        isConnectionExpensive: null,
+      }),
+    ).toBe('metered');
+    expect(bufferConnectionKind(null)).toBe('metered');
+    expect(
+      bufferConnectionKind({
+        type: 'none',
+        isInternetReachable: false,
+        isConnectionExpensive: null,
+      }),
+    ).toBe('metered');
+  });
+
+  it('the unmetered watch profile buffers toward the whole file', () => {
+    expect(watchBufferOptions('unmetered')).toEqual({
+      waitsToMinimizeStalling: true,
+      minBufferForPlayback: 2.5,
+      preferredForwardBufferDuration: UNMETERED_FORWARD_BUFFER_S,
+    });
+    // Beyond any theme file (~90s): buffer-to-complete in effect.
+    expect(UNMETERED_FORWARD_BUFFER_S).toBeGreaterThan(600);
+  });
+
+  it('the metered watch profile keeps the bounded runway', () => {
+    expect(watchBufferOptions('metered')).toEqual({
+      waitsToMinimizeStalling: true,
+      minBufferForPlayback: 5,
+      preferredForwardBufferDuration: 50,
+    });
+  });
+
+  it('the hidden-video fallback always takes the metered profile', () => {
+    expect(
+      videoBufferOptionsFor({ role: 'hidden-video', connection: 'unmetered' }),
+    ).toEqual(watchBufferOptions('metered'));
+    expect(
+      videoBufferOptionsFor({ role: 'hidden-video', connection: 'metered' }),
+    ).toEqual(watchBufferOptions('metered'));
+  });
+
+  it('watch candidates take their connection profile', () => {
+    expect(
+      videoBufferOptionsFor({ role: 'primary', connection: 'unmetered' }),
+    ).toEqual(watchBufferOptions('unmetered'));
+    expect(
+      videoBufferOptionsFor({
+        role: 'audio-fallback',
+        connection: 'metered',
+      }),
+    ).toEqual(watchBufferOptions('metered'));
   });
 });

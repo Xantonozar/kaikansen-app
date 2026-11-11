@@ -92,6 +92,37 @@ export function ensureAudioMode(): void {
   });
 }
 
+let engineWarmed = false;
+
+/**
+ * Warm the native audio engine (solo quiz cold-start fix,
+ * 2026-11-11): the first player creation in a launch carries
+ * the expo-audio module's start-up cost, and a quiz's first
+ * question used to pay it inside its own media wait — part of
+ * why Q1's clip arrived seconds late. Creating (and immediately
+ * releasing) one source-less player performs that start-up with
+ * no audible output and no network file, and the one-time
+ * audio-mode application rides along. Called when the solo quiz
+ * screen mounts, so the create-game round trip covers the cost.
+ * Idempotent; failures are swallowed (a platform without the
+ * module simply stays cold, exactly as before).
+ */
+export function warmAudioEngine(): void {
+  ensureAudioMode();
+  if (engineWarmed) return;
+  engineWarmed = true;
+  try {
+    const player = createNativeAudioPlayer(null, AUDIO_PLAYER_OPTIONS);
+    try {
+      player.remove();
+    } catch {
+      // Already released — the warm-up still happened.
+    }
+  } catch {
+    // Native module unavailable (web/tests) — nothing to warm.
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Preload slot                                                        */
 /* ------------------------------------------------------------------ */

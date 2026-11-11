@@ -1,4 +1,5 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { HttpAudioProbe, type AudioProbeResult } from './audio-probe';
 import { SoloQuizService } from './solo-quiz.service';
 
 /* ------------------------------------------------------------------ */
@@ -509,6 +510,301 @@ describe('SoloQuizService — anilist pool (owner picker, spec 2026-11-10)', () 
       source: 'listened',
     });
     expect(state.source).toBe('listened');
+  });
+});
+
+describe('SoloQuizService — verified dealing (part 7, 2026-11-11)', () => {
+  const oggOf = (i: number) => `https://a.animethemes.moe/Anime${i}-OP1.ogg`;
+
+  /** The fake catalogue, converted to derivable AnimeThemes
+      themes (audioUrl null → the served audio is the derived
+      .ogg the probe verifies). */
+  function makeProbedService(
+    script: (url: string) => AudioProbeResult,
+    themeCount?: number,
+  ) {
+    const models = makeFakeModels();
+    if (themeCount !== undefined) models.themes.splice(themeCount);
+    models.themes.forEach((t, idx) => {
+      t.audioUrl = null;
+      t.videoUrl = `https://v.animethemes.moe/Anime${idx + 1}-OP1.webm`;
+    });
+    const calls: { url: string; timeoutMs: number }[] = [];
+    const probe = {
+      probe: async (url: string, timeoutMs: number) => {
+        calls.push({ url, timeoutMs });
+        return script(url);
+      },
+    };
+    const service = new SoloQuizService(
+      models.themeModel as never,
+      models.attemptModel as never,
+      models.userModel as never,
+      models.watchHistoryModel as never,
+      probe as never,
+    );
+    return { service, models, calls };
+  }
+
+  it('deals a verified song without a redraw (one probe, bounded timeout)', async () => {
+    const { service, calls } = makeProbedService(() => 'ok');
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    expect(state.question?.theme.slug).toBe('anime-1-op1-1001');
+    expect(state.question?.theme.audioUrl).toBe(oggOf(1));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(oggOf(1));
+    expect(calls[0].timeoutMs).toBeGreaterThan(0);
+    expect(calls[0].timeoutMs).toBeLessThanOrEqual(1000);
+  });
+
+  it('a definite 404 redraws the question from the same pool', async () => {
+    const { service, calls } = makeProbedService((url) =>
+      url === oggOf(1) ? 'missing' : 'ok',
+    );
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    expect(state.question?.theme.slug).toBe('anime-2-op1-1002');
+    expect(state.question?.theme.audioUrl).toBe(oggOf(2));
+    expect(calls.map((c) => c.url)).toEqual([oggOf(1), oggOf(2)]);
+  });
+
+  it('a phantom rejected once is never re-dealt within the game', async () => {
+    const { service } = makeProbedService((url) =>
+      url === oggOf(1) ? 'missing' : 'ok',
+    );
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const dealtSlugs: string[] = [];
+    let last = null;
+    for (let i = 0; i < 10; i++) {
+      last = await service.submitAnswer(USER_1, state.gameId, null);
+      dealtSlugs.push(last.reveal.slug);
+    }
+    expect(last!.gameOver).toBe(true);
+    expect(dealtSlugs).toHaveLength(10);
+    expect(dealtSlugs).not.toContain('anime-1-op1-1001');
+    expect(new Set(dealtSlugs).size).toBe(10);
+  });
+
+  it('doubt (timeout / network / 5xx) keeps the song', async () => {
+    const { service } = makeProbedService(() => 'unknown');
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    expect(state.question?.theme.slug).toBe('anime-1-op1-1001');
+  });
+
+  it('an all-404 pool still deals — unverified after the redraw cap', async () => {
+    const { service, calls } = makeProbedService(() => 'missing');
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    // 1 initial probe + 3 capped redraws, then the 4th candidate
+    // is dealt as-is rather than looping (or failing) forever.
+    expect(calls).toHaveLength(4);
+    expect(state.question?.theme.slug).toBe('anime-4-op1-1004');
+  });
+
+  it('a drained pool fills the last slot with the rejected song, unverified', async () => {
+    // Exactly 10 themes; only the last one's .ogg is a phantom.
+    const { service, calls } = makeProbedService(
+      (url) => (url === oggOf(10) ? 'missing' : 'ok'),
+      10,
+    );
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    let last = null;
+    for (let i = 0; i < 9; i++) {
+      last = await service.submitAnswer(USER_1, state.gameId, null);
+    }
+    // Q10: theme 10 probes missing, the redraw finds the pool
+    // empty, and the rejected song is dealt rather than the
+    // game dying one question short.
+    expect(last!.nextQuestion?.theme.slug).toBe('anime-10-op1-10010');
+    expect(
+      calls.filter((c) => c.url === oggOf(10)),
+    ).toHaveLength(1);
+  });
+
+  it('once the ~1s budget is spent, no further probe fires', async () => {
+    let now = 1_700_000_000_000;
+    const spy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const { service, calls } = makeProbedService((url) => {
+        if (url === oggOf(1)) {
+          // The first probe eats the whole budget (a slow edge).
+          now += 2000;
+          return 'missing';
+        }
+        return 'ok';
+      });
+      const state = await service.createGame(USER_1, { quizType: 'anime' });
+      // Theme 2 was dealt WITHOUT being probed — the budget was
+      // gone, so its verdict defaulted to "keep".
+      expect(state.question?.theme.slug).toBe('anime-2-op1-1002');
+      expect(calls).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('the shared probe cache means a second game re-probes nothing', async () => {
+    const original = globalThis.fetch;
+    let fetches = 0;
+    globalThis.fetch = jest.fn(async () => {
+      fetches += 1;
+      return { status: 206, body: { cancel: async () => undefined } };
+    }) as never;
+    try {
+      const models = makeFakeModels();
+      models.themes.forEach((t, idx) => {
+        t.audioUrl = null;
+        t.videoUrl = `https://v.animethemes.moe/Anime${idx + 1}-OP1.webm`;
+      });
+      const service = new SoloQuizService(
+        models.themeModel as never,
+        models.attemptModel as never,
+        models.userModel as never,
+        models.watchHistoryModel as never,
+        new HttpAudioProbe(),
+      );
+      await service.createGame(USER_1, { quizType: 'anime' });
+      expect(fetches).toBe(1); // Q1's song verified once
+      await service.createGame(USER_1, { quizType: 'anime' });
+      expect(fetches).toBe(1); // same first draw — served by the cache
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('without an injected probe nothing is probed (no network, old behaviour)', async () => {
+    const { service, models } = makeService();
+    models.themes.forEach((t, idx) => {
+      t.audioUrl = null;
+      t.videoUrl = `https://v.animethemes.moe/Anime${idx + 1}-OP1.webm`;
+    });
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    expect(state.question?.theme.slug).toBe('anime-1-op1-1001');
+    expect(state.question?.theme.audioUrl).toBe(oggOf(1));
+  });
+});
+
+describe('SoloQuizService — earlier reveal (part 5, 2026-11-11)', () => {
+  const oggOf = (i: number) => `https://a.animethemes.moe/Anime${i}-OP1.ogg`;
+
+  /** Derivable AnimeThemes catalogue, no probe injected (the
+      no-op probe keeps every song; verification is part 7's
+      concern, not this suite's). */
+  function makeRevealService() {
+    const models = makeFakeModels();
+    models.themes.forEach((t, idx) => {
+      t.audioUrl = null;
+      t.videoUrl = `https://v.animethemes.moe/Anime${idx + 1}-OP1.webm`;
+    });
+    const service = new SoloQuizService(
+      models.themeModel as never,
+      models.attemptModel as never,
+      models.userModel as never,
+      models.watchHistoryModel as never,
+    );
+    return { service, models };
+  }
+
+  function sessionOf(service: SoloQuizService, gameId: string) {
+    const sessions = (
+      service as unknown as {
+        sessions: Map<
+          string,
+          {
+            current: {
+              theme: { slug: string };
+              startedAt: Date;
+              playbackStartedAt: Date | null;
+            } | null;
+            next: { theme: { slug: string } } | null;
+          }
+        >;
+      }
+    ).sessions;
+    return sessions.get(gameId)!;
+  }
+
+  it('the playback-start signal returns the NEXT question’s audio URL', async () => {
+    const { service } = makeRevealService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const signal = await service.markPlaybackStarted(USER_1, state.gameId);
+    expect(typeof signal.playbackStartedAt).toBe('string');
+    expect(signal.nextAudioUrl).toBe(oggOf(2));
+    // Audio only: the response carries no options or theme data.
+    expect(Object.keys(signal).sort()).toEqual(
+      ['nextAudioUrl', 'playbackStartedAt'].sort(),
+    );
+  });
+
+  it('a repeated signal returns the same stamp and the same next audio', async () => {
+    const { service } = makeRevealService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const first = await service.markPlaybackStarted(USER_1, state.gameId);
+    const second = await service.markPlaybackStarted(USER_1, state.gameId);
+    expect(second.playbackStartedAt).toBe(first.playbackStartedAt);
+    expect(second.nextAudioUrl).toBe(first.nextAudioUrl);
+    // The next question was drawn once, not per signal.
+    expect(sessionOf(service, state.gameId).next?.theme.slug).toBe(
+      'anime-2-op1-1002',
+    );
+  });
+
+  it('the revealed question is the one the answer serves next', async () => {
+    const { service } = makeRevealService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const signal = await service.markPlaybackStarted(USER_1, state.gameId);
+    const res = await service.submitAnswer(USER_1, state.gameId, null);
+    expect(res.nextQuestion?.theme.slug).toBe('anime-2-op1-1002');
+    expect(res.nextQuestion?.theme.audioUrl).toBe(signal.nextAudioUrl);
+    expect(sessionOf(service, state.gameId).next).toBeNull();
+  });
+
+  it('the pre-drawn question is measured from its promotion, not its draw', async () => {
+    const { service } = makeRevealService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const signal = await service.markPlaybackStarted(USER_1, state.gameId);
+    const signalledAt = Date.parse(signal.playbackStartedAt);
+    // Time passes while Q1 plays; Q2 was already drawn (that is
+    // the point of the reveal) — but its clock must not start
+    // until the answer promotes it.
+    await new Promise((r) => setTimeout(r, 1100));
+    await service.submitAnswer(USER_1, state.gameId, null);
+    const current = sessionOf(service, state.gameId).current!;
+    expect(current.theme.slug).toBe('anime-2-op1-1002');
+    expect(current.startedAt.getTime()).toBeGreaterThan(signalledAt + 1000);
+    expect(current.playbackStartedAt).toBeNull();
+  });
+
+  it('a fully signalled game still deals 10 distinct questions', async () => {
+    const { service } = makeRevealService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const dealt: string[] = [];
+    let last = null;
+    for (let i = 0; i < 10; i++) {
+      await service.markPlaybackStarted(USER_1, state.gameId);
+      last = await service.submitAnswer(USER_1, state.gameId, null);
+      dealt.push(last.reveal.slug);
+    }
+    expect(last!.gameOver).toBe(true);
+    expect(new Set(dealt).size).toBe(10);
+  });
+
+  it('on the last question the signal reveals nothing (null)', async () => {
+    const { service } = makeRevealService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    for (let i = 0; i < 9; i++) {
+      await service.submitAnswer(USER_1, state.gameId, null);
+    }
+    const signal = await service.markPlaybackStarted(USER_1, state.gameId);
+    expect(signal.nextAudioUrl).toBeNull();
+  });
+
+  it('a theme with no resolvable audio reveals null, not a video link', async () => {
+    const { service, models } = makeService();
+    // Factory themes: stored "audio" is a video link and nothing
+    // derives — the next question has NO audio to reveal.
+    void models;
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const signal = await service.markPlaybackStarted(USER_1, state.gameId);
+    expect(signal.nextAudioUrl).toBeNull();
   });
 });
 
