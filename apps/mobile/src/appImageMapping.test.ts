@@ -9,8 +9,9 @@ import {
  * Shared AppImage props mapping (perf problem 11): the exact
  * expo-image props every artwork render in the app receives —
  * memory-disk caching, the Lavender-Dusk tint as the loading
- * background, the short cross-dissolve, and recyclingKey /
- * onError / accessibility pass-through.
+ * background, NO fade-in (transition 0, owner's ruling 2026-11-11
+ * — the speed batch removed the 200ms cross-dissolve), and
+ * recyclingKey / onError / accessibility pass-through.
  */
 describe('appImageProps', () => {
   it('maps a URI source with the locked defaults', () => {
@@ -21,7 +22,10 @@ describe('appImageProps', () => {
     });
     expect(mapped.source).toEqual({ uri: 'https://s4.anilist.co/medium.jpg' });
     expect(mapped.contentFit).toBe('cover');
-    expect(mapped.transition).toBe(APP_IMAGE_TRANSITION_MS);
+    // No fade: the owner ruled the 200ms cross-dissolve out
+    // (2026-11-11 speed batch) — the pin is the literal 0.
+    expect(mapped.transition).toBe(0);
+    expect(APP_IMAGE_TRANSITION_MS).toBe(0);
     expect(mapped.cachePolicy).toBe('memory-disk');
     // The tint rides as the leading backgroundColor layer so the
     // box shows Lavender Dusk lavender while the art loads.

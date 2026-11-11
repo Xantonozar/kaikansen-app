@@ -30,6 +30,8 @@ import type {
   ThemeSummary,
 } from '@kaikansen/contracts';
 import { fetchHome, searchThemes } from '../../src/api';
+import { SkeletonThemeRow } from '../../src/components/Skeleton';
+import { planSearch, searchMemory } from '../../src/searchMemory';
 import { pickDefaultArtist } from '../../src/defaultArtists';
 import {
   mergeSearchPage,
@@ -345,14 +347,33 @@ export default function SearchScreen() {
       setError(null);
       return;
     }
-    setSearching(true);
+    /* Session memory (speed batch, Option B): a remembered
+       result for this exact query renders IMMEDIATELY — no
+       spinner — while the network fetch still runs below to
+       refresh it. A background failure keeps the remembered
+       results and never raises the error state; only a
+       memory-miss failure surfaces error + Retry. Successful
+       fetches are remembered (failures never are). */
+    const plan = planSearch(searchMemory, q);
+    if (plan.immediate) {
+      setResponse(plan.immediate);
+      setError(null);
+      setSearching(false);
+    } else {
+      setSearching(true);
+    }
     const timer = setTimeout(() => {
       searchThemes(q)
         .then((res) => {
+          searchMemory.put(q, res);
           setResponse(res);
           setError(null);
         })
         .catch((e: unknown) => {
+          if (plan.fromMemory) {
+            // The remembered results stay on screen, silently.
+            return;
+          }
           setResponse(null);
           setError(e instanceof Error ? e.message : 'Search failed.');
         })
@@ -692,8 +713,12 @@ export default function SearchScreen() {
         ) : full?.loaded ? (
           <Text style={styles.hint}>No results for “{query.trim()}”.</Text>
         ) : (
-          <View style={styles.center}>
-            <ActivityIndicator color={theme.accent} />
+          /* The full view's page-1 load (skeleton sweep):
+             theme-row shapes while the first page is in flight. */
+          <View>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <SkeletonThemeRow key={i} />
+            ))}
           </View>
         )
       }
@@ -823,9 +848,15 @@ export default function SearchScreen() {
             )}
 
             {popular === null ? (
-              <View style={styles.center}>
-                <ActivityIndicator color={theme.accent} />
-              </View>
+              /* Idle Popular section loading (skeleton sweep):
+                 the section IS theme rows — row shapes stand in
+                 under its heading. */
+              <>
+                <Text style={styles.groupHeading}>Popular right now</Text>
+                {[0, 1, 2].map((i) => (
+                  <SkeletonThemeRow key={i} />
+                ))}
+              </>
             ) : popular.length > 0 ? (
               <>
                 <Text style={styles.groupHeading}>Popular right now</Text>
@@ -873,8 +904,13 @@ export default function SearchScreen() {
             </Pressable>
           </View>
         ) : searching && response === null ? (
-          <View style={styles.center}>
-            <ActivityIndicator color={theme.accent} />
+          /* Initial results loading (skeleton sweep): the
+             results ARE theme rows, so theme-row shapes stand
+             in — no page spinner. */
+          <View style={styles.resultsSkeleton}>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <SkeletonThemeRow key={i} />
+            ))}
           </View>
         ) : response ? (
           <>
@@ -1034,6 +1070,12 @@ const createStyles = (theme: Theme) =>
   center: {
     paddingTop: spacing.xxxl,
     alignItems: 'center',
+  },
+  resultsSkeleton: {
+    // The results-loading skeleton's frame (skeleton sweep):
+    // the results content's own edge inset + top rhythm.
+    paddingHorizontal: spacing.screenEdge,
+    paddingTop: spacing.lg,
   },
   results: {
     flex: 1,

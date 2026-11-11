@@ -48,6 +48,10 @@ import {
   updatePlaylist,
 } from '../../../src/libraryApi';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import {
+  SkeletonBlock,
+  SkeletonThemeRow,
+} from '../../../src/components/Skeleton';
 import { AppImage } from '../../../src/components/AppImage';
 import { formatTime } from '../../../src/playback';
 import {
@@ -402,13 +406,30 @@ export default function PlaylistDetailScreen() {
   );
 
   if (loadState === 'loading') {
+    /* Initial load (skeleton sweep): the page's shape — the
+       header card's cover block + title bars, then theme-row
+       shapes. No page spinner. */
     return (
       <View style={styles.screen}>
         <View style={[styles.topRow, { paddingTop: insets.top + spacing.sm }]}>
           {backTile}
+          <Text style={styles.topTitle}>Playlist</Text>
+          <View style={styles.backHit} />
         </View>
-        <View style={styles.center}>
-          <ActivityIndicator color={theme.accent} />
+        <View style={styles.body}>
+          <View style={styles.headerCard}>
+            <View style={styles.skeletonHeader}>
+              <SkeletonBlock width={96} height={96} radius={12} />
+              <View style={styles.skeletonHeaderText}>
+                <SkeletonBlock width="78%" height={16} radius={6} />
+                <SkeletonBlock width="52%" height={12} radius={5} />
+              </View>
+            </View>
+          </View>
+          <SkeletonThemeRow />
+          <SkeletonThemeRow />
+          <SkeletonThemeRow />
+          <SkeletonThemeRow />
         </View>
       </View>
     );
@@ -863,6 +884,18 @@ const createStyles = (theme: Theme) =>
   body: {
     paddingHorizontal: spacing.screenEdge,
     paddingBottom: spacing.xxxl,
+  },
+  skeletonHeader: {
+    // The playlist skeleton's header row (skeleton sweep): the
+    // 96pt cover block beside the title bars, in headerTop's
+    // own row rhythm.
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  skeletonHeaderText: {
+    flex: 1,
+    gap: 8,
   },
   headerCard: {
     backgroundColor: theme.surface,

@@ -38,6 +38,7 @@ import {
   type QuizSocketStatus,
 } from '../../../src/quizSocket';
 import { Avatar } from '../../../src/components/Avatar';
+import { SkeletonRoomRow } from '../../../src/components/Skeleton';
 import {
   fontFamilies,
   radii,
@@ -408,9 +409,14 @@ export default function QuizLobbyScreen() {
                 )}
               </View>
               {rooms === null && !roomsError ? (
-                <View style={styles.cardCenter}>
-                  <ActivityIndicator color={theme.accent} />
-                </View>
+                /* Public-rooms initial load (skeleton sweep):
+                   the section IS a list — room-row shapes stand
+                   in. (Section page-load, not gameplay.) */
+                <>
+                  {[0, 1, 2].map((i) => (
+                    <SkeletonRoomRow key={i} />
+                  ))}
+                </>
               ) : roomsError && rooms === null ? (
                 <Text style={styles.hint}>
                   Could not load public rooms. Pull to retry.

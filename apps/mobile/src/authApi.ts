@@ -140,7 +140,16 @@ export async function fetchMe(accessToken: string): Promise<UserProfile> {
     REQUEST_DEADLINE_MS.LONG,
   );
   if (!res.ok) throw await toApiError(res);
-  return (await res.json()) as UserProfile;
+  const profile = (await res.json()) as UserProfile;
+  // Speed batch: the own-profile payload rides the first-paint
+  // disk snapshot so the next cold start can hydrate it. Lazy
+  // import — api.ts's cache wiring imports this module's client
+  // neighbours, and a static cycle back would be fragile; the
+  // persist itself is fire-and-forget.
+  void import('./api')
+    .then((m) => m.persistFirstPaint({ profile: { value: profile, fetchedAt: Date.now() } }))
+    .catch(() => {});
+  return profile;
 }
 
 /* ------------------------------------------------------------------ */

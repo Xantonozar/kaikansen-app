@@ -29,6 +29,18 @@ import {
 // hermetic (same pattern as api.test.ts).
 jest.mock('./fixtures/popularThemes', () => ({ popularThemesFixture: [] }));
 
+// api.ts's import chain reaches storage.ts, whose secure grade
+// imports the real expo-secure-store (ESM the Jest transform
+// can't parse) — stub it (same pattern as api.test.ts; needed
+// since the first-paint wiring pulled storage into api.ts's
+// graph, speed batch 2026-11-11).
+jest.mock('expo-secure-store', () => ({
+  getItemAsync: async () => null,
+  setItemAsync: async () => undefined,
+  deleteItemAsync: async () => undefined,
+}));
+jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
+
 // (libraryApi is deliberately NOT imported here: under Jest the
 // API URL is unset, so its functions short-circuit in fixture mode
 // before any network — the LONG-class test below drives the exact

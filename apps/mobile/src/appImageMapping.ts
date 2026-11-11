@@ -10,12 +10,14 @@ import type { ImageStyle } from 'expo-image';
  *
  * The locked treatment (IMAGES-EXPO spec):
  * - cachePolicy 'memory-disk' (expo-image's disk+memory cache).
- * - Lavender-Dusk-tinted placeholder fade-in: the call site's
+ * - Lavender-Dusk-tinted placeholder: the call site's
  *   tint colour is folded into the style as backgroundColor (the
  *   same trick RN Image surfaces already used — their styles set
- *   a theme background behind the art), and a short 200ms
- *   cross-dissolve `transition` fades the loaded image in over
- *   the tint. No layout shift: call sites keep their fixed boxes.
+ *   a theme background behind the art), shown behind the art
+ *   while it loads — and NO fade: `transition` is 0 by the
+ *   owner's ruling (2026-11-11, the speed batch — "just remove
+ *   fade in 200ms"), so images paint immediately when ready.
+ *   No layout shift: call sites keep their fixed boxes.
  *   The placeholder shows ONLY while the real image loads — the
  *   "has a URI" vs "no URI" branching stays at call sites, which
  *   keep rendering their own empty-state Views exactly as before.
@@ -53,8 +55,13 @@ export interface AppImageMappedProps {
   onError?: () => void;
 }
 
-/** Fade-in duration (ms) — short, per the spec's "short transition". */
-export const APP_IMAGE_TRANSITION_MS = 200;
+/**
+ * Fade-in duration (ms): ZERO by the owner's ruling (2026-11-11,
+ * speed batch — the 200ms cross-dissolve made image loads feel
+ * slow; images now paint immediately when ready). Kept as a named
+ * constant so the mapping (and its test) has a single seam.
+ */
+export const APP_IMAGE_TRANSITION_MS = 0;
 
 /** RN resizeMode → expo-image contentFit (the names that differ). */
 export function contentFitForResizeMode(

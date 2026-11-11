@@ -24,6 +24,10 @@ import { RankIcon } from '../../../src/components/RankIcon';
 import { SkeletonRankRow } from '../../../src/components/Skeleton';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 import {
+  planBoardLoad,
+  rememberBoard,
+} from '../../../src/leaderboardMemory';
+import {
   fontFamilies,
   radii,
   spacing,
@@ -71,6 +75,13 @@ const PLUM_SUB = 'rgba(247, 242, 247, 0.75)';
  * the Weekly scope carries its one-line caption ("RP earned
  * this week · resets Monday 00:00") so the week's figures are
  * never mistaken for lifetime RP.
+ *
+ * Speed addendum (2026-11-11): the last loaded board per scope
+ * is remembered in session memory (src/leaderboardMemory.ts) —
+ * a revisit paints it instantly while the fetch refreshes
+ * behind it; a failed refresh against a remembered board is
+ * silent (the remembered rows stay), a cold failure keeps the
+ * error state. The fetch ALWAYS runs (Weekly freshness).
  */
 export default function LeaderboardScreen() {
   const theme = useTheme();
@@ -85,15 +96,26 @@ export default function LeaderboardScreen() {
   const [myRank, setMyRank] = useState<UserRankProfile | null>(null);
 
   const load = useCallback(async () => {
-    setEntries(null);
+    /* Paint-first (owner addendum, 2026-11-11): a remembered
+       board for this scope paints instantly and the fetch
+       refreshes behind it; first-ever visits keep the
+       skeleton. Weekly's no-cache freshness rule stands —
+       the fetch ALWAYS runs; memory is paint-first only. */
+    const plan = planBoardLoad(scope);
+    setEntries(plan.paint);
     setError(null);
     try {
       const res = await fetchRankLeaderboard(scope);
       setEntries(res.leaderboard);
+      rememberBoard(scope, res.leaderboard);
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : 'Could not load the leaderboard.',
-      );
+      /* A failure against a remembered board keeps it silently
+         (no error state); a cold failure keeps today's error. */
+      if (plan.showErrorOnFailure) {
+        setError(
+          e instanceof Error ? e.message : 'Could not load the leaderboard.',
+        );
+      }
     }
     if (signedIn) {
       try {

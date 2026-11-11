@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -23,6 +22,10 @@ import {
 import { useFavorites } from '../../../src/favoritesStore';
 import { pickDefaultArtist } from '../../../src/defaultArtists';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import {
+  SkeletonBlock,
+  SkeletonThemeRow,
+} from '../../../src/components/Skeleton';
 import {
   queueItemsFromSummaries,
   usePlaybackSession,
@@ -149,9 +152,24 @@ export default function ArtistDetailScreen() {
           <Text style={styles.errorDetail}>{error}</Text>
         </View>
       ) : data === undefined ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={theme.accent} />
-        </View>
+        /* Initial load (skeleton sweep): the hero card's shape —
+           the 80pt portrait circle, name + subline bars — then
+           theme-row shapes. No page spinner. */
+        <ScrollView
+          contentContainerStyle={styles.content}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.column}>
+            <View style={styles.hero}>
+              <SkeletonBlock width={80} height={80} radius={999} />
+              <SkeletonBlock width="52%" height={17} radius={6} style={{ marginTop: 12 }} />
+              <SkeletonBlock width="30%" height={12} radius={5} style={{ marginTop: 8 }} />
+            </View>
+            <SkeletonThemeRow />
+            <SkeletonThemeRow />
+            <SkeletonThemeRow />
+          </View>
+        </ScrollView>
       ) : data === null ? (
         <View style={styles.center}>
           <Text style={styles.errorText}>Artist not found</Text>

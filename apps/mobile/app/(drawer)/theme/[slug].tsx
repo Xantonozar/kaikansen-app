@@ -54,6 +54,10 @@ import {
   subscribeCache,
 } from '../../../src/api';
 import { ThemeComments } from '../../../src/components/ThemeComments';
+import {
+  SkeletonBlock,
+  SkeletonThemeRow,
+} from '../../../src/components/Skeleton';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import { ThemeRowMenu } from '../../../src/components/ThemeRowMenu';
 import { AddToPlaylistSheet } from '../../../src/components/AddToPlaylistSheet';
@@ -865,12 +869,23 @@ export default function ThemeDetailScreen() {
         {!ready || !detail ? (
           /* Detail zone placeholder — the frame (and the sections
              below, which fetch on their own) render immediately;
-             only this zone waits for the detail payload. */
+             only this zone waits for the detail payload. Skeleton
+             in the page's shape (speed batch skeleton sweep): the
+             hero block already stands via coverPlaceholder; below
+             it, the meta lines + theme-row shapes the loaded page
+             carries. No page spinner. */
           <View>
             {detailHeader}
             <View style={styles.coverPlaceholder} />
-            <View style={styles.loadingZone}>
-              <ActivityIndicator color={theme.accent} />
+            <View style={styles.skeletonMeta}>
+              <SkeletonBlock width="68%" height={18} radius={6} />
+              <SkeletonBlock width="42%" height={13} radius={5} />
+              <SkeletonBlock width="54%" height={13} radius={5} />
+            </View>
+            <View style={styles.skeletonRows}>
+              <SkeletonThemeRow />
+              <SkeletonThemeRow />
+              <SkeletonThemeRow />
             </View>
           </View>
         ) : (
@@ -1423,8 +1438,11 @@ export default function ThemeDetailScreen() {
           {!fixtureMode && (
             <View style={styles.relatedSection}>
               {!ready || similarState === 'loading' ? (
-                <View style={styles.relatedLoading}>
-                  <ActivityIndicator color={theme.accent} />
+                /* Section loading (skeleton sweep): theme-row
+                   shapes, the section's own content shape. */
+                <View style={styles.relatedSkeleton}>
+                  <SkeletonThemeRow />
+                  <SkeletonThemeRow />
                 </View>
               ) : similar.length === 0 ? (
                 <Text style={styles.relatedEmpty}>
@@ -1735,6 +1753,20 @@ const createStyles = (theme: Theme) =>
   loadingZone: {
     paddingVertical: spacing.xxxl,
     alignItems: 'center',
+  },
+  skeletonMeta: {
+    // The detail skeleton's meta lines (skeleton sweep): the
+    // loaded page's title + subline rhythm under the hero.
+    paddingHorizontal: spacing.screenEdge,
+    paddingTop: spacing.lg,
+    gap: 8,
+  },
+  skeletonRows: {
+    paddingHorizontal: spacing.screenEdge,
+    paddingTop: spacing.lg,
+  },
+  relatedSkeleton: {
+    paddingTop: spacing.xs,
   },
   fab: {
     // The v7 hero's centre play disc: 56px, centred on the

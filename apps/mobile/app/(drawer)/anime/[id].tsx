@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   Linking,
   Pressable,
   ScrollView,
@@ -9,6 +8,10 @@ import {
   View,
 } from 'react-native';
 import { AppImage } from '../../../src/components/AppImage';
+import {
+  SkeletonBlock,
+  SkeletonThemeRow,
+} from '../../../src/components/Skeleton';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft, ExternalLink } from 'lucide-react-native';
@@ -177,9 +180,26 @@ export default function AnimeDetailScreen() {
           <Text style={styles.errorDetail}>{error}</Text>
         </View>
       ) : data === undefined ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={theme.accent} />
-        </View>
+        /* Initial load (skeleton sweep): the page's own shape —
+           the 224dp banner block, the info card's title/meta
+           bars, then theme-row shapes. No page spinner. */
+        <ScrollView
+          contentContainerStyle={styles.content}
+          showsVerticalScrollIndicator={false}
+        >
+          <SkeletonBlock width="100%" height={224} radius={0} />
+          <View style={styles.column}>
+            <View style={styles.infoCard}>
+              <SkeletonBlock width="72%" height={18} radius={6} />
+              <SkeletonBlock width="46%" height={12} radius={5} style={{ marginTop: 8 }} />
+            </View>
+            <View style={styles.section}>
+              <SkeletonThemeRow />
+              <SkeletonThemeRow />
+              <SkeletonThemeRow />
+            </View>
+          </View>
+        </ScrollView>
       ) : data === null ? (
         <View style={styles.center}>
           <Text style={styles.errorText}>Anime not found</Text>

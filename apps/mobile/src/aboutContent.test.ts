@@ -39,11 +39,11 @@ describe('about content', () => {
     ]);
   });
 
-  it("what's new lists shipped 1.0.1 work, nothing speculative", () => {
+  it("what's new lists shipped 1.0.2 work, nothing speculative", () => {
     const joined = ABOUT_WHATS_NEW.join('\n');
-    expect(joined).toContain('Video watching fixed');
-    expect(joined).toContain('Leaderboard scrolls smoothly');
-    expect(joined).toContain('Retry');
+    expect(joined).toContain('Faster cold opens');
+    expect(joined).toContain('skeleton loading');
+    expect(joined).toContain('remember');
     expect(ABOUT_WHATS_NEW.length).toBeGreaterThanOrEqual(4);
   });
 });

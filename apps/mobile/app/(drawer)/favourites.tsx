@@ -14,6 +14,7 @@ import type { FavoritesResponse } from '@kaikansen/contracts';
 import { cacheKeyFor, fixtureMode, subscribeCache } from '../../src/api';
 import { useAuth } from '../../src/auth';
 import { ThemeRow } from '../../src/components/ThemeRow';
+import { SkeletonThemeRow } from '../../src/components/Skeleton';
 import { syncFavoriteSlugs, useFavorites } from '../../src/favoritesStore';
 import { fetchFavorites } from '../../src/libraryApi';
 import {
@@ -210,9 +211,13 @@ export default function FavouritesScreen() {
             </Pressable>
           </View>
         ) : !fav ? (
-          <View style={styles.center}>
-            <ActivityIndicator color={theme.accent} />
-          </View>
+          /* First load (skeleton sweep): theme-row shapes —
+             the list this page is. */
+          <>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <SkeletonThemeRow key={i} />
+            ))}
+          </>
         ) : (
           <>
             <Text style={styles.countLine}>

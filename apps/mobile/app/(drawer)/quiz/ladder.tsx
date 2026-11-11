@@ -15,6 +15,7 @@ import { cacheKeyFor, fixtureMode, subscribeCache } from '../../../src/api';
 import { useAuth } from '../../../src/auth';
 import { fetchMyRank } from '../../../src/socialApi';
 import { RankIcon } from '../../../src/components/RankIcon';
+import { SkeletonLadderRow } from '../../../src/components/Skeleton';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 import {
   fontFamilies,
@@ -129,7 +130,14 @@ export default function LadderScreen() {
       >
         <View style={styles.column}>
           {loading ? (
-            <ActivityIndicator color={theme.accent} style={styles.spin} />
+            /* Ladder's initial load (skeleton sweep): the
+               rank-row shapes the list below renders — the
+               below-fold rows live under it regardless. */
+            <View style={styles.rows}>
+              {[0, 1, 2, 3].map((i) => (
+                <SkeletonLadderRow key={i} />
+              ))}
+            </View>
           ) : error ? (
             <View style={styles.stateBox}>
               <Text style={styles.errorText}>{error}</Text>

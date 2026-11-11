@@ -17,6 +17,7 @@ import type {
 import { cacheKeyFor, fixtureMode, subscribeCache } from '../../src/api';
 import { useAuth } from '../../src/auth';
 import { Avatar } from '../../src/components/Avatar';
+import { SkeletonNotificationRow } from '../../src/components/Skeleton';
 import {
   decrementUnread,
   refreshUnreadCount,
@@ -384,9 +385,15 @@ export default function NotificationsScreen() {
           <Text style={styles.message}>{loadError}</Text>
         </View>
       ) : items === null ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={theme.accent} />
-        </View>
+        /* Initial load (skeleton sweep): notification-row
+           shapes inside the list's own card. */
+        <ScrollView contentContainerStyle={styles.content}>
+          <View style={styles.card}>
+            {[0, 1, 2, 3].map((i) => (
+              <SkeletonNotificationRow key={i} />
+            ))}
+          </View>
+        </ScrollView>
       ) : items.length === 0 ? (
         <View style={styles.center}>
           <Bell size={26} color={theme.muted} strokeWidth={2} />

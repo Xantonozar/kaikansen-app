@@ -23,6 +23,7 @@ import {
 } from '../theme';
 import { useTheme } from '../theme-context';
 import { Avatar } from './Avatar';
+import { SkeletonPersonRow } from './Skeleton';
 
 const MAX_LENGTH = 1000;
 
@@ -188,8 +189,13 @@ export function ThemeComments({ slug }: { slug: string }) {
       ) : loadError ? (
         <Text style={styles.errorText}>{loadError}</Text>
       ) : comments === null ? (
+        /* Initial comments load (skeleton sweep): person-row
+           shapes — a comment IS avatar + text lines. The post
+           (231) and load-more (340) spinners stay as feedback. */
         <View style={styles.loading}>
-          <ActivityIndicator color={theme.accent} />
+          {[0, 1, 2].map((i) => (
+            <SkeletonPersonRow key={i} />
+          ))}
         </View>
       ) : (
         <>
@@ -370,8 +376,10 @@ const createStyles = (theme: Theme) =>
       color: theme.muted,
     },
     loading: {
+      // Initial-load skeleton host (skeleton sweep): rows
+      // stacked at the section's own rhythm.
       paddingVertical: spacing.lg,
-      alignItems: 'center',
+      gap: spacing.lg,
     },
     note: {
       ...typeStyles.bodySmall,

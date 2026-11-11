@@ -27,6 +27,7 @@ import {
 import { fixtureMode } from '../../src/api';
 import { downloadFillPercent } from '../../src/polishRules';
 import { AppImage } from '../../src/components/AppImage';
+import { SkeletonThemeRow } from '../../src/components/Skeleton';
 import {
   usePlaybackSession,
   type QueueItem,
@@ -158,9 +159,13 @@ export default function DownloadsScreen() {
             a device.
           </Text>
         ) : !downloads.hydrated ? (
-          <View style={styles.center}>
-            <ActivityIndicator color={theme.accent} />
-          </View>
+          /* Local-store hydration (skeleton sweep): the list's
+             own shape — theme-row placeholders. */
+          <>
+            {[0, 1, 2, 3].map((i) => (
+              <SkeletonThemeRow key={i} />
+            ))}
+          </>
         ) : (
           <>
             <View style={styles.summaryCard}>

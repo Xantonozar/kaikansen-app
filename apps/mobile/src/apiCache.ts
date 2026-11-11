@@ -34,7 +34,12 @@
  * (device-local store), and the problem-4 profile-stats store
  * (src/profileStatsCache.ts — persisted on-device by its own spec,
  * untouched here). The cache itself is memory-only: an app restart
- * starts empty.
+ * starts empty — EXCEPT the first-paint snapshot (speed batch,
+ * src/firstPaintCache.ts): Home + own-profile are persisted on
+ * disk and hydrated back into this cache as STALE entries at
+ * startup, so a cold open paints instantly and revalidates
+ * through the exact path below. Persistence is that module's
+ * job; this cache still owns every read.
  *
  * The store logic is pure (injectable clock, no IO) so it
  * unit-tests directly; `appCache` is the module singleton the API
@@ -146,6 +151,19 @@ export class ResponseCache {
   /** Store a value under a key (stamps the fetch time). */
   set(key: string, value: unknown): void {
     this.entries.set(key, { value, fetchedAt: this.now() });
+  }
+
+  /**
+   * Seed an entry with an EXPLICIT fetch time, WITHOUT notifying
+   * subscribers (the speed batch's disk hydration): the entry is
+   * backdated past every freshness window, so the next read takes
+   * the stale path — served instantly, revalidated in the
+   * background. Never overwrites an entry the session already
+   * holds (memory is always at least as fresh as disk).
+   */
+  seedStale(key: string, value: unknown, fetchedAt: number): void {
+    if (this.entries.has(key)) return;
+    this.entries.set(key, { value, fetchedAt });
   }
 
   /** Drop one key (mutation invalidation). */

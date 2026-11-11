@@ -8,8 +8,8 @@ import { AppVersionController } from './app-version.controller';
  */
 describe('AppVersionController', () => {
   const DEFAULTS = {
-    latestVersion: '1.0.1',
-    latestVersionCode: 3,
+    latestVersion: '1.0.2',
+    latestVersionCode: 4,
     apkUrl:
       'https://github.com/Xantonozar/kaikansen-app/releases/download/apk-latest/kaikansen.apk',
     notes: [],
@@ -50,8 +50,8 @@ describe('AppVersionController', () => {
         })[key],
     } as never;
     const payload = new AppVersionController(config).version();
-    expect(payload.latestVersion).toBe('1.0.1');
-    expect(payload.latestVersionCode).toBe(3);
+    expect(payload.latestVersion).toBe('1.0.2');
+    expect(payload.latestVersionCode).toBe(4);
     expect(payload.minSupportedVersionCode).toBe(1);
   });
 });

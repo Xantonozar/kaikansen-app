@@ -19,6 +19,19 @@ import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 // hermetic (no 20-theme payload in the module graph).
 jest.mock('./fixtures/popularThemes', () => ({ popularThemesFixture: [] }));
 
+// api.ts also pulls the first-paint snapshot store (speed batch),
+// whose IO layer is storage.ts: its secure grade imports the real
+// expo-secure-store (an ESM native module this Jest setup cannot
+// parse) and its Platform comes from react-native. Stub both the
+// way the other storage suites do — the snapshot only ever uses
+// the plain grade, which rides the config's AsyncStorage stub.
+jest.mock('expo-secure-store', () => ({
+  setItemAsync: async () => undefined,
+  getItemAsync: async () => null,
+  deleteItemAsync: async () => undefined,
+}));
+jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
+
 import { apiJson, invalidateAfterMutation } from './api';
 import { appCache } from './apiCache';
 import { setAccessToken, setSessionUserId } from './session';

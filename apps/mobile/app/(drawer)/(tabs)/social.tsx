@@ -20,6 +20,10 @@ import { Avatar } from '../../../src/components/Avatar';
 import { AppImage } from '../../../src/components/AppImage';
 import { PersonRow } from '../../../src/components/PersonRow';
 import {
+  SkeletonFeedRow,
+  SkeletonPersonRow,
+} from '../../../src/components/Skeleton';
+import {
   fetchFriendsActivity,
   fetchUserNetwork,
   searchUsers,
@@ -335,8 +339,12 @@ export default function SocialScreen() {
             ) : peopleError ? (
               <Text style={styles.errorText}>{peopleError}</Text>
             ) : people === null ? (
-              <View style={styles.center}>
-                <ActivityIndicator color={theme.accent} />
+              /* People search loading (skeleton sweep):
+                 person-row shapes, the section's content. */
+              <View style={styles.skeletonStack}>
+                {[0, 1, 2].map((i) => (
+                  <SkeletonPersonRow key={i} />
+                ))}
               </View>
             ) : people.length === 0 ? (
               <Text style={styles.note}>
@@ -454,8 +462,13 @@ export default function SocialScreen() {
                 </Pressable>
               </View>
             ) : feed === null ? (
-              <View style={styles.center}>
-                <ActivityIndicator color={theme.accent} />
+              /* Feed loading (skeleton sweep): feed-row shapes
+                 stacked in the section's rhythm (the real cards
+                 are separate; the rows carry their own gap). */
+              <View style={styles.skeletonStack}>
+                {[0, 1, 2].map((i) => (
+                  <SkeletonFeedRow key={i} />
+                ))}
               </View>
             ) : feed.length === 0 ? (
               <Text style={styles.note}>
@@ -649,6 +662,12 @@ const createStyles = (theme: Theme) =>
     center: {
       paddingVertical: spacing.xxl,
       alignItems: 'center',
+    },
+    skeletonStack: {
+      // The section skeletons' stack (skeleton sweep): the
+      // rows spaced like the sections' own content rhythm.
+      gap: spacing.lg,
+      paddingVertical: spacing.sm,
     },
     loadMore: {
       alignItems: 'center',

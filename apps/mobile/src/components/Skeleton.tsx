@@ -199,6 +199,108 @@ const createRankRowStyles = (theme: Theme) =>
     },
   });
 
+/**
+ * Notification-row skeleton — one Notifications row: the actor
+ * avatar circle, two text bars (the sentence + its time line),
+ * in the list's own row frame (14pt padding, row gap).
+ */
+export function SkeletonNotificationRow() {
+  return (
+    <View style={notificationRowStyles.row}>
+      <SkeletonBlock width={40} height={40} radius={radii.pill} />
+      <View style={notificationRowStyles.main}>
+        <SkeletonBlock width="82%" height={13} radius={6} />
+        <SkeletonBlock width="30%" height={11} radius={5} />
+      </View>
+    </View>
+  );
+}
+
+const notificationRowStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.md,
+    padding: 14,
+  },
+  main: {
+    flex: 1,
+    gap: 6,
+    paddingTop: 2,
+  },
+});
+
+/**
+ * Room-row skeleton — one Quiz Lobby public-room row: the 40pt
+ * host avatar, two text bars (room title + host line) and the
+ * Join pill, in the lobby card's row frame.
+ */
+export function SkeletonRoomRow() {
+  return (
+    <View style={roomRowStyles.row}>
+      <SkeletonBlock width={40} height={40} radius={radii.pill} />
+      <View style={roomRowStyles.main}>
+        <SkeletonBlock width="56%" height={13} radius={6} />
+        <SkeletonBlock width="34%" height={11} radius={5} />
+      </View>
+      <SkeletonBlock width={56} height={30} radius={radii.pill} />
+    </View>
+  );
+}
+
+const roomRowStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  main: {
+    flex: 1,
+    gap: 6,
+  },
+});
+
+/**
+ * Ladder-row skeleton — one Rank Ladder row: the rank-icon tile,
+ * two text bars (rank name + threshold line) and the standing
+ * chip — the ladder list's row anatomy, for the page-load state.
+ */
+export function SkeletonLadderRow() {
+  const theme = useTheme();
+  const styles = useMemo(() => createLadderRowStyles(theme), [theme]);
+  return (
+    <View style={styles.row}>
+      <SkeletonBlock width={44} height={44} radius={radii.base} />
+      <View style={styles.main}>
+        <SkeletonBlock width="48%" height={14} radius={6} />
+        <SkeletonBlock width="30%" height={11} radius={5} />
+      </View>
+      <SkeletonBlock width={52} height={24} radius={radii.pill} />
+    </View>
+  );
+}
+
+const createLadderRowStyles = (theme: Theme) =>
+  StyleSheet.create({
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.card,
+      paddingVertical: spacing.md,
+      paddingHorizontal: spacing.lg,
+      marginBottom: spacing.sm,
+    },
+    main: {
+      flex: 1,
+      gap: 6,
+    },
+  });
+
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
     rowCard: {

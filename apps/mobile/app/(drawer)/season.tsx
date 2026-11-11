@@ -19,6 +19,7 @@ import {
   subscribeCache,
 } from '../../src/api';
 import { ThemeRow } from '../../src/components/ThemeRow';
+import { SkeletonThemeRow } from '../../src/components/Skeleton';
 import {
   queueItemsFromSummaries,
   usePlaybackSession,
@@ -258,9 +259,18 @@ export default function SeasonScreen() {
           <Text style={styles.errorDetail}>{error}</Text>
         </View>
       ) : !data ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={theme.accent} />
-        </View>
+        /* Initial load (skeleton sweep): the list's own shape —
+           theme-row placeholders in the loaded column. */
+        <ScrollView
+          contentContainerStyle={styles.content}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.column}>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <SkeletonThemeRow key={i} />
+            ))}
+          </View>
+        </ScrollView>
       ) : (
         <ScrollView
           contentContainerStyle={styles.content}

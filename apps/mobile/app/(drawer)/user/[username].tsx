@@ -49,6 +49,10 @@ import {
 } from '../../../src/socialApi';
 import { RankIcon } from '../../../src/components/RankIcon';
 import {
+  SkeletonBlock,
+  SkeletonThemeRow,
+} from '../../../src/components/Skeleton';
+import {
   formatRp,
   ladderLabel,
   standingOf,
@@ -626,14 +630,33 @@ export default function UserProfileScreen() {
                 )}
               </View>
             ) : null}
-            <View style={styles.center}>
-              <ActivityIndicator color={theme.accent} />
+            <View style={styles.skeletonNote}>
+              <SkeletonBlock width="46%" height={13} radius={5} />
             </View>
           </ScrollView>
         ) : (
-          <View style={styles.center}>
-            <ActivityIndicator color={theme.accent} />
-          </View>
+          /* No cached paint at all (skeleton sweep): the
+             profile-shaped skeleton — identity card (avatar
+             circle, name/handle bars, follow-pill bar) + the
+             stats card's bar row. */
+          <ScrollView contentContainerStyle={styles.content}>
+            <View style={styles.identityCard}>
+              <SkeletonBlock width={80} height={80} radius={999} />
+              <SkeletonBlock width="44%" height={16} radius={6} style={{ marginTop: 12 }} />
+              <SkeletonBlock width="28%" height={12} radius={5} style={{ marginTop: 8 }} />
+              <SkeletonBlock width={120} height={34} radius={999} style={{ marginTop: 14 }} />
+            </View>
+            <View style={styles.statsCard}>
+              {[0, 1, 2].map((i) => (
+                <View key={i} style={styles.skeletonStat}>
+                  <SkeletonBlock width="62%" height={15} radius={6} />
+                  <SkeletonBlock width="80%" height={10} radius={5} />
+                </View>
+              ))}
+            </View>
+            <SkeletonThemeRow />
+            <SkeletonThemeRow />
+          </ScrollView>
         )
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
@@ -983,6 +1006,20 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
       padding: spacing.xxl,
+    },
+    skeletonNote: {
+      // The cached-paint shell's quiet line (skeleton sweep):
+      // one centred bar under the painted counts/stats while
+      // the profile fetch settles.
+      alignItems: 'center',
+      paddingVertical: spacing.xxl,
+    },
+    skeletonStat: {
+      // One stats-card column in the profile skeleton: the
+      // value + label bars, centred like the real stat blocks.
+      flex: 1,
+      alignItems: 'center',
+      gap: 6,
     },
     message: {
       ...typeStyles.body,

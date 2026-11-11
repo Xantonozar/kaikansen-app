@@ -22,8 +22,19 @@ import {
 import {
   appCache,
   cacheKey,
+  CACHE_TTL_MS,
+  wasCacheServed,
   type CacheReadOptions,
 } from './apiCache';
+import type { UserProfile } from '@kaikansen/contracts';
+import {
+  clearFirstPaintSnapshot,
+  readFirstPaintSnapshot,
+  snapshotForScope,
+  withServedPayload,
+  writeFirstPaintSnapshot,
+  type FirstPaintSnapshot,
+} from './firstPaintCache';
 
 export { wasCacheServed, subscribeCache } from './apiCache';
 export type { CacheReadOptions } from './apiCache';
@@ -201,6 +212,83 @@ export function cacheKeyFor(path: string): string {
   return cacheKey('GET', path, getSessionScope());
 }
 
+/* ------------------------------------------------------------------ */
+/* First-paint snapshot (speed batch)                                  */
+/*                                                                     */
+/* Home + own-profile are ALSO persisted on disk (firstPaintCache)     */
+/* so a cold start can paint before the network answers. Hydration     */
+/* runs lazily, on the first cached read under a scope: the disk       */
+/* record is scope-stamped, and only a scope-matching copy seeds       */
+/* entries — under a scope that cannot name its user yet ('anon'       */
+/* while the session restores) nothing seeds, and the signed-in        */
+/* scope's first read hydrates then. Seeded entries are backdated      */
+/* past their TTL, so they take the cache's stale path (instant        */
+/* paint + background revalidation + subscriber swap).                 */
+/* ------------------------------------------------------------------ */
+
+/** The scope already hydrated this run (undefined = not yet). */
+let firstPaintHydratedScope: string | undefined;
+
+export async function ensureFirstPaintHydrated(): Promise<void> {
+  const scope = getSessionScope();
+  if (scope === firstPaintHydratedScope) return;
+  // Mark before the await: concurrent first reads share this pass.
+  firstPaintHydratedScope = scope;
+  try {
+    const hydratable = snapshotForScope(
+      await readFirstPaintSnapshot(),
+      scope,
+    );
+    if (!hydratable) return;
+    const staleBefore = Date.now() - CACHE_TTL_MS.CATALOGUE - 1;
+    if (hydratable.home) {
+      appCache.seedStale(
+        cacheKey('GET', '/home', scope),
+        hydratable.home.value,
+        Math.min(hydratable.home.fetchedAt, staleBefore),
+      );
+    }
+    if (hydratable.profile?.value.id) {
+      const profile = hydratable.profile;
+      appCache.seedStale(
+        cacheKey('GET', `/users/${profile.value.username}`, scope),
+        profile.value,
+        Math.min(profile.fetchedAt, staleBefore),
+      );
+    }
+  } catch {
+    // A failed hydration is just a cold cache — the read proceeds.
+  }
+}
+
+/**
+ * Merge a freshly served payload into the disk snapshot under
+ * the CURRENT session scope. Fire-and-forget, chained so two
+ * near-simultaneous persists cannot interleave their
+ * read-modify-write cycles.
+ */
+let firstPaintWriteChain: Promise<void> = Promise.resolve();
+
+export function persistFirstPaint(patch: {
+  home?: { value: HomeResponse; fetchedAt: number };
+  profile?: { value: UserProfile; fetchedAt: number };
+}): void {
+  const scope = getSessionScope();
+  firstPaintWriteChain = firstPaintWriteChain
+    .then(async () => {
+      const current = await readFirstPaintSnapshot();
+      await writeFirstPaintSnapshot(
+        withServedPayload(current, scope, patch),
+      );
+    })
+    .catch(() => {
+      // Persistence is an optimisation; a lost write only loses
+      // the next cold open's instant paint.
+    });
+  // Keep the chain itself forever-resolved for the next caller.
+  void firstPaintWriteChain;
+}
+
 /** Freshness class per cached read path — the spec's classes. */
 function readCacheClass(path: string): 'FEED' | 'USER' | 'CATALOGUE' | null {
   const clean = path.split('?')[0];
@@ -283,6 +371,12 @@ export function invalidateAfterMutation(method: string, path: string): void {
 /** Empty the whole response cache (logout / account change). */
 export function clearResponseCache(): void {
   appCache.clear();
+  // Speed batch: the disk snapshot dies with the session too —
+  // the next account must cold-open to its OWN first paint, never
+  // this one's. The in-memory hydration memo resets so a later
+  // scope can re-read the (now cleared) disk state honestly.
+  firstPaintHydratedScope = undefined;
+  void clearFirstPaintSnapshot();
 }
 
 /** Error thrown by apiJson — carries the HTTP status alongside the message. */
@@ -319,6 +413,9 @@ export async function apiJson<T>(
     // fixture shape first), so the cache only ever holds live data.
     const ttlClass = readCacheClass(path);
     if (ttlClass) {
+      // Speed batch: give the disk snapshot its chance to seed
+      // this scope's first-paint entries before the read decides.
+      await ensureFirstPaintHydrated();
       return appCache.read<T>(cacheKeyFor(path), ttlClass, () =>
         apiJsonNetwork<T>(path, init),
         { force: init?.cache?.force },
@@ -574,7 +671,13 @@ export async function fetchHome(
 ): Promise<HomeResponse> {
   if (fixtureMode) return fixtureHome();
   // FEED class (2 min) via the apiJson cache wiring on '/home'.
-  return apiJson<HomeResponse>('/home', { cache: opts });
+  const home = await apiJson<HomeResponse>('/home', { cache: opts });
+  // Speed batch: a NETWORK answer refreshes the disk snapshot
+  // (a cache-served answer already matches what's on disk).
+  if (!wasCacheServed(home)) {
+    persistFirstPaint({ home: { value: home, fetchedAt: Date.now() } });
+  }
+  return home;
 }
 
 /**
