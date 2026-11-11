@@ -159,6 +159,46 @@ const personRowStyles = StyleSheet.create({
   },
 });
 
+/**
+ * Leaderboard-row skeleton — one board row card: position bar,
+ * the 44pt avatar circle, two text bars, the 44pt rank-icon
+ * tile and the RP bar, in RankRow's board frame (surface card,
+ * card radius, the row's own padding).
+ */
+export function SkeletonRankRow() {
+  const theme = useTheme();
+  const styles = useMemo(() => createRankRowStyles(theme), [theme]);
+  return (
+    <View style={styles.boardRow}>
+      <SkeletonBlock width={16} height={16} radius={5} />
+      <SkeletonBlock width={44} height={44} radius={radii.pill} />
+      <View style={styles.main}>
+        <SkeletonBlock width="52%" height={14} radius={6} />
+        <SkeletonBlock width="34%" height={11} radius={5} />
+      </View>
+      <SkeletonBlock width={44} height={44} radius={radii.base} />
+      <SkeletonBlock width={30} height={15} radius={6} />
+    </View>
+  );
+}
+
+const createRankRowStyles = (theme: Theme) =>
+  StyleSheet.create({
+    boardRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: theme.surface,
+      borderRadius: radii.card,
+      paddingVertical: spacing.md,
+      paddingHorizontal: spacing.lg,
+    },
+    main: {
+      flex: 1,
+      gap: 6,
+    },
+  });
+
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
     rowCard: {

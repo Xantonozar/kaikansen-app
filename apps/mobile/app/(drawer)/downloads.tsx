@@ -25,6 +25,7 @@ import {
   useDownloads,
 } from '../../src/downloads';
 import { fixtureMode } from '../../src/api';
+import { downloadFillPercent } from '../../src/polishRules';
 import { AppImage } from '../../src/components/AppImage';
 import {
   usePlaybackSession,
@@ -284,10 +285,7 @@ export default function DownloadsScreen() {
 
                 {downloads.downloading.map((pending) => {
                   const progress = downloads.progressFor(pending.id);
-                  const pct =
-                    progress != null
-                      ? Math.round(Math.min(1, Math.max(0, progress)) * 100)
-                      : null;
+                  const pct = downloadFillPercent(progress);
                   return (
                     <View key={pending.id} style={styles.rowCard}>
                       <View style={styles.coverWrap}>
@@ -307,17 +305,19 @@ export default function DownloadsScreen() {
                         </Text>
                         <View style={styles.progressBlock}>
                           <View style={styles.progressTrack}>
-                            <View
-                              style={[
-                                styles.progressFill,
-                                {
-                                  width:
-                                    progress != null
-                                      ? `${Math.round(progress * 100)}%`
-                                      : '12%',
-                                },
-                              ]}
-                            />
+                            {/* Indeterminate (no fraction yet):
+                                the track stays EMPTY — the old
+                                hardcoded fill claimed progress
+                                the app did not have (polish
+                                batch). */}
+                            {pct != null && (
+                              <View
+                                style={[
+                                  styles.progressFill,
+                                  { width: `${pct}%` },
+                                ]}
+                              />
+                            )}
                           </View>
                           <Text style={styles.progressText}>
                             Downloading...{pct != null ? ` ${pct}%` : ''}
@@ -361,7 +361,7 @@ const createStyles = (theme: Theme) =>
     topBar: {
       flexDirection: 'row',
       alignItems: 'center',
-      width: '100%',
+      width: '100%' as const,
       maxWidth: CONTENT_MAX_WIDTH,
       alignSelf: 'center',
       paddingHorizontal: spacing.screenEdge,
@@ -387,7 +387,7 @@ const createStyles = (theme: Theme) =>
       flex: 1,
     },
     content: {
-      width: '100%',
+      width: '100%' as const,
       maxWidth: CONTENT_MAX_WIDTH,
       alignSelf: 'center',
       paddingHorizontal: spacing.screenEdge,

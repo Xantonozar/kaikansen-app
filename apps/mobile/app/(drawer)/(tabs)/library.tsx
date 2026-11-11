@@ -102,6 +102,9 @@ type TypeFilter = 'ALL' | 'OP' | 'ED';
  * Recent · Offline · AniList (owner ruling 2026-11-09, superseding
  * the handoff pack's text order that Slice 6 shipped). The pills
  * are TEXT-ONLY on one row, as every Library mock draws them.
+ * The chip labels carry allowFontScaling={false} (polish batch,
+ * 2026-11-11 — safe subset): the chips are fixed-height, so a
+ * scaled system font is the known text-cutting risk here.
  */
 const SECTIONS: { key: Section; label: string }[] = [
   { key: 'saved', label: 'Saved' },
@@ -2021,6 +2024,7 @@ export default function LibraryScreen() {
                     active && { color: theme.onAccent },
                   ]}
                   numberOfLines={1}
+                  allowFontScaling={false}
                 >
                   {label}
                 </Text>

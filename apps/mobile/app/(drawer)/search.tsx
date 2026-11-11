@@ -242,6 +242,10 @@ export default function SearchScreen() {
   const [filter, setFilter] = useState<SearchFilter>('all');
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /* Bumped by the error state's Retry (polish batch): the
+     search effect below re-runs the current query through the
+     same debounced path. */
+  const [attempt, setAttempt] = useState(0);
   const [recents, setRecents] = useState<string[]>([]);
   const [popular, setPopular] = useState<ThemeSummary[] | null>(null);
 
@@ -355,7 +359,8 @@ export default function SearchScreen() {
         .finally(() => setSearching(false));
     }, 200);
     return () => clearTimeout(timer);
-  }, [query]);
+    // attempt: the error state's Retry re-runs this same path.
+  }, [query, attempt]);
 
   /* Full view (Option B): a picked chip loads that group's first
      page of 15; onEndReached appends further pages, deduped by
@@ -853,7 +858,20 @@ export default function SearchScreen() {
             ) : null}
           </ScrollView>
         ) : error ? (
-          <Text style={styles.hint}>Search failed. {error}</Text>
+          <View>
+            <Text style={styles.hint}>Search failed. {error}</Text>
+            <Pressable
+              onPress={() => setAttempt((a) => a + 1)}
+              accessibilityRole="button"
+              accessibilityLabel="Retry search"
+              style={({ pressed }) => [
+                styles.retryButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.retryText}>Retry</Text>
+            </Pressable>
+          </View>
         ) : searching && response === null ? (
           <View style={styles.center}>
             <ActivityIndicator color={theme.accent} />
@@ -997,6 +1015,21 @@ const createStyles = (theme: Theme) =>
     paddingHorizontal: spacing.screenEdge,
     paddingTop: spacing.lg,
     lineHeight: 20,
+  },
+  retryButton: {
+    // Home's Retry affordance: bordered chip under the message.
+    alignSelf: 'flex-start',
+    marginTop: spacing.md,
+    marginLeft: spacing.screenEdge,
+    borderWidth: 1,
+    borderColor: theme.border,
+    borderRadius: radii.base,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  retryText: {
+    ...typeStyles.body,
+    color: theme.text,
   },
   center: {
     paddingTop: spacing.xxxl,

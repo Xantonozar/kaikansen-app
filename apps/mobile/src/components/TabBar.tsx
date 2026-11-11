@@ -47,6 +47,13 @@ export interface TabBarProps {
  * bottom inset is halved into the float's margin (the rest of
  * the gesture area stays clear of the container's edge).
  *
+ * Font scaling (polish batch, 2026-11-11 — safe subset only):
+ * this bar is ICON-ONLY — labels live only in accessibilityLabel,
+ * so there is no visible label Text to guard. The guard the
+ * batch called for has nothing to attach to here; the fixed
+ * 34pt pill holds icons (lucide glyphs do not scale with the
+ * system font). Flagged in the batch report, not improvised.
+ *
  * Above the bar sits the mini player (layout-fidelity Slice 1): the
  * finalized mocks float it over the page background just above the
  * tab row on every tab screen while a session is playing. It renders

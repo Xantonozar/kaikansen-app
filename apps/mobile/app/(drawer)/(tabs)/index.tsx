@@ -694,10 +694,12 @@ export default function HomeScreen() {
 
         {/* Continue Listening — the Home v3 mock's card (owner
             correction, 2026-11-10): a frosted white card holding
-            SQUARE cover art, a progress bar under the art, and the
-            title + artist inside the card; a mauve play disc
-            overlaps the art's bottom-right corner. The card body
-            opens the theme; the disc resumes in the entry's mode. */}
+            SQUARE cover art and the title + artist inside the
+            card; a mauve play disc overlaps the art's bottom-right
+            corner. The card body opens the theme; the disc resumes
+            in the entry's mode. (The mock's progress bar under the
+            art was removed by the polish batch — no resume
+            tracking exists for the bar to report.) */}
         {/* Continue Listening's pending state: while the history
             read is in flight (signed-in only — signed-out never
             fetches it) the slot holds skeleton cards in the rail's
@@ -718,6 +720,9 @@ export default function HomeScreen() {
                     height={96}
                     radius={radii.base}
                   />
+                  {/* The mock's progress slot under the art holds a
+                      skeleton block while loading — a placeholder,
+                      not a progress claim. */}
                   <SkeletonBlock
                     width={96}
                     height={4}
@@ -805,22 +810,12 @@ export default function HomeScreen() {
                       />
                     </Pressable>
                   </View>
-                  {/* Resume progress. No fraction is drawn yet:
-                      history records only THAT a theme played —
-                      the shared watchhistories rows carry no
-                      position field and the player never persists
-                      one — so there is no real value to fill the
-                      measured track with (owner report, 2026-11-10).
-                      The fill takes the recorded fraction the day
-                      position recording exists end to end. */}
-                  <View style={styles.continueProgressTrack}>
-                    <View
-                      style={[
-                        styles.continueProgressFill,
-                        { width: '0%' },
-                      ]}
-                    />
-                  </View>
+                  {/* No progress bar (polish batch, 2026-11-11):
+                      the resume feature is ruled out — the card
+                      is a recents shortcut — and history records
+                      only THAT a theme played, never a position,
+                      so the old track (hardcoded 0%) falsely
+                      implied tracking that does not exist. */}
                   <Text style={styles.continueTitle} numberOfLines={1}>
                     {entry.theme!.songTitle}
                   </Text>
@@ -1222,10 +1217,12 @@ const createStyles = (theme: Theme) =>
   // HTML (home-v3.html): w-28 card (112) at p-2 (8) with rounded-2xl
   // (16); square art at rounded-xl (12); play disc w-6 (24) in mauve
   // (#8e5b7b = secondary) hung -bottom-2 / -right-1 off the art;
-  // progress h-1 (4) at mt-2.5 / mb-1; title text-xs bold (12);
-  // artist text-[10px] medium (10). The white is the Home glass
-  // treatment (design law #3, as on PopularCard) at this card's
-  // measured 80% (the HTML's bg-white/80).
+  // (the mock's progress h-1 was removed by the polish batch —
+  // the card is a recents shortcut, no resume tracking); title
+  // text-xs bold (12); artist text-[10px] medium (10). The white
+  // is the Home glass treatment (design law #3, as on
+  // PopularCard) at this card's measured 80% (the HTML's
+  // bg-white/80).
   continueCard: {
     width: 112,
     padding: spacing.sm,
@@ -1259,23 +1256,14 @@ const createStyles = (theme: Theme) =>
     shadowOffset: { width: 0, height: 2 },
     elevation: 3,
   },
-  continueProgressTrack: {
-    height: 4,
-    borderRadius: radii.pill,
-    backgroundColor: theme.raised,
-    overflow: 'hidden',
-    marginTop: 10,
-    marginBottom: spacing.xs,
-  },
-  continueProgressFill: {
-    height: '100%',
-    borderRadius: radii.pill,
-    backgroundColor: theme.secondary,
-  },
   continueTitle: {
     fontFamily: fontFamilies.bodyStrong,
     fontSize: 12,
     color: theme.text,
+    // The removed progress track carried the art→title gap
+    // (its mt-2.5); the title keeps it so the card's rhythm is
+    // unchanged without the bar (polish batch).
+    marginTop: 10,
   },
   continueArtist: {
     fontFamily: fontFamilies.caption,

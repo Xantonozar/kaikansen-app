@@ -10,8 +10,8 @@ import type { AppVersionResponse } from '@kaikansen/contracts';
  * The values come from operator-edited environment config, read
  * per request so a release is a config change, never a code
  * change:
- * - APP_LATEST_VERSION      (default '1.0.0')
- * - APP_LATEST_VERSION_CODE (default 2; non-numeric/junk → default)
+ * - APP_LATEST_VERSION      (default '1.0.1')
+ * - APP_LATEST_VERSION_CODE (default 3; non-numeric/junk → default)
  * - APP_APK_URL             (default the rolling release asset)
  * - APP_RELEASE_NOTES       (default '' → no notes; lines split on
  *                            '\n', blank lines dropped)
@@ -39,8 +39,8 @@ export class AppVersionController {
   @ApiOkResponse({ description: 'Latest release facts for the update prompt.' })
   version(): AppVersionResponse {
     return {
-      latestVersion: this.stringOr('APP_LATEST_VERSION', '1.0.0'),
-      latestVersionCode: this.intOr('APP_LATEST_VERSION_CODE', 2),
+      latestVersion: this.stringOr('APP_LATEST_VERSION', '1.0.1'),
+      latestVersionCode: this.intOr('APP_LATEST_VERSION_CODE', 3),
       apkUrl: this.stringOr(
         'APP_APK_URL',
         'https://github.com/Xantonozar/kaikansen-app/releases/download/apk-latest/kaikansen.apk',

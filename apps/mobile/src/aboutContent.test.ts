@@ -39,11 +39,11 @@ describe('about content', () => {
     ]);
   });
 
-  it("what's new lists shipped 1.0.0 work, nothing speculative", () => {
+  it("what's new lists shipped 1.0.1 work, nothing speculative", () => {
     const joined = ABOUT_WHATS_NEW.join('\n');
-    expect(joined).toContain('24-rank ladder');
-    expect(joined).toContain('Weekly leaderboard');
-    expect(joined).toContain('offline screen');
+    expect(joined).toContain('Video watching fixed');
+    expect(joined).toContain('Leaderboard scrolls smoothly');
+    expect(joined).toContain('Retry');
     expect(ABOUT_WHATS_NEW.length).toBeGreaterThanOrEqual(4);
   });
 });

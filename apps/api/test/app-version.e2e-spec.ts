@@ -30,8 +30,8 @@ describe('App version (e2e)', () => {
       .get('/app/version')
       .expect(200)
       .expect({
-        latestVersion: '1.0.0',
-        latestVersionCode: 2,
+        latestVersion: '1.0.1',
+        latestVersionCode: 3,
         apkUrl:
           'https://github.com/Xantonozar/kaikansen-app/releases/download/apk-latest/kaikansen.apk',
         notes: [],

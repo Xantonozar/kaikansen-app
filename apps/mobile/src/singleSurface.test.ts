@@ -19,6 +19,11 @@ import { describe, expect, it } from '@jest/globals';
  * followed by whitespace (its attributes follow). Type
  * references such as useRef<VideoView> are followed by ">" and
  * are not surfaces, so they never count.
+ *
+ * The polish batch's honest-progress + font-scaling guards are
+ * pinned by the same scan pattern (polishGuards below): the fake
+ * fills and the unguarded chip labels were one-line regressions
+ * waiting to happen, so the source itself carries the pin.
  */
 
 const read = (relative: string): string =>
@@ -56,5 +61,29 @@ describe('single-owner video surface — source invariant', () => {
 
   it('player route binds exactly one surface', () => {
     expect(surfaceCount(playerRoute)).toBe(1);
+  });
+});
+
+describe('polish batch guards — source pins (2026-11-11)', () => {
+  const home = read('../app/(drawer)/(tabs)/index.tsx');
+  const downloads = read('../app/(drawer)/downloads.tsx');
+  const library = read('../app/(drawer)/(tabs)/library.tsx');
+
+  it('continue listening draws no fake progress fill', () => {
+    expect(home).not.toContain('continueProgressFill');
+    expect(home).not.toContain("width: '0%'");
+  });
+
+  it('downloads never fills an indeterminate bar with a fake percent', () => {
+    // No static percent literal may drive a width anywhere in
+    // the file — the fill's width comes only from the computed
+    // pct (downloadFillPercent); layout widths are numbers or
+    // the typed '100%' constant (never a fake partial fill).
+    expect(downloads).not.toMatch(/width: '(?!100%')\d+%'|width: "(?!100%")\d+%"/);
+    expect(downloads).toContain('downloadFillPercent');
+  });
+
+  it('library segment chip labels opt out of font scaling', () => {
+    expect(library).toContain('allowFontScaling={false}');
   });
 });

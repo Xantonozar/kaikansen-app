@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
+  FlatList,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -22,6 +21,7 @@ import {
 } from '../../../src/socialApi';
 import { RankRow } from '../../../src/components/RankRow';
 import { RankIcon } from '../../../src/components/RankIcon';
+import { SkeletonRankRow } from '../../../src/components/Skeleton';
 import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 import {
   fontFamilies,
@@ -64,6 +64,13 @@ const PLUM_SUB = 'rgba(247, 242, 247, 0.75)';
  *
  * An empty week is an honest empty state ("No games finished
  * this week yet") — the tab is enabled, never faked.
+ *
+ * Polish batch (2026-11-11): the rows ride a FlatList (the
+ * board can hold 100) with the pills + Weekly caption as list
+ * header chrome and board-shaped skeleton rows while loading;
+ * the Weekly scope carries its one-line caption ("RP earned
+ * this week · resets Monday 00:00") so the week's figures are
+ * never mistaken for lifetime RP.
  */
 export default function LeaderboardScreen() {
   const theme = useTheme();
@@ -163,12 +170,32 @@ export default function LeaderboardScreen() {
         <Text style={styles.title}>Leaderboard</Text>
       </View>
 
-      <ScrollView
+      {/* The rows ride a FlatList (polish batch): up to 100
+          board cards virtualise instead of painting at once.
+          The pills, the Weekly caption and every state (loading
+          skeletons, error, empty) are the list's header, so the
+          chrome above the rows is pixel-identical to the old
+          ScrollView layout; the pin card stays pinned below. */}
+      <FlatList
         style={styles.scroll}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
-      >
-        <View style={styles.column}>
+        data={entries ?? []}
+        keyExtractor={(entry) => entry.userId}
+        ItemSeparatorComponent={() => <View style={styles.rowGap} />}
+        renderItem={({ item: entry, index: i }) => (
+          <View style={styles.column}>
+            <RankRow
+              variant="board"
+              position={i + 1}
+              entry={entry}
+              isYou={myRank !== null && entry.userId === myRank.userId}
+              onPress={() => router.push(`/user/${entry.username}`)}
+            />
+          </View>
+        )}
+        ListHeaderComponent={
+          <View style={styles.column}>
           {/* The timeframe segments — both live (fix batch
               2026-11-11): the active board wears the mauve
               filled pill, the idle one the pale surface pill. */}
@@ -220,8 +247,18 @@ export default function LeaderboardScreen() {
             </Pressable>
           </View>
 
+          {scope === 'weekly' && (
+            <Text style={styles.caption}>
+              RP earned this week · resets Monday 00:00
+            </Text>
+          )}
+
           {entries === null && !error ? (
-            <ActivityIndicator color={theme.accent} style={styles.spin} />
+            <View style={styles.rows}>
+              {[0, 1, 2, 3, 4].map((i) => (
+                <SkeletonRankRow key={i} />
+              ))}
+            </View>
           ) : error ? (
             <View style={styles.stateBox}>
               <Text style={styles.errorText}>{error}</Text>
@@ -234,20 +271,7 @@ export default function LeaderboardScreen() {
                 <Text style={styles.retryText}>Retry</Text>
               </Pressable>
             </View>
-          ) : entries && entries.length > 0 ? (
-            <View style={styles.rows}>
-              {entries.map((entry, i) => (
-                <RankRow
-                  key={entry.userId}
-                  variant="board"
-                  position={i + 1}
-                  entry={entry}
-                  isYou={myRank !== null && entry.userId === myRank.userId}
-                  onPress={() => router.push(`/user/${entry.username}`)}
-                />
-              ))}
-            </View>
-          ) : (
+          ) : entries && entries.length > 0 ? null : (
             <Text style={styles.emptyText}>
               {fixtureMode
                 ? 'No rankings in demo mode.'
@@ -256,8 +280,9 @@ export default function LeaderboardScreen() {
                   : 'No ranked players yet — play a quiz game to earn RP.'}
             </Text>
           )}
-        </View>
-      </ScrollView>
+          </View>
+        }
+      />
 
       {myRank && myStanding && (
         <View style={styles.pinWrap}>
@@ -361,8 +386,13 @@ const createStyles = (theme: Theme) =>
     rows: {
       gap: spacing.md,
     },
-    spin: {
-      paddingVertical: spacing.xxl,
+    rowGap: {
+      height: spacing.md,
+    },
+    caption: {
+      ...typeStyles.bodySmall,
+      color: theme.muted,
+      marginBottom: spacing.lg,
     },
     stateBox: {
       alignItems: 'center',

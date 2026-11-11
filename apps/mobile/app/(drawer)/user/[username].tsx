@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -67,6 +67,7 @@ import {
   type CachedProfileStatsNumbers,
 } from '../../../src/profileStatsCache';
 import { relativeTime } from '../../../src/time';
+import { sectionStatus } from '../../../src/polishRules';
 import {
   fontFamilies,
   radii,
@@ -126,9 +127,20 @@ const TOP_COUNT = 3;
  * none of them is the viewer's to edit). A tap opens the
  * playlist detail, which already gates its owner controls to
  * the owner, so a visitor gets playback only. The section
- * renders only when at least one public playlist exists, and
- * the read is a satellite like the others — a failure hides the
- * section.
+ * renders only when at least one public playlist exists.
+ *
+ * Satellite honesty (polish batch, 2026-11-11): each satellite
+ * (rank, playlists, ratings, history) tracks its own failure.
+ * A failed read no longer masquerades as "this user has
+ * nothing": the section renders a compact "Couldn't load —
+ * Retry" row whose Retry re-runs ONLY that section's fetch.
+ * Rank's row sits in the identity card where the chip would
+ * ride; the list sections show their heading over the row, and
+ * History's row only makes sense once expanded (its section
+ * only exists there). A genuinely-empty success keeps the
+ * silent rendering, and data arriving later (a cache swap)
+ * clears a failure on its own — sectionStatus in
+ * src/polishRules derives the posture.
  *
  * Design notes / honest gaps:
  * - The rank chip draws "Tier · N RP" exactly as the mock phrases
@@ -177,6 +189,14 @@ export default function UserProfileScreen() {
   >(null);
   const [ratings, setRatings] = useState<UserRatingsResponse | null>(null);
   const [history, setHistory] = useState<UserHistoryResponse | null>(null);
+  /* Per-satellite failure flags (polish batch): a failed read
+     sets its flag instead of faking an empty payload; the
+     section renders "Couldn't load — Retry" off sectionStatus
+     until data lands. */
+  const [rankFailed, setRankFailed] = useState(false);
+  const [playlistsFailed, setPlaylistsFailed] = useState(false);
+  const [ratingsFailed, setRatingsFailed] = useState(false);
+  const [historyFailed, setHistoryFailed] = useState(false);
   /** The design's "See all ratings and history" expansion. */
   const [expanded, setExpanded] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -219,14 +239,52 @@ export default function UserProfileScreen() {
     };
   }, [username]);
 
+  const profileRef = useRef<UserPublicProfile | null>(null);
+
+  /* Satellite loaders (polish batch): each owns its fetch +
+     failure flag, so a section's Retry re-runs ONLY its own
+     read. liveRef gates late landings like the main effect's
+     `live` flag did. */
+  const liveRef = useRef(true);
+  const loadRank = useCallback((userId: string) => {
+    setRankFailed(false);
+    fetchUserRank(userId)
+      .then((r) => liveRef.current && setRank(r))
+      .catch(() => liveRef.current && setRankFailed(true));
+  }, []);
+  const loadPlaylists = useCallback((name: string) => {
+    setPlaylistsFailed(false);
+    fetchUserPlaylists(name)
+      .then((r) => liveRef.current && setProfilePlaylists(r.playlists))
+      .catch(() => liveRef.current && setPlaylistsFailed(true));
+  }, []);
+  const loadRatings = useCallback((name: string) => {
+    setRatingsFailed(false);
+    fetchUserRatings(name)
+      .then((r) => liveRef.current && setRatings(r))
+      .catch(() => liveRef.current && setRatingsFailed(true));
+  }, []);
+  const loadHistory = useCallback((name: string) => {
+    setHistoryFailed(false);
+    fetchUserHistory(name)
+      .then((h) => liveRef.current && setHistory(h))
+      .catch(() => liveRef.current && setHistoryFailed(true));
+  }, []);
+
   useEffect(() => {
     let live = true;
+    liveRef.current = true;
+    profileRef.current = null;
     setProfile(null);
     setLoadError(null);
     setRank(null);
     setProfilePlaylists(null);
     setRatings(null);
     setHistory(null);
+    setRankFailed(false);
+    setPlaylistsFailed(false);
+    setRatingsFailed(false);
+    setHistoryFailed(false);
     setExpanded(false);
     setMenuOpen(false);
     setIsFollowing(false);
@@ -247,27 +305,14 @@ export default function UserProfileScreen() {
       .then((p) => {
         if (!live) return;
         setProfile(p);
+        profileRef.current = p;
         setFollowersCount(p.totalFollowers);
         void writeProfileStatsCache(p.username, p.stats);
         // Satellites — each settles on its own.
-        fetchUserRank(p.id)
-          .then((r) => live && setRank(r))
-          .catch(() => {});
-        fetchUserPlaylists(p.username)
-          .then((r) => live && setProfilePlaylists(r.playlists))
-          .catch(() => live && setProfilePlaylists([]));
-        fetchUserRatings(p.username)
-          .then((r) => live && setRatings(r))
-          .catch(() => live && setRatings({ ratings: [] }));
-        fetchUserHistory(p.username)
-          .then((h) => live && setHistory(h))
-          .catch(() =>
-            live &&
-            setHistory({
-              entries: [],
-              meta: { total: 0, localCount: 0, remoteCount: 0, merged: false },
-            }),
-          );
+        loadRank(p.id);
+        loadPlaylists(p.username);
+        loadRatings(p.username);
+        loadHistory(p.username);
         if (signedIn) {
           fetchFollowState(p.username)
             .then((f) => live && setIsFollowing(f.isFollowing))
@@ -283,6 +328,7 @@ export default function UserProfileScreen() {
       });
     return () => {
       live = false;
+      liveRef.current = false;
     };
     // signedIn is read once per profile load — a mid-view sign-in/out
     // remounts the app shell's session state anyway.
@@ -364,6 +410,28 @@ export default function UserProfileScreen() {
     <View style={[styles.statBlock, divided && styles.statBlockDivided]}>
       <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+
+  /**
+   * The compact per-section failure row (polish batch): muted
+   * "Couldn't load" + an accent Retry that re-runs only that
+   * section's fetch.
+   */
+  const sectionRetry = (label: string, retry: () => void) => (
+    <View style={styles.sectionRetryRow}>
+      <Text style={styles.sectionRetryText}>Couldn’t load {label}</Text>
+      <Pressable
+        onPress={retry}
+        accessibilityRole="button"
+        accessibilityLabel={`Retry loading ${label}`}
+        style={({ pressed }) => [
+          styles.sectionRetryLink,
+          pressed && styles.pressed,
+        ]}
+      >
+        <Text style={styles.sectionRetryAction}>Retry</Text>
+      </Pressable>
     </View>
   );
 
@@ -585,14 +653,16 @@ export default function UserProfileScreen() {
               {profile.displayName || profile.username}
             </Text>
             <Text style={styles.handle}>@{profile.username}</Text>
-            {rank && (
+            {rank ? (
               <View style={styles.rankChip}>
                 <RankIcon rank={standingOf(rank).rank} size={24} />
                 <Text style={styles.rankChipText}>
                   {ladderLabel(standingOf(rank).rank)} · {formatRp(rank.rp)}
                 </Text>
               </View>
-            )}
+            ) : sectionStatus(rankFailed, rank !== null) === 'failed' ? (
+              sectionRetry('rank', () => loadRank(profile.id))
+            ) : null}
 
             {profile.bio.length > 0 && (
               <Text style={styles.bio}>{profile.bio}</Text>
@@ -723,15 +793,24 @@ export default function UserProfileScreen() {
 
           {/* Playlists — the user's PUBLIC playlists only (the
               endpoint never lists private ones); hidden entirely
-              when they have none. */}
-          {profilePlaylists && profilePlaylists.length > 0 && (
+              when they have none, a Retry row when the read
+              failed (polish batch). */}
+          {profilePlaylists && profilePlaylists.length > 0 ? (
             <>
               <Text style={styles.sectionHeading}>Playlists</Text>
               {profilePlaylists.map(playlistCard)}
             </>
-          )}
+          ) : sectionStatus(playlistsFailed, profilePlaylists !== null) ===
+            'failed' ? (
+            <>
+              <Text style={styles.sectionHeading}>Playlists</Text>
+              {sectionRetry('playlists', () =>
+                loadPlaylists(profile.username),
+              )}
+            </>
+          ) : null}
 
-          {ratings && sortedRatings.length > 0 && (
+          {ratings && sortedRatings.length > 0 ? (
             <>
               <Text style={styles.sectionHeading}>Top ratings</Text>
               {(expanded
@@ -739,14 +818,21 @@ export default function UserProfileScreen() {
                 : sortedRatings.slice(0, TOP_COUNT)
               ).map(ratingRow)}
             </>
-          )}
+          ) : sectionStatus(ratingsFailed, ratings !== null) === 'failed' ? (
+            <>
+              <Text style={styles.sectionHeading}>Top ratings</Text>
+              {sectionRetry('ratings', () => loadRatings(profile.username))}
+            </>
+          ) : null}
 
           {/* The design's "See all ratings and history" link: it
               expands the full ratings list and reveals History in
               place (no separate route exists in app or web). */}
           {!expanded &&
             (sortedRatings.length > TOP_COUNT ||
-              (history && history.entries.length > 0)) && (
+              (history && history.entries.length > 0) ||
+              sectionStatus(historyFailed, history !== null) ===
+                'failed') && (
               <Pressable
                 onPress={() => setExpanded(true)}
                 accessibilityRole="button"
@@ -763,7 +849,7 @@ export default function UserProfileScreen() {
               </Pressable>
             )}
 
-          {expanded && history && history.entries.length > 0 && (
+          {expanded && history && history.entries.length > 0 ? (
             <>
               <Text style={[styles.sectionHeading, styles.historyHeading]}>
                 History
@@ -780,7 +866,15 @@ export default function UserProfileScreen() {
                 ) : null,
               )}
             </>
-          )}
+          ) : expanded &&
+            sectionStatus(historyFailed, history !== null) === 'failed' ? (
+            <>
+              <Text style={[styles.sectionHeading, styles.historyHeading]}>
+                History
+              </Text>
+              {sectionRetry('history', () => loadHistory(profile.username))}
+            </>
+          ) : null}
 
           {fixtureMode && (
             <Text style={styles.note}>
@@ -1062,6 +1156,26 @@ const createStyles = (theme: Theme) =>
       color: theme.text,
       paddingHorizontal: spacing.xs,
       marginBottom: 10,
+    },
+    sectionRetryRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      paddingHorizontal: spacing.xs,
+      marginBottom: spacing.xl,
+    },
+    sectionRetryText: {
+      ...typeStyles.bodySmall,
+      color: theme.muted,
+    },
+    sectionRetryLink: {
+      paddingHorizontal: spacing.sm,
+      paddingVertical: spacing.xs,
+    },
+    sectionRetryAction: {
+      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.accent,
     },
     historyHeading: {
       marginTop: spacing.xl,

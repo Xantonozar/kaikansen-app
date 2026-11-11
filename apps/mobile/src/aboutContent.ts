@@ -8,9 +8,10 @@
  * - the description is the app's actual feature set (theme
  *   listening/watching + solo & multiplayer quizzes);
  * - "What's new" lists only work that actually shipped in the
- *   1.0.0 build (the 2026-11-10/11 chain: 24-rank ladder + Curve B
- *   RP, real Weekly leaderboard, Atlas search, the offline screen,
- *   the playback split);
+ *   current release (1.0.1: the video-watch fix — one stable video
+ *   surface — plus the polish batch; the 1.0.0 chain it builds on:
+ *   24-rank ladder + Curve B RP, real Weekly leaderboard, Atlas
+ *   search, the offline screen, the playback split);
  * - credits name the real data sources (AnimeThemes catalogue &
  *   media, AniList anime data, Cloudinary artwork hosting) and
  *   the developer.
@@ -21,11 +22,10 @@ export const ABOUT_DESCRIPTION =
   'Listen to and watch anime opening & ending themes, and quiz yourself and friends on them.';
 
 export const ABOUT_WHATS_NEW: readonly string[] = [
-  'A 24-rank ladder with rebalanced RP — climb from Academy Student to Pirate King',
-  'Weekly leaderboard, ranked by the RP you earn each week',
-  'Faster search that finds partial titles (try "naru")',
-  'An offline screen that hands you your downloads when the connection drops',
-  'Smoother playback — audio and video each on their best player',
+  'Video watching fixed — themes now play their video properly on the theme page',
+  'Leaderboard scrolls smoothly, with a Weekly caption',
+  'Profile sections that fail to load now offer a Retry instead of vanishing',
+  'Honest progress bars — no more fake fills on downloads',
 ];
 
 export interface AboutCredit {
@@ -50,7 +50,7 @@ export const ABOUT_LINKS: readonly AboutLink[] = [
   { label: 'AniList', url: 'https://anilist.co' },
 ];
 
-/** "Version 1.0.0 (build 2)" — from the runtime-read build facts. */
+/** "Version 1.0.1 (build 3)" — from the runtime-read build facts. */
 export function aboutVersionLine(version: string, versionCode: number): string {
   return `Version ${version} (build ${versionCode})`;
 }
