@@ -38,7 +38,6 @@ import {
   generateRoomCode,
   getCorrectAnswer,
   multiplayerScoreFor,
-  shouldAutoLock,
   type QuizThemeLike,
 } from './quiz-game.utils';
 import { RankService } from './rank.service';
@@ -190,8 +189,13 @@ function intersectSets<T>(left: Set<T>, right: Set<T>): Set<T> {
  * - Scoring (answer route): secondsRemaining is measured
  *   SERVER-side from the round's startedAt; the points are the
  *   OWNER'S formula (spec 2026-11-10): correct → secondsRemaining
- *   × (players who haven't answered yet + 1); wrong → 0. (The
- *   web's +secondsRemaining / −secondsRemaining and its party
+ *   × (players who haven't answered yet + 1). NEGATIVE MARKING
+ *   (owner ruling, 2026-11-12 — supersedes the 2026-11-10
+ *   'wrong = 0'): a wrong SUBMITTED answer costs −half of what
+ *   a correct answer would have earned at that moment, rounded
+ *   up; players who never answer keep the timer-expiry rows at
+ *   0. Player totals may go below zero. (The web's
+ *   +secondsRemaining / −secondsRemaining and its party
  *   first-correct bonus are replaced, not ported.)
  * - Pre-round countdown (owner design, 2026-11-10): every round
  *   opens with a ROUND_COUNTDOWN_SECONDS (5) countdown while
@@ -204,9 +208,11 @@ function intersectSets<T>(left: Set<T>, right: Set<T>): Set<T> {
  *   yet'), never scored. The web has no countdown; its clients
  *   start the clip and the clock together at broadcast time
  *   and eat the load latency (the owner's report).
- *   The all-but-one auto-lock (with the duel exception: the
- *   last duelist is only locked once a correct answer exists)
- *   is ported in both its pre-answer and post-answer forms.
+ *   The web's all-but-one auto-lock is NOT ported (owner
+ *   ruling, 2026-11-12 — auto-lock abolished): a round ends
+ *   only when every current player has submitted or the timer
+ *   expires, so the last remaining player always gets to
+ *   answer and be scored normally.
  * - Round end: when every player has an answer row, or the
  *   timer expires (unanswered players get autoLocked rows —
  *   the web timer-end route's shape). Game end (last round)
@@ -2396,47 +2402,14 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
 
       const playerCount = room.players.length;
       const timeLimitSeconds = room.settings.timeLimitSeconds || 30;
-      const isDuel = room.roomType === 'duel';
-      const hasCorrectAnswer = round.answers.some((a) => a.correct);
-
-      // ─── AUTO-LOCKOUT (BEFORE processing) — the web route: if
-      // all-but-one have answered, this attempt arrives too late.
-      if (
-        shouldAutoLock({
-          answeredCount: round.answers.length,
-          playerCount,
-          roomType: room.roomType,
-          hasCorrectAnswer,
-        })
-      ) {
-        round.answers.push({
-          userId,
-          submittedAnswer: '',
-          correct: false,
-          answeredAt: new Date(),
-          secondsRemaining: 0,
-          baseScore: 0,
-          bonusScore: 0,
-          totalScoreGained: 0,
-          autoLocked: true,
-        } as RoomDoc['rounds'][number]['answers'][number]);
-        await room.save();
-
-        this.emit(room, 'room:player-answered', {
-          round: room.currentRound,
-          userId,
-          submittedAnswer: '',
-          correct: false,
-          totalScoreGained: 0,
-          autoLocked: true,
-          answeredCount: round.answers.length,
-          totalPlayers: playerCount,
-        });
-        await this.finishRound(models, room);
-        return { success: true, autoLocked: true };
-      }
 
       // ─── Server-side timing + strict-equality validation.
+      // No auto-lock (owner ruling, 2026-11-12): however many
+      // players have already answered — right or wrong — the
+      // last remaining player always gets to submit and be
+      // scored normally. The round ends below only when every
+      // current player has submitted, or by the server timer
+      // (endRoundByTimer).
       const elapsedSeconds = Math.floor(
         (Date.now() - new Date(round.startedAt).getTime()) / 1000,
       );
@@ -2470,51 +2443,8 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         player.lastSeenAt = new Date();
       }
 
-      // ─── POST-ANSWER AUTO-LOCK of the last remaining player.
-      let autoLockedPlayerId: string | null = null;
-      const newHasCorrect = round.answers.some((a) => a.correct);
-      if (
-        shouldAutoLock({
-          answeredCount: round.answers.length,
-          playerCount,
-          roomType: room.roomType,
-          hasCorrectAnswer: newHasCorrect,
-        })
-      ) {
-        const answeredIds = round.answers.map((a) => a.userId);
-        const lastPlayer = room.players.find(
-          (p) => !answeredIds.includes(p.userId),
-        );
-        if (lastPlayer) {
-          autoLockedPlayerId = lastPlayer.userId;
-          round.answers.push({
-            userId: lastPlayer.userId,
-            submittedAnswer: '',
-            correct: false,
-            answeredAt: new Date(),
-            secondsRemaining: 0,
-            baseScore: 0,
-            bonusScore: 0,
-            totalScoreGained: 0,
-            autoLocked: true,
-          } as RoomDoc['rounds'][number]['answers'][number]);
-        }
-      }
-
       await room.save();
 
-      if (autoLockedPlayerId) {
-        this.emit(room, 'room:player-answered', {
-          round: room.currentRound,
-          userId: autoLockedPlayerId,
-          submittedAnswer: '',
-          correct: false,
-          totalScoreGained: 0,
-          autoLocked: true,
-          answeredCount: round.answers.length,
-          totalPlayers: playerCount,
-        });
-      }
       this.emit(room, 'room:player-answered', {
         round: room.currentRound,
         userId,

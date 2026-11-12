@@ -31,6 +31,11 @@ import {
 } from '../themes/theme-cache.schema';
 import { resolveAudioUrl } from '../themes/audio-url';
 import {
+  NOOP_QUIZ_HEAD_WARMER,
+  QuizHeadCacheService,
+  type QuizHeadWarmer,
+} from '../quiz-heads/quiz-heads.service';
+import {
   HttpAudioProbe,
   UNKNOWN_AUDIO_PROBE,
   type AudioProbe,
@@ -183,8 +188,15 @@ interface SoloModels {
  *   the room generator's dedup), shuffled.
  * - Scoring (QuizClient): correct → ceil(secondsRemaining *
  *   (1 + streak * 0.1)) with the streak counted BEFORE the
- *   answer; wrong/skip/timeout → 0 and the streak resets.
+ *   answer; the streak resets on any non-correct answer.
  *   timeTaken = 20 − secondsRemaining (20 on skip/timeout).
+ *   NEGATIVE MARKING (owner ruling, 2026-11-12 — supersedes
+ *   the web's and the frozen 2026-11-10 'wrong = 0'): a wrong
+ *   SUBMITTED answer scores −half of what a correct answer
+ *   would have earned at that moment, rounded up; skip/timeout
+ *   (no submission) still scores 0. The persisted attempt and
+ *   the session total take the negative value — totals may go
+ *   below zero, no floor.
  * - Every answer persists one QuizAttempt (the web persists per
  *   question, not per game — its leaderboard ranks single
  *   questions). atEntryId is the theme's first entry, as the
@@ -253,6 +265,15 @@ interface SoloModels {
  *    the web's shape; the same widening there is a separate
  *    owner decision).
  *
+ * 9. Phase 2 head warming (2026-11-12): dealt themes are
+ *    warmed into the API's own head cache (quiz-heads) at the
+ *    deal points, so the client's quiz slices and first player
+ *    candidate can be served by the API instead of the Europe
+ *    origin. Purely a serving optimisation: no response field
+ *    changes (the client derives the head URL by rule), no
+ *    database writes, and a cold or lost cache degrades to
+ *    exactly the pre-phase-2 origin chain.
+ *
  * Models are OPTIONAL like everywhere else in this API: booted
  * without MONGODB_URI, every method answers 503.
  */
@@ -269,6 +290,15 @@ export class SoloQuizService {
    */
   private readonly audioProbe: AudioProbe;
 
+  /**
+   * The phase 2 head warmer (2026-11-12). Optional in DI like
+   * the probe: the module registers the real cache; anywhere
+   * the service is constructed without one (model-less boots,
+   * unit tests) the no-op warmer keeps behaviour identical to
+   * before phase 2 — and never touches the network or disk.
+   */
+  private readonly headWarmer: QuizHeadWarmer;
+
   constructor(
     @Optional()
     @InjectModel(ThemeCache.name)
@@ -284,8 +314,11 @@ export class SoloQuizService {
     private readonly watchHistoryModel?: Model<WatchHistoryDocument>,
     @Optional()
     httpAudioProbe?: HttpAudioProbe,
+    @Optional()
+    headCache?: QuizHeadCacheService,
   ) {
     this.audioProbe = httpAudioProbe ?? UNKNOWN_AUDIO_PROBE;
+    this.headWarmer = headCache ?? NOOP_QUIZ_HEAD_WARMER;
   }
 
   private requireModels(): SoloModels {
@@ -630,7 +663,30 @@ export class SoloQuizService {
       playbackStartedAt: null,
       index,
     };
+    this.warmHeadFor(drawn.theme);
     return this.questionProjection(drawn, index);
+  }
+
+  /**
+   * Phase 2 warming (2026-11-12): a theme is warmed the
+   * moment this service DEALS it — at commit (game creation,
+   * answer-time draws, promotions) and at the part-5 pre-draw
+   * (ensureNextDrawn) — so by the time the client asks, the
+   * song's head is on the API's disk or on its way. Questions
+   * in this service are dealt lazily (creation deals Q1; the
+   * rest are dealt at the playback-start pre-draw or the
+   * answer), so the deal points are where "every dealt theme"
+   * is warmed — there is no earlier moment a theme is known.
+   * The warmer's contract is fire-and-forget; the guard here
+   * is belt-and-braces so even a misbehaving warmer can never
+   * fail or delay a draw.
+   */
+  private warmHeadFor(theme: ThemeDoc): void {
+    try {
+      this.headWarmer.warm(resolveAudioUrl(theme.audioUrl, theme.videoUrl));
+    } catch {
+      // A lost warm is a lost optimisation, never an error.
+    }
   }
 
   private async drawQuestion(
@@ -660,6 +716,7 @@ export class SoloQuizService {
     if (session.current.index >= SOLO_QUESTION_COUNT) return null;
     const correctTheme = await this.sampleVerifiedCandidate(models, session);
     session.next = await this.buildDrawn(models, session, correctTheme);
+    this.warmHeadFor(session.next.theme);
     return session.next;
   }
 
@@ -829,11 +886,19 @@ export class SoloQuizService {
       SOLO_TIME_LIMIT_SECONDS,
       now,
     );
-    // null (skip/timeout) is simply never the correct value — the
-    // web encodes it as the '__SKIP__'/'__TIMEOUT__' sentinels and
-    // scores it identically: wrong, full time taken.
+    // null (skip/timeout) is never the correct value — the
+    // web encodes it as the '__SKIP__'/'__TIMEOUT__' sentinels.
+    // Scoring (owner ruling, 2026-11-12): a submitted wrong
+    // answer is penalised (−half the would-be correct score);
+    // a null scores 0 — no submission, no penalty — and takes
+    // the full 20s as before.
     const correct = answer !== null && answer === current.correctValue;
-    const scoreGained = soloScoreFor(correct, secondsRemaining, session.streak);
+    const scoreGained = soloScoreFor(
+      correct,
+      secondsRemaining,
+      session.streak,
+      answer !== null,
+    );
     const timeTaken =
       answer === null
         ? SOLO_TIME_LIMIT_SECONDS

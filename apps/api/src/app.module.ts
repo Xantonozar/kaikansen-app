@@ -9,6 +9,7 @@ import { LibraryModule } from './library/library.module';
 import { PlaylistsModule } from './playlists/playlists.module';
 import { CommentsModule } from './comments/comments.module';
 import { QuizModule } from './quiz/quiz.module';
+import { QuizHeadsModule } from './quiz-heads/quiz-heads.module';
 import { RankModule } from './rank/rank.module';
 import { SearchIndexesModule } from './search-indexes/search-indexes.module';
 import { SocialModule } from './social/social.module';
@@ -36,6 +37,9 @@ const hasDatabase = typeof mongodbUri === 'string' && mongodbUri.length > 0;
     PlaylistsModule.register(hasDatabase),
     CommentsModule.register(hasDatabase),
     QuizModule.register(hasDatabase),
+    // Phase 2 head cache: no database dependency — registers
+    // unconditionally (see quiz-heads.module.ts).
+    QuizHeadsModule,
     SocialModule.register(hasDatabase),
     UsersModule.register(hasDatabase),
     RankModule.register(hasDatabase),

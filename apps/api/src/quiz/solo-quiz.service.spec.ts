@@ -292,19 +292,36 @@ describe('SoloQuizService — game flow', () => {
     expect(res.streak).toBe(2);
   });
 
-  it('wrong answers score 0 and reset the streak; skips take the full 20s', async () => {
+  it('wrong answers are penalised −half the would-be score and reset the streak; skips stay 0 and take the full 20s', async () => {
     const { service, models } = makeService();
     const state = await service.createGame(USER_1, { quizType: 'anime' });
     await service.submitAnswer(USER_1, state.gameId, 'Anime 1 EN');
 
+    // Q2 answered instantly with a streak of 1: a correct answer
+    // would have earned ceil(20 * 1.1) = 22, so the wrong tap
+    // costs −ceil(22 / 2) = −11 (owner ruling, 2026-11-12).
     const wrong = await service.submitAnswer(USER_1, state.gameId, 'Anime 3 EN');
     expect(wrong.correct).toBe(false);
-    expect(wrong.scoreGained).toBe(0);
+    expect(wrong.scoreGained).toBe(-11);
+    expect(wrong.totalScore).toBe(9); // 20 − 11
     expect(wrong.streak).toBe(0);
+    expect(models.attempts[1]).toMatchObject({ correct: false, score: -11, streak: 0 });
 
     const skipped = await service.submitAnswer(USER_1, state.gameId, null);
     expect(skipped.correct).toBe(false);
+    expect(skipped.scoreGained).toBe(0); // no submission → no penalty
     expect(models.attempts[2]).toMatchObject({ correct: false, timeTaken: 20, score: 0 });
+  });
+
+  it('a wrong first answer takes the game total below zero (no floor)', async () => {
+    const { service, models } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+
+    const wrong = await service.submitAnswer(USER_1, state.gameId, 'Anime 2 EN');
+    expect(wrong.correct).toBe(false);
+    expect(wrong.scoreGained).toBe(-10); // −half of 20 at no streak
+    expect(wrong.totalScore).toBe(-10);
+    expect(models.attempts[0]).toMatchObject({ correct: false, score: -10 });
   });
 
   it('ends after exactly 10 questions and refuses an 11th answer', async () => {

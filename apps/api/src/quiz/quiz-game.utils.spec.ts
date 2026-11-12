@@ -14,7 +14,6 @@ import {
   ladderForRp,
   multiplayerScoreFor,
   secondsRemainingAt,
-  shouldAutoLock,
   SOLO_LOAD_CREDIT_CAP_MS,
   soloScoreFor,
   type QuizThemeLike,
@@ -176,17 +175,29 @@ describe('distinctDistractorValues (shared selection semantics)', () => {
   });
 });
 
-describe('solo scoring (web QuizClient formula)', () => {
+describe('solo scoring (web QuizClient formula + owner negative marking, 2026-11-12)', () => {
   it('scores ceil(secondsRemaining * (1 + streak * 0.1))', () => {
-    expect(soloScoreFor(true, 20, 0)).toBe(20);
-    expect(soloScoreFor(true, 13, 2)).toBe(Math.ceil(13 * 1.2)); // 16
-    expect(soloScoreFor(true, 7, 5)).toBe(Math.ceil(7 * 1.5)); // 11
-    expect(soloScoreFor(true, 0, 9)).toBe(0);
+    expect(soloScoreFor(true, 20, 0, true)).toBe(20);
+    expect(soloScoreFor(true, 13, 2, true)).toBe(Math.ceil(13 * 1.2)); // 16
+    expect(soloScoreFor(true, 7, 5, true)).toBe(Math.ceil(7 * 1.5)); // 11
+    expect(soloScoreFor(true, 0, 9, true)).toBe(0);
   });
 
-  it('scores zero for wrong answers regardless of speed/streak', () => {
-    expect(soloScoreFor(false, 20, 0)).toBe(0);
-    expect(soloScoreFor(false, 19, 12)).toBe(0);
+  it('a wrong SUBMITTED answer costs −half the would-be correct score, rounded up', () => {
+    // wouldBe = ceil(19 * 1.1) = 21 → −ceil(21 / 2) = −11.
+    expect(soloScoreFor(false, 19, 1, true)).toBe(-11);
+    // wouldBe = 20 at no streak → −10.
+    expect(soloScoreFor(false, 20, 0, true)).toBe(-10);
+    // The streak BEFORE the answer feeds the penalty too:
+    // wouldBe = ceil(20 * 1.5) = 30 → −15.
+    expect(soloScoreFor(false, 20, 5, true)).toBe(-15);
+    // wouldBe = 0 (no time left) → no penalty either.
+    expect(soloScoreFor(false, 0, 3, true)).toBe(0);
+  });
+
+  it('skip/timeout (no submission) still scores 0, never a penalty', () => {
+    expect(soloScoreFor(false, 20, 0, false)).toBe(0);
+    expect(soloScoreFor(false, 19, 12, false)).toBe(0);
   });
 });
 
@@ -287,7 +298,9 @@ describe('multiplayer scoring (owner formula, spec 2026-11-10)', () => {
     ).toEqual({ baseScore: 6, bonusScore: 0, totalScoreGained: 6 });
   });
 
-  it('wrong answers earn 0 (no negative scoring, no bonus)', () => {
+  it('a wrong SUBMITTED answer costs −half the would-be correct score, rounded up', () => {
+    // First answerer in a 4-player room at 17s: wouldBe = 17 × 4
+    // = 68 → −34, carried in baseScore; bonusScore stays 0.
     expect(
       multiplayerScoreFor({
         correct: false,
@@ -295,7 +308,16 @@ describe('multiplayer scoring (owner formula, spec 2026-11-10)', () => {
         playerCount: 4,
         answeredCount: 0,
       }),
-    ).toEqual({ baseScore: 0, bonusScore: 0, totalScoreGained: 0 });
+    ).toEqual({ baseScore: -34, bonusScore: 0, totalScoreGained: -34 });
+    // The LAST answerer (×1): wouldBe = 9 → −ceil(9 / 2) = −5.
+    expect(
+      multiplayerScoreFor({
+        correct: false,
+        secondsRemaining: 9,
+        playerCount: 4,
+        answeredCount: 3,
+      }),
+    ).toEqual({ baseScore: -5, bonusScore: 0, totalScoreGained: -5 });
     // A correct answer at 0 seconds remaining also earns 0.
     expect(
       multiplayerScoreFor({
@@ -305,57 +327,6 @@ describe('multiplayer scoring (owner formula, spec 2026-11-10)', () => {
         answeredCount: 0,
       }).totalScoreGained,
     ).toBe(0);
-  });
-});
-
-describe('shouldAutoLock (web answer route)', () => {
-  it('locks the last party player once all-but-one answered', () => {
-    expect(
-      shouldAutoLock({
-        answeredCount: 2,
-        playerCount: 3,
-        roomType: 'party',
-        hasCorrectAnswer: false,
-      }),
-    ).toBe(true);
-    expect(
-      shouldAutoLock({
-        answeredCount: 1,
-        playerCount: 3,
-        roomType: 'party',
-        hasCorrectAnswer: false,
-      }),
-    ).toBe(false);
-  });
-
-  it('never locks when everyone has answered or the room is solo-sized', () => {
-    expect(
-      shouldAutoLock({
-        answeredCount: 3,
-        playerCount: 3,
-        roomType: 'party',
-        hasCorrectAnswer: true,
-      }),
-    ).toBe(false);
-  });
-
-  it('duel exception: last duelist survives until a correct answer exists', () => {
-    expect(
-      shouldAutoLock({
-        answeredCount: 1,
-        playerCount: 2,
-        roomType: 'duel',
-        hasCorrectAnswer: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldAutoLock({
-        answeredCount: 1,
-        playerCount: 2,
-        roomType: 'duel',
-        hasCorrectAnswer: true,
-      }),
-    ).toBe(true);
   });
 });
 

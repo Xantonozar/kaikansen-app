@@ -50,6 +50,7 @@ import {
   getQuizSliceState,
   getQuizSliceUri,
   pinQuizSlice,
+  quizRemoteChain,
   quizSliceCandidates,
   sliceGraceApplies,
   whenQuizSliceSettles,
@@ -435,18 +436,23 @@ export default function SoloQuizScreen() {
           // Pre-mount Q1 on the REMOTE chain — never a slice:
           // Q1 has no prefetch by construction, and §6's math
           // shows a slice could not finalize in-window at slow
-          // speeds anyway (1 MB ≈ 11.5 s at ~87 KB/s), while
+          // speeds anyway (1.5 MB ≈ 17 s at ~87 KB/s), while
           // the same bytes as a stream are seconds of buffered
-          // audio. The chain is frozen into the same snapshot
-          // the question render consumes, so the player's
-          // candidates stay identical across the creating →
-          // question handover and the stream never restarts.
+          // audio. Phase 2 (2026-11-12): the remote chain leads
+          // with the API head cache (quizRemoteChain) — the API
+          // warmed Q1's head when it dealt the game, so the
+          // stream usually starts from the API's disk, with the
+          // origin chain behind it untouched. The chain is
+          // frozen into the same snapshot the question render
+          // consumes, so the player's candidates stay identical
+          // across the creating → question handover and the
+          // stream never restarts.
           const q = state.question;
           const key = `${state.gameId}:${q.index}`;
-          const chain = quizSliceCandidates(null, [
-            q.theme.audioUrl,
-            q.theme.videoUrl,
-          ]);
+          const chain = quizSliceCandidates(
+            null,
+            quizRemoteChain(q.theme.audioUrl, q.theme.videoUrl),
+          );
           setFrozenChain({ key, list: chain });
           setSetup({
             question: q,
@@ -563,10 +569,10 @@ export default function SoloQuizScreen() {
       if (timer) clearTimeout(timer);
       setFrozenChain({
         key,
-        list: quizSliceCandidates(getQuizSliceUri(key), [
-          question.theme.audioUrl,
-          question.theme.videoUrl,
-        ]),
+        list: quizSliceCandidates(
+          getQuizSliceUri(key),
+          quizRemoteChain(question.theme.audioUrl, question.theme.videoUrl),
+        ),
       });
     };
     if (sliceGraceApplies(getQuizSliceState(key))) {
@@ -888,10 +894,11 @@ export default function SoloQuizScreen() {
     // Part 6 + F6: this question's chain, frozen by the freeze
     // effect — its prefetched slice (ready at the freeze, or
     // finalized inside the F6 grace) leads, then the remote
-    // chain in doctrine order (the API-resolved audio — the
-    // derived .ogg — first, then the theme's video file played
-    // audio-only as the last resort; the question reports
-    // unplayable only after all fail). While the freeze is
+    // chain in doctrine order (phase 2: the API head cache,
+    // then the API-resolved audio — the derived .ogg — then
+    // the theme's video file played audio-only as the last
+    // resort; the question reports unplayable only after all
+    // fail). While the freeze is
     // still pending (the grace window) there is no chain yet
     // and the player below stays unmounted.
     const chainFrozen = frozenChain?.key === mediaKey;

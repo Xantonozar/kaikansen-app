@@ -10,7 +10,10 @@ import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 const mockFileSizes = new Map<string, number>();
 const mockDeleted: string[] = [];
-const mockTransfers = new Map<string, { totalBytes: number; fail?: boolean }>();
+const mockTransfers = new Map<
+  string,
+  { totalBytes: number; fail?: boolean; httpStatus?: number }
+>();
 const mockTasks: {
   url: string;
   destUri: string;
@@ -18,7 +21,18 @@ const mockTasks: {
   cancelCalls: number;
 }[] = [];
 
+/** Mutable API base for the phase 2 derivation (fixture mode = undefined). */
+const mockApiBase: { value: string | undefined } = {
+  value: 'https://api.test',
+};
+
 jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
+
+jest.mock('./api', () => ({
+  get apiBaseUrl() {
+    return mockApiBase.value;
+  },
+}));
 
 jest.mock('expo-file-system', () => {
   class MockDirectory {
@@ -86,7 +100,7 @@ jest.mock('expo-file-system/legacy', () => ({
         if (record.cancelled) return undefined;
         emit(script.totalBytes);
         if (record.cancelled) return undefined;
-        return { status: 200, uri: destUri };
+        return { status: script.httpStatus ?? 200, uri: destUri };
       },
       cancelAsync: async () => {
         record.cancelled = true;
@@ -103,14 +117,17 @@ import {
   clearQuizSlices,
   getQuizSliceState,
   getQuizSliceUri,
+  headCacheUrlFor,
   isQuizSliceUri,
   pinQuizSlice,
   prefetchQuizSlice,
+  quizRemoteChain,
   quizSliceCandidates,
   sliceCapReached,
   sliceFileNameFor,
   sliceGraceApplies,
   sliceIsUsable,
+  sliceSourceUrls,
   whenQuizSliceSettles,
 } from './quizPrefetch';
 
@@ -123,17 +140,24 @@ function script(url: string, totalBytes: number, fail = false): void {
   mockTransfers.set(url, { totalBytes, fail });
 }
 
+function scriptHttp(url: string, totalBytes: number, httpStatus: number): void {
+  mockTransfers.set(url, { totalBytes, httpStatus });
+}
+
 beforeEach(() => {
   clearQuizSlices();
   mockFileSizes.clear();
   mockDeleted.length = 0;
   mockTasks.length = 0;
   mockTransfers.clear();
+  mockApiBase.value = 'https://api.test';
 });
 
 describe('pure slice decisions', () => {
   it('the cap decision trips exactly at the cap', () => {
-    expect(QUIZ_SLICE_CAP_BYTES).toBe(1_000_000);
+    // 1.5 MB since phase 2 (2026-11-12): the head cache's
+    // head size, ~36–40s at the newest bitrates.
+    expect(QUIZ_SLICE_CAP_BYTES).toBe(1_500_000);
     expect(sliceCapReached(QUIZ_SLICE_CAP_BYTES - 1)).toBe(false);
     expect(sliceCapReached(QUIZ_SLICE_CAP_BYTES)).toBe(true);
     expect(sliceCapReached(QUIZ_SLICE_CAP_BYTES + 1)).toBe(true);
@@ -320,5 +344,102 @@ describe('F6 grace support (2026-11-12)', () => {
     await settles; // never rejects
     expect(getQuizSliceState('game:2')).toBe('none');
     expect(getQuizSliceUri('game:2')).toBeNull();
+  });
+});
+
+describe('phase 2 head cache derivation (2026-11-12)', () => {
+  const AT_A = 'https://a.animethemes.moe/AnimeA-OP1.ogg';
+  const HEAD_A = 'https://api.test/quiz-heads/AnimeA-OP1.ogg';
+  const AT_VIDEO = 'https://v.animethemes.moe/AnimeA-OP1.webm';
+
+  it('an AnimeThemes audio URL derives the API head URL by rule', () => {
+    expect(headCacheUrlFor(AT_A)).toBe(HEAD_A);
+  });
+
+  it('underivable addresses stay on the plain origin chain (null)', () => {
+    expect(headCacheUrlFor(AT_VIDEO)).toBeNull(); // video, not audio
+    expect(headCacheUrlFor('https://cdn.example/AnimeA-OP1.ogg')).toBeNull();
+    expect(headCacheUrlFor('https://a.animethemes.moe/nested/AnimeA.ogg')).toBeNull();
+    expect(headCacheUrlFor('https://a.animethemes.moe/AnimeA-OP1.webm')).toBeNull();
+    expect(headCacheUrlFor(null)).toBeNull();
+    expect(headCacheUrlFor(undefined)).toBeNull();
+  });
+
+  it('fixture mode (no API configured) derives nothing', () => {
+    mockApiBase.value = undefined;
+    expect(headCacheUrlFor(AT_A)).toBeNull();
+    expect(sliceSourceUrls(AT_A)).toEqual([AT_A]);
+    expect(quizRemoteChain(AT_A, AT_VIDEO)).toEqual([null, AT_A, AT_VIDEO]);
+  });
+
+  it('slice sources are head-first, origin as the fallback', () => {
+    expect(sliceSourceUrls(AT_A)).toEqual([HEAD_A, AT_A]);
+    expect(sliceSourceUrls(OGG_A)).toEqual([OGG_A]); // a.example — no head
+  });
+
+  it('the remote chain leads with the head, origin chain behind, exactly once', () => {
+    expect(quizRemoteChain(AT_A, AT_VIDEO)).toEqual([HEAD_A, AT_A, AT_VIDEO]);
+    // Composed the way both solo chain sites build it (Q1's
+    // setup freeze passes a null slice; a live question's
+    // freeze passes its ready slice):
+    expect(quizSliceCandidates(null, quizRemoteChain(AT_A, AT_VIDEO))).toEqual([
+      HEAD_A,
+      AT_A,
+      AT_VIDEO,
+    ]);
+    expect(
+      quizSliceCandidates(
+        'file:///cache/quiz-slices/g_1.ogg',
+        quizRemoteChain(AT_A, AT_VIDEO),
+      ),
+    ).toEqual(['file:///cache/quiz-slices/g_1.ogg', HEAD_A, AT_A, AT_VIDEO]);
+    // An underivable theme's chain is byte-identical to before.
+    expect(quizSliceCandidates(null, quizRemoteChain(OGG_A, VIDEO_A))).toEqual([
+      OGG_A,
+      VIDEO_A,
+    ]);
+  });
+});
+
+describe('prefetch source order (phase 2)', () => {
+  const AT_A = 'https://a.animethemes.moe/AnimeA-OP1.ogg';
+  const HEAD_A = 'https://api.test/quiz-heads/AnimeA-OP1.ogg';
+
+  it('a healthy head source is the ONLY transfer — the origin is untouched', async () => {
+    script(HEAD_A, 300_000);
+    script(AT_A, 300_000);
+    await prefetchQuizSlice('game:2', AT_A);
+    expect(getQuizSliceUri('game:2')).not.toBeNull();
+    expect(mockTasks.map((t) => t.url)).toEqual([HEAD_A]);
+  });
+
+  it('a dead head source falls back to the origin, in order', async () => {
+    script(HEAD_A, 300_000, true); // network-level failure
+    script(AT_A, 300_000);
+    await prefetchQuizSlice('game:2', AT_A);
+    expect(getQuizSliceUri('game:2')).not.toBeNull();
+    expect(mockTasks.map((t) => t.url)).toEqual([HEAD_A, AT_A]);
+  });
+
+  it('an HTTP-error head landing is rejected by STATUS, however big the body', async () => {
+    // The 404 body here is deliberately slice-sized: size
+    // alone would call it usable — the status must rule it out,
+    // and the ORIGIN's bytes (200 KB) are what land.
+    scriptHttp(HEAD_A, 300_000, 404);
+    script(AT_A, 200_000);
+    await prefetchQuizSlice('game:2', AT_A);
+    const uri = getQuizSliceUri('game:2');
+    expect(uri).not.toBeNull();
+    expect(mockTasks.map((t) => t.url)).toEqual([HEAD_A, AT_A]);
+    expect(mockFileSizes.get(uri!)).toBe(200_000);
+  });
+
+  it('when every source fails the prefetch leaves nothing, as before', async () => {
+    script(HEAD_A, 300_000, true);
+    script(AT_A, 300_000, true);
+    await prefetchQuizSlice('game:2', AT_A);
+    expect(getQuizSliceUri('game:2')).toBeNull();
+    expect(getQuizSliceState('game:2')).toBe('none');
+    expect(mockTasks.map((t) => t.url)).toEqual([HEAD_A, AT_A]);
   });
 });

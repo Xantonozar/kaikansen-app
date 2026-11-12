@@ -18,6 +18,7 @@ import { QuizAttempt, QuizAttemptSchema } from './quiz-attempt.schema';
 import { QuizRoom, QuizRoomSchema } from './quiz-room.schema';
 import { RankHistory, RankHistorySchema } from './rank-history.schema';
 import { UserRank, UserRankSchema } from './user-rank.schema';
+import { QuizHeadsModule } from '../quiz-heads/quiz-heads.module';
 import { HttpAudioProbe } from './audio-probe';
 import { QuizController } from './quiz.controller';
 import { QuizGateway } from './quiz.gateway';
@@ -54,21 +55,28 @@ export class QuizModule {
   static register(withDatabase: boolean): DynamicModule {
     return {
       module: QuizModule,
-      imports: withDatabase
-        ? [
-            MongooseModule.forFeature([
-              { name: QuizAttempt.name, schema: QuizAttemptSchema },
-              { name: QuizRoom.name, schema: QuizRoomSchema },
-              { name: UserRank.name, schema: UserRankSchema },
-              { name: RankHistory.name, schema: RankHistorySchema },
-              { name: ThemeCache.name, schema: ThemeCacheSchema },
-              { name: User.name, schema: UserSchema },
-              { name: WatchHistory.name, schema: WatchHistorySchema },
-              { name: Rating.name, schema: RatingSchema },
-              { name: Favorite.name, schema: FavoriteSchema },
-            ]),
-          ]
-        : [],
+      // QuizHeadsModule in both branches: the head cache has
+      // no database dependency, and SoloQuizService injects
+      // its exported QuizHeadCacheService as the deal-time
+      // warmer (phase 2, 2026-11-12).
+      imports: [
+        QuizHeadsModule,
+        ...(withDatabase
+          ? [
+              MongooseModule.forFeature([
+                { name: QuizAttempt.name, schema: QuizAttemptSchema },
+                { name: QuizRoom.name, schema: QuizRoomSchema },
+                { name: UserRank.name, schema: UserRankSchema },
+                { name: RankHistory.name, schema: RankHistorySchema },
+                { name: ThemeCache.name, schema: ThemeCacheSchema },
+                { name: User.name, schema: UserSchema },
+                { name: WatchHistory.name, schema: WatchHistorySchema },
+                { name: Rating.name, schema: RatingSchema },
+                { name: Favorite.name, schema: FavoriteSchema },
+              ]),
+            ]
+          : []),
+      ],
       controllers: [QuizController],
       providers: [
         SoloQuizService,

@@ -172,18 +172,31 @@ export function shuffle<T>(items: T[], random: () => number = Math.random): T[] 
 /* ------------------------------------------------------------------ */
 /* Solo scoring — app/quiz/QuizClient.tsx `handleOptionSelect`:        */
 /* points = ceil(secondsRemaining * (1 + streak * 0.1)) for a          */
-/* correct answer, using the streak BEFORE this answer; 0 otherwise.   */
-/* The clock is a 20s countdown; timeTaken = 20 - secondsRemaining,    */
-/* or the full 20 on skip/timeout.                                     */
+/* correct answer, using the streak BEFORE this answer. The clock      */
+/* is a 20s countdown; timeTaken = 20 - secondsRemaining, or the       */
+/* full 20 on skip/timeout.                                            */
+/*                                                                     */
+/* NEGATIVE MARKING (owner ruling, 2026-11-12 — supersedes the         */
+/* frozen 2026-11-10 'wrong = 0' rule): a WRONG SUBMITTED answer       */
+/* costs −half of what a correct answer would have earned at the       */
+/* same moment, rounded UP (−ceil(wouldBe / 2)). Skip/timeout          */
+/* (no submission) still scores 0 — only a wrong TAP is penalised.     */
+/* Totals may go below zero; there is deliberately no floor.           */
 /* ------------------------------------------------------------------ */
 
 export function soloScoreFor(
   correct: boolean,
   secondsRemaining: number,
   streakBefore: number,
+  submitted: boolean,
 ): number {
-  if (!correct) return 0;
-  return Math.ceil(secondsRemaining * (1 + streakBefore * 0.1));
+  const wouldBeCorrect = Math.ceil(
+    secondsRemaining * (1 + streakBefore * 0.1),
+  );
+  if (correct) return wouldBeCorrect;
+  if (!submitted) return 0;
+  // (wouldBe 0 → penalty 0, never −0.)
+  return wouldBeCorrect === 0 ? 0 : -Math.ceil(wouldBeCorrect / 2);
 }
 
 /**
@@ -246,12 +259,21 @@ export function effectiveQuestionStart(
 /* seconds remaining × the number of players who had not answered    */
 /* yet, PLUS ONE — the +1 is the owner's explicit pick so the LAST   */
 /* correct answerer still earns the remaining time × 1 instead of    */
-/* × 0. A wrong answer earns 0 (the web's negative scoring is gone). */
-/* Solving for the multiplier at answer time: the players who have   */
-/* not answered yet, excluding the answerer, are                     */
+/* × 0. Solving for the multiplier at answer time: the players who   */
+/* have not answered yet, excluding the answerer, are                */
 /* playerCount − answeredCount − 1, so the multiplier is             */
 /* playerCount − answeredCount. `answeredCount` is the number of     */
 /* answers already recorded in the round BEFORE this one.            */
+/*                                                                   */
+/* NEGATIVE MARKING (owner ruling, 2026-11-12 — supersedes the       */
+/* 2026-11-10 'wrong = 0' rule): a WRONG SUBMITTED answer costs      */
+/* −half of what a correct answer would have earned at the same      */
+/* moment, rounded UP (−ceil(wouldBe / 2)), carried in baseScore     */
+/* (bonusScore stays 0 — there is no separate bonus under the        */
+/* owner's formula; being first is already what the multiplier       */
+/* rewards, and the rows and payloads carry the field). Players      */
+/* who never answer get the timer-expiry rows at 0 — only a wrong    */
+/* TAP is penalised. Player totals may go below zero; no floor.      */
 /* ------------------------------------------------------------------ */
 
 export function multiplayerScoreFor(input: {
@@ -260,38 +282,18 @@ export function multiplayerScoreFor(input: {
   playerCount: number;
   answeredCount: number;
 }): { baseScore: number; bonusScore: number; totalScoreGained: number } {
-  if (!input.correct) {
-    return { baseScore: 0, bonusScore: 0, totalScoreGained: 0 };
-  }
   const notYetAnsweredPlusOne = Math.max(
     1,
     input.playerCount - input.answeredCount,
   );
-  const baseScore = input.secondsRemaining * notYetAnsweredPlusOne;
-  // No separate bonus under the owner's formula — being first is
-  // already what the multiplier rewards. bonusScore stays in the
-  // answer shape at 0 (the rows and payloads carry the field).
-  return { baseScore, bonusScore: 0, totalScoreGained: baseScore };
-}
-
-/**
- * The auto-lock rule from the same route: once all-but-one players
- * have answered, the remaining player is locked out at 0 — except
- * in a duel where nobody has answered correctly yet (the last
- * duelist keeps their chance to steal the round).
- */
-export function shouldAutoLock(input: {
-  answeredCount: number;
-  playerCount: number;
-  roomType: string;
-  hasCorrectAnswer: boolean;
-}): boolean {
-  const { answeredCount, playerCount, roomType, hasCorrectAnswer } = input;
-  return (
-    answeredCount >= playerCount - 1 &&
-    answeredCount < playerCount &&
-    (roomType !== 'duel' || hasCorrectAnswer)
-  );
+  const wouldBeCorrect = input.secondsRemaining * notYetAnsweredPlusOne;
+  if (!input.correct) {
+    // (wouldBe 0 → penalty 0, never −0.)
+    const penalty =
+      wouldBeCorrect === 0 ? 0 : -Math.ceil(wouldBeCorrect / 2);
+    return { baseScore: penalty, bonusScore: 0, totalScoreGained: penalty };
+  }
+  return { baseScore: wouldBeCorrect, bonusScore: 0, totalScoreGained: wouldBeCorrect };
 }
 
 /* ------------------------------------------------------------------ */

@@ -468,8 +468,10 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
       Date.parse(completed.startedAt as string),
     ).toBeLessThanOrEqual(Date.now() + 1000);
 
-    // Guest answers correctly and instantly; the host (last
-    // remaining player in a party) is auto-locked and the game ends.
+    // Guest answers correctly and instantly. NO auto-lock
+    // (owner ruling, 2026-11-12): the host, last remaining
+    // player, still answers — wrong here — and only then does
+    // the game end.
     const guestEnded = waitFor(guest, 'room:round-ended');
     // rank-updated is broadcast per player to the whole room —
     // each socket sees both, so wait for the matching userId.
@@ -495,11 +497,30 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     // in a 2-player room doubles the remaining time.
     expect(answerAck.baseScore as number).toBeGreaterThanOrEqual(56);
 
+    // The host's wrong answer is a real submission with
+    // negative marking (would-be ≈ remaining × 1 → −half),
+    // never an auto-locked row.
+    const wrongOption = (theme.options as string[]).find(
+      (o) => o !== 'Correct EN',
+    )!;
+    const hostAck = await emitAck(host, 'room:answer', {
+      roomId,
+      roundNumber: 1,
+      submittedAnswer: wrongOption,
+    });
+    expect(hostAck.success).toBe(true);
+    expect(hostAck.correct).toBe(false);
+    expect(hostAck.totalScoreGained as number).toBeLessThan(0);
+
     const ended = (await guestEnded) as unknown as Record<string, unknown>;
     expect(ended.gameOver).toBe(true);
     expect(ended.correctAnswer).toBe('Correct EN');
     const answers = ended.answers as Record<string, unknown>[];
-    expect(answers.find((a) => a.userId === HOST)).toMatchObject({ autoLocked: true });
+    expect(answers).toHaveLength(2);
+    expect(answers.find((a) => a.userId === HOST)).toMatchObject({
+      autoLocked: false,
+      correct: false,
+    });
 
     // Rank maintenance ran and broadcast per player (owner RP
     // table: a party of 2 pays +5 / −5, the −5 clamped at the
@@ -551,7 +572,9 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     });
     await completedPromise;
 
-    // Guest's correct answer ends the 1-round game (host auto-locked).
+    // Both players answer correctly; the 1-round game ends on
+    // full submission (no auto-lock since 2026-11-12 — the
+    // host's answer is a real one too).
     const guestRank = waitFor(
       guest,
       'room:rank-updated',
@@ -563,6 +586,12 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
       submittedAnswer: 'Correct EN',
     });
     expect(answerAck.correct).toBe(true);
+    const hostAck = await emitAck(host, 'room:answer', {
+      roomId,
+      roundNumber: 1,
+      submittedAnswer: 'Correct EN',
+    });
+    expect(hostAck.correct).toBe(true);
     await guestRank; // game 1's RP has been applied
     expect(models.historyRows).toHaveLength(rowsBefore + 2);
 

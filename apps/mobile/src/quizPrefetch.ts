@@ -4,6 +4,7 @@ import {
   createDownloadResumable,
   type DownloadResumable,
 } from 'expo-file-system/legacy';
+import { apiBaseUrl } from './api';
 
 /**
  * Solo quiz slice prefetch (quiz total solution part 6,
@@ -16,10 +17,12 @@ import {
  * starved, not broken. Part 5 widened the window (the audio URL
  * is revealed at the CURRENT question's playback start, ~20s
  * ahead); this module spends that window on only the HEAD of
- * the file: the first ~1 MB. At the catalogue's bitrates
- * (192–317 kbps) 1 MB is ~25–40s of audio — more than the whole
- * 20s question — for roughly a quarter of the bytes. Per game
- * that is ~8–10 MB instead of ~35 MB.
+ * the file: the first 1.5 MB. At the newest openings' bitrates
+ * (301–332 kbps, measured 2026-11-12) 1.5 MB is ~36–40s of
+ * audio — and up to ~60s across the wider catalogue
+ * (192–317 kbps) — comfortably more than the whole 20s
+ * question, for roughly two-fifths of the bytes. Per game that
+ * is at most ~13.5 MB instead of ~35 MB.
  *
  * How: the app's existing resumable-download machinery
  * (expo-file-system's DownloadResumable, the same handle
@@ -80,12 +83,32 @@ import {
  * adoption (starting playback from an UNFINISHED slice file)
  * was evaluated and NOT adopted — see the batch report
  * BATCH-109-2026-11-12.md §F6 for the mechanism-A/B evidence.
+ *
+ * Phase 2 head cache (2026-11-12): the slice's download
+ * SOURCES are ordered too — the API's own head cache first
+ * (headCacheUrlFor: the same first bytes, served by the API
+ * the app already talks to and warmed server-side when the
+ * question was dealt), the origin URL on any failure of that
+ * source (HTTP error, network, unusable landing). The cached
+ * head IS 1.5 MB, which is also why the cap below rose from
+ * 1 MB: fetching only part of the head would throw away the
+ * margin the cache exists to provide. Everything downstream
+ * is unchanged — the landed file is the same partial-.ogg
+ * slice, judged by the same usable-size verdict, under the
+ * same dedupe / pinning / settle semantics; a failed source
+ * leaves no trace, so the next source starts from byte zero
+ * exactly like a fresh prefetch.
  */
 
 export const quizSlicesSupported = Platform.OS !== 'web';
 
-/** Byte cap for one slice: ~25–40s of audio at catalogue bitrates. */
-export const QUIZ_SLICE_CAP_BYTES = 1_000_000;
+/**
+ * Byte cap for one slice: ~36–40s of audio at the newest
+ * bitrates (301–332 kbps), up to ~60s catalogue-wide — and
+ * exactly the API head cache's head size (phase 2), so a
+ * head-sourced slice lands whole.
+ */
+export const QUIZ_SLICE_CAP_BYTES = 1_500_000;
 
 /**
  * A slice smaller than this is not worth handing to the decoder
@@ -176,6 +199,61 @@ export function quizSliceCandidates(
   );
   if (!sliceUri) return rest;
   return [sliceUri, ...rest.filter((url) => url !== sliceUri)];
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 2 head cache (2026-11-12) — derivation + source order         */
+/* ------------------------------------------------------------------ */
+
+const ANIME_THEMES_AUDIO_PREFIX = 'https://a.animethemes.moe/';
+const HEAD_FILE_PATTERN = /^[A-Za-z0-9._-]+\.ogg$/;
+
+/**
+ * The API head-cache URL for a resolved audio URL — the same
+ * first bytes, served by the API this app already talks to
+ * (warmed server-side when the question was dealt) instead of
+ * the Europe origin. Derived by RULE, mirroring the API's own
+ * name gate: only a plain AnimeThemes audio address
+ * (`https://a.animethemes.moe/<file>.ogg`, single segment)
+ * derives; anything else (a stored non-AnimeThemes audio URL,
+ * a video link, null, fixture mode with no API configured)
+ * returns null and the consumer keeps the plain origin chain,
+ * byte-identical to before phase 2.
+ */
+export function headCacheUrlFor(
+  audioUrl: string | null | undefined,
+): string | null {
+  if (!apiBaseUrl) return null;
+  if (typeof audioUrl !== 'string') return null;
+  if (!audioUrl.startsWith(ANIME_THEMES_AUDIO_PREFIX)) return null;
+  const file = audioUrl.slice(ANIME_THEMES_AUDIO_PREFIX.length);
+  if (!HEAD_FILE_PATTERN.test(file)) return null;
+  return `${apiBaseUrl}/quiz-heads/${file}`;
+}
+
+/**
+ * A question's REMOTE candidate chain with the head cache
+ * leading (phase 2): [head, origin audio, video]. Composed
+ * through quizSliceCandidates by the caller, which drops the
+ * null head for underivable themes and dedupes — so a theme
+ * whose audio does not derive gets exactly its old chain.
+ */
+export function quizRemoteChain(
+  audioUrl: string | null,
+  videoUrl: string | null,
+): (string | null)[] {
+  return [headCacheUrlFor(audioUrl), audioUrl, videoUrl];
+}
+
+/**
+ * The slice prefetch's download sources, in order: the head
+ * cache first, the origin on failure. A single-element list
+ * (the origin alone) whenever no head derives — the
+ * pre-phase-2 behaviour.
+ */
+export function sliceSourceUrls(url: string): string[] {
+  const head = headCacheUrlFor(url);
+  return head && head !== url ? [head, url] : [url];
 }
 
 /* ------------------------------------------------------------------ */
@@ -273,41 +351,34 @@ async function runSliceFetch(entry: SliceEntry): Promise<void> {
     if (!dir.exists) dir.create({ intermediates: true, idempotent: true });
     const dest = new File(dir, entry.fileName);
     entry.uri = dest.uri;
-    // A stale partial from a killed attempt starts from byte
-    // zero (the downloads module's precedent).
-    try {
-      if (dest.exists) dest.delete();
-    } catch {
-      // The transfer below surfaces any real problem.
-    }
-    let cancelSent = false;
-    const task = createDownloadResumable(entry.url, dest.uri, {}, (data) => {
-      if (!cancelSent && sliceCapReached(data.totalBytesWritten)) {
-        cancelSent = true;
-        // The partial file stays on disk — it IS the slice.
-        void task.cancelAsync().catch(() => undefined);
+    // Ordered sources (phase 2): the API head cache first, the
+    // origin on any failure of that source. Each attempt starts
+    // from byte zero and is judged on its own landing; the
+    // first usable landing wins and later sources never run.
+    for (const source of sliceSourceUrls(entry.url)) {
+      if (slices.get(entry.key) !== entry) {
+        // Evicted or cleared before this attempt (its file was
+        // already deleted by the evictor) — nothing to register.
+        return;
       }
-    });
-    entry.task = task;
-    // Resolves undefined when cancelled (at the cap, or by an
-    // eviction/clear) and with a result on natural completion —
-    // BOTH can leave a usable slice, so the verdict is the file.
-    await task.downloadAsync();
-    entry.task = null;
-    if (slices.get(entry.key) !== entry) {
-      // Evicted or cleared while in flight (its file was
-      // already deleted by the evictor) — nothing to register.
-      return;
+      const landed = await downloadSliceFromSource(entry, source, dest);
+      if (slices.get(entry.key) !== entry) {
+        // Evicted or cleared while the transfer ran.
+        return;
+      }
+      if (landed) {
+        entry.status = 'ready';
+        return;
+      }
+      // This source failed or landed unusable: wipe its
+      // partial so the next source starts from byte zero (and
+      // a total failure leaves no file behind).
+      deleteSliceFile(entry.fileName);
     }
-    const size = dest.exists ? dest.size : 0;
-    if (sliceIsUsable(size)) {
-      entry.status = 'ready';
-      return;
-    }
-    // Too small to trust (or nothing landed): discard and let
-    // the remote chain carry the question.
-    slices.delete(entry.key);
-    deleteSliceFile(entry.fileName);
+    // Every source failed: discard and let the remote chain
+    // carry the question. Leave no entry, so a later reveal
+    // for the same key may retry.
+    if (slices.get(entry.key) === entry) slices.delete(entry.key);
   } catch {
     // A failed prefetch is silent by design: the question's
     // remote chain is unaffected. Leave no entry, so a later
@@ -315,6 +386,55 @@ async function runSliceFetch(entry: SliceEntry): Promise<void> {
     if (slices.get(entry.key) === entry) slices.delete(entry.key);
     deleteSliceFile(entry.fileName);
   }
+}
+
+/**
+ * One source's slice download into `dest`: the resumable
+ * transfer, cancelled at the byte cap (the partial stays — it
+ * IS the slice). Resolves whether the landing is a usable
+ * slice:
+ * - a cancel (at the cap, or by an eviction) resolves the
+ *   transfer undefined, and a thrown transfer is simply a
+ *   failed source — BOTH are judged by what is on disk, as
+ *   before phase 2;
+ * - a RESOLVED HTTP error status is a failed source however
+ *   big the body: the body is an error page, not audio.
+ */
+async function downloadSliceFromSource(
+  entry: SliceEntry,
+  sourceUrl: string,
+  dest: File,
+): Promise<boolean> {
+  // A stale partial from a killed attempt starts from byte
+  // zero (the downloads module's precedent).
+  try {
+    if (dest.exists) dest.delete();
+  } catch {
+    // The transfer below surfaces any real problem.
+  }
+  let cancelSent = false;
+  const task = createDownloadResumable(sourceUrl, dest.uri, {}, (data) => {
+    if (!cancelSent && sliceCapReached(data.totalBytesWritten)) {
+      cancelSent = true;
+      // The partial file stays on disk — it IS the slice.
+      void task.cancelAsync().catch(() => undefined);
+    }
+  });
+  entry.task = task;
+  let httpFailed = false;
+  try {
+    const result = await task.downloadAsync();
+    if (result && typeof result.status === 'number' && result.status >= 400) {
+      httpFailed = true;
+    }
+  } catch {
+    // A dead network / aborted transfer: judged by the file.
+  } finally {
+    if (entry.task === task) entry.task = null;
+  }
+  if (httpFailed) return false;
+  const size = dest.exists ? dest.size : 0;
+  return sliceIsUsable(size);
 }
 
 /** The ready slice's file URI for a question, or null. */

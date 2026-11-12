@@ -774,7 +774,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     ]);
   });
 
-  it('party scoring: owner formula — first correct × players pending, last player auto-locked, game ends with RP scheduled', async () => {
+  it('party scoring: owner formula — first correct × players pending, last player answers too (no auto-lock), game ends with RP scheduled', async () => {
     const m = makeFakeModels();
     const { roomId } = await startedParty(m);
     const doc = roomDoc(m, roomId);
@@ -793,9 +793,30 @@ describe('QuizRoomsService — game flow + scoring', () => {
       secondsRemaining: 20,
     });
 
+    // NO auto-lock (owner ruling, 2026-11-12): with 1 of 2
+    // answered the round is still live and nothing has ended.
+    const answersBefore = round.answers as Record<string, unknown>[];
+    expect(answersBefore).toHaveLength(1);
+    expect(round.endedAt == null).toBe(true);
+    expect(doc.status).toBe('in_progress');
+    expect(
+      m.events.find((e) => e.event === 'room:round-ended'),
+    ).toBeUndefined();
+    expect(m.rank.scheduled).toEqual([]);
+
+    // The last player answers too and is scored normally:
+    // multiplier ×1 (the owner's +1) → 20 × 1 = 20.
+    const hostAck = await m.service.submitAnswer(HOST, roomId, 1, 'Correct EN');
+    expect(hostAck).toMatchObject({
+      success: true,
+      correct: true,
+      baseScore: 20,
+      totalScoreGained: 20,
+    });
+
     const answers = round.answers as Record<string, unknown>[];
     expect(answers).toHaveLength(2);
-    expect(answers[1]).toMatchObject({ userId: HOST, autoLocked: true, totalScoreGained: 0 });
+    expect(answers[1]).toMatchObject({ userId: HOST, autoLocked: false, totalScoreGained: 20 });
 
     const ended = m.events.find((e) => e.event === 'room:round-ended');
     expect(ended?.payload).toMatchObject({
@@ -805,7 +826,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     });
     const players = (ended!.payload.players ?? []) as Record<string, unknown>[];
     expect(players.find((p) => p.userId === GUEST)?.totalScore).toBe(40);
-    expect(players.find((p) => p.userId === HOST)?.totalScore).toBe(0);
+    expect(players.find((p) => p.userId === HOST)?.totalScore).toBe(20);
 
     expect(doc.status).toBe('ended');
     expect(m.rank.scheduled).toEqual([roomId]);
@@ -841,7 +862,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect(ack).toMatchObject({ success: true, correct: true });
   });
 
-  it('wrong answers score 0 (party of 3 keeps playing); the next correct earns × pending+1', async () => {
+  it('negative marking (party of 3): wrong answers cost −half the would-be score; the last player still answers and is scored', async () => {
     const m = makeFakeModels();
     const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
     const doc = roomDoc(m, roomId);
@@ -849,8 +870,11 @@ describe('QuizRoomsService — game flow + scoring', () => {
     await openRoundWindow(m, roomId);
     round.startedAt = new Date(Date.now() - 25_000); // 5s remaining
 
+    // HOST wrong first: a correct answer would have earned
+    // 5 × (2 pending + 1) = 15 → penalty −ceil(15 / 2) = −8
+    // (owner ruling, 2026-11-12).
     const wrong = await m.service.submitAnswer(HOST, roomId, 1, 'Distractor1 EN');
-    expect(wrong).toMatchObject({ correct: false, baseScore: 0, totalScoreGained: 0 });
+    expect(wrong).toMatchObject({ correct: false, baseScore: -8, totalScoreGained: -8 });
     // Round still live: only 1 of 3 answered.
     expect(round.endedAt == null).toBe(true);
     expect(doc.status).toBe('in_progress');
@@ -858,14 +882,29 @@ describe('QuizRoomsService — game flow + scoring', () => {
     const correct = await m.service.submitAnswer(GUEST, roomId, 1, 'Correct EN');
     expect(correct.baseScore).toBe(10); // 5s remaining × (1 pending + 1)
     expect(correct.bonusScore).toBe(0);
-    // GUEST2 was the last remaining player → auto-locked, round over.
+    // NO auto-lock: 2 of 3 answered and the round is STILL live.
+    expect((round.answers as unknown[])).toHaveLength(2);
+    expect(round.endedAt == null).toBe(true);
+    expect(doc.status).toBe('in_progress');
+
+    // GUEST2, the last player, answers (wrong) and is scored
+    // normally: would-be = 5 × 1 = 5 → penalty −ceil(5 / 2) = −3.
+    const last = await m.service.submitAnswer(GUEST2, roomId, 1, 'Distractor2 EN');
+    expect(last).toMatchObject({ correct: false, baseScore: -3, totalScoreGained: -3 });
+
     const answers = round.answers as Record<string, unknown>[];
     expect(answers).toHaveLength(3);
-    expect(answers[2]).toMatchObject({ userId: GUEST2, autoLocked: true });
+    expect(answers.every((a) => a.autoLocked === false)).toBe(true);
     expect(doc.status).toBe('ended'); // roundCount was 1
+
+    const ended = m.events.find((e) => e.event === 'room:round-ended');
+    const players = (ended!.payload.players ?? []) as Record<string, unknown>[];
+    expect(players.find((p) => p.userId === HOST)?.totalScore).toBe(-8);
+    expect(players.find((p) => p.userId === GUEST)?.totalScore).toBe(10);
+    expect(players.find((p) => p.userId === GUEST2)?.totalScore).toBe(-3);
   });
 
-  it('duel exception: a wrong first answer does NOT lock the other duelist', async () => {
+  it('no auto-lock (duel): a wrong first answer does NOT lock the other duelist — and costs −half', async () => {
     const m = makeFakeModels();
     const create = await m.service.createRoom(HOST, {
       ...partyCreate,
@@ -884,6 +923,11 @@ describe('QuizRoomsService — game flow + scoring', () => {
 
     const wrong = await m.service.submitAnswer(HOST, roomId, 1, 'Distractor1 EN');
     expect(wrong.correct).toBe(false);
+    // Negative marking: the would-be correct score was
+    // secondsRemaining × 2 (one pending + 1), so the penalty is
+    // exactly −secondsRemaining.
+    expect(wrong.baseScore).toBe(-(wrong.secondsRemaining ?? 0));
+    expect(wrong.totalScoreGained).toBe(-(wrong.secondsRemaining ?? 0));
     expect((round.answers as unknown[])).toHaveLength(1); // guest NOT locked
     expect(round.endedAt == null).toBe(true);
 
@@ -916,28 +960,29 @@ describe('QuizRoomsService — game flow + scoring', () => {
     ).rejects.toThrow('Already answered');
   });
 
-  it('a late answer after all-but-one answered is auto-locked at 0', async () => {
+  it('after a player leaves mid-round, the last remaining player still answers and is scored (no auto-lock)', async () => {
     const m = makeFakeModels();
     const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
     const doc0 = roomDoc(m, roomId);
     const round0 = (doc0.rounds as Record<string, unknown>[])[0];
     await openRoundWindow(m, roomId);
     await m.service.submitAnswer(HOST, roomId, 1, 'Distractor1 EN'); // wrong, 1/3
-    // A player leaving mid-round shrinks the denominator: now 1 of
-    // the remaining 2 has answered, so the next attempt hits the
-    // web route's BEFORE-processing auto-lock (in the web this
-    // state also arises from concurrent answers; here the
-    // post-answer lock normally fires first — see the party
-    // scoring test, where the last player is locked at answer
-    // time without ever submitting).
+    // A player leaving mid-round shrinks the denominator: now 1
+    // of the remaining 2 has answered. Under the abolished
+    // auto-lock this attempt was locked out at 0 before
+    // processing; since the owner ruling (2026-11-12) the last
+    // remaining player submits and is scored normally.
     await m.service.leaveRoom(GUEST2, roomId);
     const late = await m.service.submitAnswer(GUEST, roomId, 1, 'Correct EN');
-    expect(late).toMatchObject({ success: true, autoLocked: true });
+    expect(late.success).toBe(true);
+    expect(late.correct).toBe(true);
+    // Multiplier ×1 (last player) → gain = seconds remaining.
+    expect(late.totalScoreGained).toBe(late.secondsRemaining);
     const doc = roomDoc(m, roomId);
     const round = (doc.rounds as Record<string, unknown>[])[0];
     const answers = round.answers as Record<string, unknown>[];
     expect(answers).toHaveLength(2);
-    expect(answers[1]).toMatchObject({ userId: GUEST, autoLocked: true, totalScoreGained: 0 });
+    expect(answers[1]).toMatchObject({ userId: GUEST, autoLocked: false, correct: true });
     expect(doc.status).toBe('ended');
   });
 
@@ -1052,7 +1097,9 @@ describe('QuizRoomsService — room state trim (perf problem 15, B6)', () => {
     const doc = roomDoc(m, roomId);
     const rounds = doc.rounds as AnyDoc[];
 
-    // Round 1: guest correct, host wrong → guest2 auto-locked.
+    // Round 1: guest correct, host wrong, guest2 wrong — since
+    // the 2026-11-12 ruling there is no auto-lock, so the round
+    // ends only when all three have answered.
     await openRoundWindow(m, roomId, 1);
     rounds[0].startedAt = new Date(Date.now() - 10_000);
     const wrong1 = (rounds[0].options as string[]).find(
@@ -1060,10 +1107,11 @@ describe('QuizRoomsService — room state trim (perf problem 15, B6)', () => {
     )!;
     await m.service.submitAnswer(GUEST, roomId, 1, rounds[0].correctAnswer as string);
     await m.service.submitAnswer(HOST, roomId, 1, wrong1);
+    await m.service.submitAnswer(GUEST2, roomId, 1, wrong1);
     expect(rounds[0].endedAt).toBeTruthy();
 
-    // Round 2: host correct, guest2 wrong → guest auto-locked;
-    // the game ends. The rewind is deeper than round 1's so the
+    // Round 2: host correct, guest2 wrong, guest correct; the
+    // game ends. The rewind is deeper than round 1's so the
     // host's gain is strictly smaller — the standings comparison
     // below must not hinge on tie order.
     await m.service.nextRound(HOST, roomId, 1);
@@ -1074,6 +1122,7 @@ describe('QuizRoomsService — room state trim (perf problem 15, B6)', () => {
     )!;
     await m.service.submitAnswer(HOST, roomId, 2, rounds[1].correctAnswer as string);
     await m.service.submitAnswer(GUEST2, roomId, 2, wrong2);
+    await m.service.submitAnswer(GUEST, roomId, 2, rounds[1].correctAnswer as string);
     expect(rounds[1].endedAt).toBeTruthy();
     expect(doc.status).toBe('ended');
     return { roomId, doc, rounds };
@@ -1186,7 +1235,8 @@ describe('QuizRoomsService — room state trim (perf problem 15, B6)', () => {
     const doc = roomDoc(m, roomId);
     const rounds = doc.rounds as AnyDoc[];
 
-    // Finish round 1 (guest correct, host wrong, guest2 locked).
+    // Finish round 1 (guest correct, host wrong, guest2 wrong —
+    // every player answers; there is no auto-lock).
     await openRoundWindow(m, roomId, 1);
     rounds[0].startedAt = new Date(Date.now() - 10_000);
     const wrong1 = (rounds[0].options as string[]).find(
@@ -1194,6 +1244,8 @@ describe('QuizRoomsService — room state trim (perf problem 15, B6)', () => {
     )!;
     await m.service.submitAnswer(GUEST, roomId, 1, rounds[0].correctAnswer as string);
     await m.service.submitAnswer(HOST, roomId, 1, wrong1);
+    await m.service.submitAnswer(GUEST2, roomId, 1, wrong1);
+    expect(rounds[0].endedAt).toBeTruthy();
 
     // Round 2 starts; one answer lands and the round stays live.
     await m.service.nextRound(HOST, roomId, 1);
@@ -1447,17 +1499,17 @@ describe('QuizRoomsService — room library cache (perf problem 6)', () => {
     const afterFirstStart = spy.contributions();
 
     // The match ends: the round clock is moved past the
-    // countdown, the host answers correctly and the
-    // all-but-one rule auto-locks the last player, ending the
-    // single-round game. (The auto-lock only triggers once a
-    // correct answer exists among the answered rows, so the
-    // guest answers first.)
+    // countdown and all three players answer correctly, ending
+    // the single-round game on full submission (there is no
+    // auto-lock since the 2026-11-12 ruling — the last player
+    // answers too).
     const doc = roomDoc(m, roomId);
     // F4: answers open once every member has reported ready;
     // the completion re-stamps startedAt at that moment.
     await openRoundWindow(m, roomId);
     await m.service.submitAnswer(GUEST, roomId, 1, 'Alpha EN');
     await m.service.submitAnswer(HOST, roomId, 1, 'Alpha EN');
+    await m.service.submitAnswer(GUEST2, roomId, 1, 'Alpha EN');
     expect(doc.status).toBe('ended');
 
     // The guest then leaves (the room survives: players
@@ -2059,9 +2111,10 @@ describe('QuizRoomsService — room-pool options (owner ruling, 2026-11-12)', ()
 
 describe('QuizRoomsService — play again / rematch (owner feature, 2026-11-12)', () => {
   /**
-   * Plays a 1-round party game to its end: everyone but the
-   * last player answers correctly; the last is auto-locked by
-   * the party rule and finishRound schedules the game's RP.
+   * Plays a 1-round party game to its end: every player
+   * answers correctly (no auto-lock since the 2026-11-12
+   * ruling — the last player answers too) and finishRound
+   * schedules the game's RP.
    */
   async function finishedParty(
     m: ReturnType<typeof makeFakeModels>,
@@ -2072,7 +2125,7 @@ describe('QuizRoomsService — play again / rematch (owner feature, 2026-11-12)'
     const round = (doc.rounds as Record<string, unknown>[])[0];
     await openRoundWindow(m, roomId); // F4: all members reported → window open
     round.startedAt = new Date(Date.now() - 1000); // 1s elapsed for scoring
-    for (const id of playerIds.slice(0, -1)) {
+    for (const id of playerIds) {
       await m.service.submitAnswer(id, roomId, 1, 'Correct EN');
     }
     expect(doc.status).toBe('ended');
@@ -2164,6 +2217,7 @@ describe('QuizRoomsService — play again / rematch (owner feature, 2026-11-12)'
     await openRoundWindow(m, roomId, 1);
     round.startedAt = new Date(Date.now() - 1000);
     await m.service.submitAnswer(HOST, roomId, 1, round.correctAnswer as string);
+    await m.service.submitAnswer(GUEST, roomId, 1, round.correctAnswer as string);
     expect(doc.status).toBe('ended');
     expect(m.rank.scheduled).toEqual([roomId, roomId]);
   });

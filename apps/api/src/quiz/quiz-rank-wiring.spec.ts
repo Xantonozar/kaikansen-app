@@ -332,11 +332,22 @@ describe('QuizModule wiring — multiplayer rank application (Bug 2)', () => {
       );
     }
 
-    // Duel semantics: the host's correct first answer auto-locks
-    // the guest and ends the (single-round) game immediately.
+    // No auto-lock (owner ruling, 2026-11-12): the host's
+    // correct first answer does NOT end the duel — the guest
+    // still answers (wrong here, at a negative score), and only
+    // then does the single-round game end and RP run.
     const hostAck = await roomsService.submitAnswer(HOST, roomId, 1, correctAnswer);
     expect(hostAck.success).toBe(true);
     expect(hostAck.correct).toBe(true);
+    expect(room.status).toBe('in_progress');
+
+    const wrongAnswer = (round.options as string[]).find(
+      (o) => o !== correctAnswer,
+    )!;
+    const guestAck = await roomsService.submitAnswer(GUEST, roomId, 1, wrongAnswer);
+    expect(guestAck.success).toBe(true);
+    expect(guestAck.correct).toBe(false);
+    expect(guestAck.totalScoreGained).toBeLessThan(0); // negative marking
     expect(room.status).toBe('ended');
 
     // scheduleRPUpdate hands off via setTimeout(0) — give it room.
