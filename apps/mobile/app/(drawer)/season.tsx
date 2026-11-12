@@ -24,6 +24,7 @@ import {
   queueItemsFromSummaries,
   usePlaybackSession,
 } from '../../src/playback-context';
+import { getOpenThemesAs } from '../../src/playbackSettings';
 import {
   fontFamilies,
   radii,
@@ -160,16 +161,23 @@ export default function SeasonScreen() {
   const { startQueue } = usePlaybackSession();
   const playTheme = useCallback(
     (slug: string, list: ThemeSummary[]) => {
-      // The shown list is the queue. Navigation goes to the theme
-      // detail, not the player route — the player route is
-      // playlist/offline-only (owner ruling 2026-11-10).
+      // The row's PLAY DISC (owner ruling 2026-11-12): claim
+      // only, no navigation — the song plays in the mini player;
+      // the card's own press opens the theme detail. The shown
+      // list is the queue. The claim mode is the user's
+      // Open-themes-as mode, so the play records as what is
+      // actually heard (counts fix RC1).
       const index = list.findIndex((t) => t.slug === slug);
       if (index >= 0) {
-        startQueue(queueItemsFromSummaries(list), index, 'watch', 'other');
+        startQueue(
+          queueItemsFromSummaries(list),
+          index,
+          getOpenThemesAs(),
+          'other',
+        );
       }
-      openTheme(slug);
     },
-    [openTheme, startQueue],
+    [startQueue],
   );
 
   const themes = data?.themes ?? [];

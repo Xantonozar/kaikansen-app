@@ -33,6 +33,10 @@ import type {
   UserRatingsResponse,
 } from '@kaikansen/contracts';
 import { cacheKeyFor, fixtureMode, subscribeCache } from '../../../src/api';
+import {
+  queueItemFromSummary,
+  usePlaybackSlowSession,
+} from '../../../src/playback-context';
 import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
 import { AppImage } from '../../../src/components/AppImage';
@@ -404,6 +408,25 @@ export default function UserProfileScreen() {
   };
 
   const openTheme = (slug: string) => router.push(`/theme/${slug}`);
+
+  /* History rows' PLAY DISCS (owner ruling 2026-11-12): claim
+     only, no navigation — the song plays in the mini player;
+     the card's own press opens the theme detail. The queue is
+     the shown history in order, claimed in the entry's own
+     recorded mode (the Library Recent rule). The claim rides
+     the slow session channel, so this page gains no
+     progress-tick re-renders. */
+  const { startQueue } = usePlaybackSlowSession();
+  const playHistoryEntry = (entryId: string, mode: 'watch' | 'listen') => {
+    if (!history) return;
+    const playable = history.entries.filter((e) => e.theme !== null);
+    const items = playable.map((e) => ({
+      ...queueItemFromSummary(e.theme!),
+      atEntryId: e.atEntryId,
+    }));
+    const index = playable.findIndex((e) => e.id === entryId);
+    if (index >= 0) startQueue(items, index, mode, 'other');
+  };
 
   /**
    * One block of the divided listening-stats card — the own
@@ -885,6 +908,7 @@ export default function UserProfileScreen() {
                     typeChip={false}
                     detail={`${entry.mode === 'watch' ? 'Watched' : 'Listened'} · ${relativeTime(entry.viewedAt)}`}
                     onPress={() => openTheme(entry.themeSlug)}
+                    onPlay={() => playHistoryEntry(entry.id, entry.mode)}
                   />
                 ) : null,
               )}

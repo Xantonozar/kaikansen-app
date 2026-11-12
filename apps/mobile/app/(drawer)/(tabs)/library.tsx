@@ -81,6 +81,7 @@ import {
   usePlaybackSession,
   type QueueItem,
 } from '../../../src/playback-context';
+import { getOpenThemesAs } from '../../../src/playbackSettings';
 import {
   fontFamilies,
   radii,
@@ -647,12 +648,18 @@ export default function LibraryScreen() {
 
   /* Queue claims (Slice 2.5): a segment's rows play as a queue —
      the segment's loaded list becomes the provider queue at the
-     tapped row, then navigation follows the ruling above (theme
-     detail by default; the Offline segment passes 'player'). The
-     mode claimed is the mode that row would have opened with.
-     The queue's origin tag mirrors the destination: only the
-     Offline segment's claim is 'offline' — every other segment
-     is 'other', so the mini player follows the same ruling. */
+     tapped row. PLAY DISCS claim only (owner ruling 2026-11-12):
+     the song plays in the mini player and nothing navigates —
+     the card's own press opens the theme detail. Row plays
+     claim the user's Open-themes-as mode, so a play records as
+     what is actually heard (counts fix RC1); Recent rows keep
+     their history entry's mode, the record's own. The Offline
+     segment is the exception that keeps the old shape: its
+     whole row is the play surface (there is no separate card
+     press), so its tap still claims AND opens the player route
+     via playWithQueue — the player route is playlist/offline-
+     only (owner ruling 2026-11-10). Origins: only the Offline
+     claim is 'offline'; every other claim here is 'other'. */
   const { session, playback, startQueue } = usePlaybackSession();
   const playWithQueue = useCallback(
     (
@@ -674,6 +681,17 @@ export default function LibraryScreen() {
       playTheme(slug, mode, atEntryId, destination);
     },
     [startQueue, playTheme],
+  );
+
+  /** Claim-only queue start for row PLAY DISCS (see above):
+      no navigation follows — the mini player is the surface. */
+  const claimQueue = useCallback(
+    (items: QueueItem[], index: number, mode: 'watch' | 'listen') => {
+      if (items.length > 0 && index >= 0) {
+        startQueue(items, index, mode, 'other');
+      }
+    },
+    [startQueue],
   );
 
   const unsave = useCallback(
@@ -987,11 +1005,10 @@ export default function LibraryScreen() {
             item={item}
             onPress={() => openTheme(item.slug)}
             onPlay={() =>
-              playWithQueue(
+              claimQueue(
                 queueItemsFromSummaries(fav.themes),
                 index,
-                item.slug,
-                'watch',
+                getOpenThemesAs(),
               )
             }
             saved
@@ -1086,20 +1103,17 @@ export default function LibraryScreen() {
           const playEntry = () => {
             // Queue = the segment's playable history, in shown
             // order; entries whose theme left the catalogue
-            // render as tombstones and can't be queued.
+            // render as tombstones and can't be queued. Play
+            // disc: claim only (owner ruling 2026-11-12), in the
+            // entry's own recorded mode — a listen row replays
+            // as a listen, a watch row as a watch.
             const playable = history.filter((e) => e.theme !== null);
             const items = playable.map((e) => ({
               ...queueItemFromSummary(e.theme!),
               atEntryId: e.atEntryId,
             }));
             const index = playable.findIndex((e) => e.id === entry.id);
-            playWithQueue(
-              items,
-              index,
-              item.slug,
-              entry.mode,
-              entry.atEntryId,
-            );
+            claimQueue(items, index, entry.mode);
           };
           return (
             <Pressable
@@ -1683,11 +1697,10 @@ export default function LibraryScreen() {
               // in the queue \u2014 the lazy-loading trade).
               const flat = anilistGroups.flatMap((g) => g.themes);
               const index = flat.findIndex((t) => t.slug === item.slug);
-              playWithQueue(
+              claimQueue(
                 queueItemsFromSummaries(flat),
                 index,
-                item.slug,
-                'watch',
+                getOpenThemesAs(),
               );
             }}
             saved={favorites.isFavorite(item.slug)}

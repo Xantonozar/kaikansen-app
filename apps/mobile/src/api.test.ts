@@ -198,6 +198,36 @@ describe('mutation invalidation (central, success-only)', () => {
     expect(counts.get('/home')).toBe(1);
   });
 
+  it('a recorded play drops the theme detail read (its Plays count just moved)', async () => {
+    // Counts fix RC2 (2026-11-12): POST /library/history must
+    // invalidate '/themes/' too — the CATALOGUE detail read
+    // otherwise paints the pre-play "Plays" count for up to its
+    // 15-minute TTL. The season read stands in for unrelated
+    // catalogue data the record does not touch: it stays cached.
+    const counts = scriptFetch({
+      '/themes/tokyo_ghoul-op1-5695': (n: number) => ({ n }),
+      '/season': (n: number) => ({ n }),
+      '/library/history': { recorded: true },
+    });
+    await expect(apiJson('/themes/tokyo_ghoul-op1-5695')).resolves.toEqual({
+      n: 1,
+    });
+    await expect(apiJson('/themes/tokyo_ghoul-op1-5695')).resolves.toEqual({
+      n: 1,
+    });
+    await expect(apiJson('/season')).resolves.toEqual({ n: 1 });
+    await apiJson('/library/history', {
+      method: 'POST',
+      body: { slug: 'tokyo_ghoul-op1-5695', mode: 'listen' },
+    });
+    await expect(apiJson('/themes/tokyo_ghoul-op1-5695')).resolves.toEqual({
+      n: 2,
+    });
+    await expect(apiJson('/season')).resolves.toEqual({ n: 1 });
+    expect(counts.get('/themes/tokyo_ghoul-op1-5695')).toBe(2);
+    expect(counts.get('/season')).toBe(1);
+  });
+
   it('invalidateAfterMutation ignores reads and unknown mutations', async () => {
     const counts = scriptFetch({ '/home': (n: number) => ({ n }) });
     await apiJson('/home');

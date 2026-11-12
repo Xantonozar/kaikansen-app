@@ -2,7 +2,7 @@
   "expo": {
     "name": "Kaikansen",
     "slug": "kaikansen",
-    "version": "1.0.6",
+    "version": "1.0.7",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "kaikansen",
@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "app.kaikansen.mobile",
-      "versionCode": 9,
+      "versionCode": 10,
       "adaptiveIcon": {
         "backgroundColor": "#F7F2F7",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -34,7 +34,7 @@
         {
           "microphonePermission": false,
           "recordAudioAndroid": false,
-          "enableBackgroundPlayback": false
+          "enableBackgroundPlayback": true
         }
       ],
       "expo-secure-store",

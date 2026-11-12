@@ -328,8 +328,12 @@ function readCacheClass(path: string): 'FEED' | 'USER' | 'CATALOGUE' | null {
 function invalidationFragments(method: string, path: string): string[] | null {
   const clean = path.split('?')[0];
   if (method === 'POST' && clean === '/library/history') {
-    // A listen: history + continue-listening (Home) + profile reads.
-    return ['/library/history', '/home', '/users/'];
+    // A listen: history + continue-listening (Home) + profile
+    // reads + the theme's own detail read — its "Plays" count
+    // just moved, and the CATALOGUE-class detail cache would
+    // otherwise paint the pre-play number for up to 15 minutes
+    // (counts fix RC2, 2026-11-12).
+    return ['/library/history', '/home', '/users', '/themes/'];
   }
   if (clean === '/library/favorites' || clean.startsWith('/library/favorites/')) {
     return ['/library/favorites'];

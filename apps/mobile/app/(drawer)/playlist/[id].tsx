@@ -58,6 +58,7 @@ import {
   queueItemsFromSummaries,
   usePlaybackSession,
 } from '../../../src/playback-context';
+import { getOpenThemesAs } from '../../../src/playbackSettings';
 import {
   fontFamilies,
   radii,
@@ -241,13 +242,16 @@ export default function PlaylistDetailScreen() {
 
   /** Play All: the playlist IS the queue, in order (Slice 2.5) —
       the mini player's Next walks it. Opens the player like a
-      row play does. */
+      row play does. The claim mode is the user's Open-themes-as
+      mode (counts fix RC1, 2026-11-12) — the player route opens
+      in the same mode, so the plays record as what is heard. */
   const playAll = useCallback(() => {
     if (!playlist || playlist.items.length === 0) return;
-    startQueue(queueItemsFromSummaries(playlist.items), 0, 'watch', 'playlist');
+    const mode = getOpenThemesAs();
+    startQueue(queueItemsFromSummaries(playlist.items), 0, mode, 'playlist');
     router.push({
       pathname: '/player',
-      params: { slug: playlist.items[0].slug, mode: 'watch' },
+      params: { slug: playlist.items[0].slug, mode },
     });
   }, [playlist, startQueue, router]);
 
@@ -259,10 +263,11 @@ export default function PlaylistDetailScreen() {
       const j = Math.floor(Math.random() * (i + 1));
       [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
     }
-    startQueue(queueItemsFromSummaries(shuffled), 0, 'watch', 'playlist');
+    const mode = getOpenThemesAs();
+    startQueue(queueItemsFromSummaries(shuffled), 0, mode, 'playlist');
     router.push({
       pathname: '/player',
-      params: { slug: shuffled[0].slug, mode: 'watch' },
+      params: { slug: shuffled[0].slug, mode },
     });
   }, [playlist, startQueue, router]);
 
@@ -659,20 +664,20 @@ export default function PlaylistDetailScreen() {
                 }
                 onPress={() => router.push(`/theme/${item.slug}`)}
                 onPlay={() => {
-                  // The playlist IS the queue (Slice 2.5): playing a
-                  // row claims the whole list at that row, so the
-                  // mini player's Next and the player's prev/next +
-                  // Up Next walk the playlist in order.
+                  // The row's PLAY DISC (owner ruling 2026-11-12):
+                  // claim only, no navigation — the song plays in
+                  // the mini player; the card's own press opens
+                  // the theme detail. The playlist IS the queue:
+                  // claiming the whole list at this row keeps the
+                  // mini player's Next walking the playlist in
+                  // order. The claim mode is the user's
+                  // Open-themes-as mode (counts fix RC1).
                   startQueue(
                     queueItemsFromSummaries(playlist.items),
                     index,
-                    'watch',
+                    getOpenThemesAs(),
                     'playlist',
                   );
-                  router.push({
-                    pathname: '/player',
-                    params: { slug: item.slug, mode: 'watch' },
-                  });
                 }}
                 saved={favorites.isFavorite(item.slug)}
                 savePending={favorites.isPending(item.slug)}

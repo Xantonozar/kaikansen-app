@@ -329,6 +329,12 @@ export interface PlaybackSlowSessionValue {
   startSession: PlaybackContextValue['startSession'];
   updateSession: PlaybackContextValue['updateSession'];
   endSession: PlaybackContextValue['endSession'];
+  /** Queue claims for slow-channel pages: the theme detail page
+      rides this channel alone, and its Recommended rows' play
+      discs claim a queue without navigating (owner ruling
+      2026-11-12). startQueue is a stable callback, so exposing
+      it here does not widen this channel's re-render surface. */
+  startQueue: PlaybackContextValue['startQueue'];
 }
 
 const PlaybackSlowContext =
@@ -944,8 +950,9 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
       startSession,
       updateSession,
       endSession,
+      startQueue,
     }),
-    [session, playback.slow, startSession, updateSession, endSession],
+    [session, playback.slow, startSession, updateSession, endSession, startQueue],
   );
 
   return (

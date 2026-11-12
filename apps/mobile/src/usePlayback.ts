@@ -13,6 +13,13 @@ import type {
   ThemeEntry,
 } from '@kaikansen/contracts';
 import { recordWatch } from './api';
+import {
+  historyRecordKey,
+  INITIAL_HISTORY_RECORD_STATE,
+  planHistoryRecord,
+  settleHistoryRecord,
+  type HistoryRecordState,
+} from './historyRecording';
 import { markOwnProfileStatsDirty } from './profileStatsCache';
 import {
   adoptPreloadedPlayer,
@@ -131,11 +138,15 @@ import {
  * - History: the first time playback genuinely starts for an
  *   entry+mode, POST /library/history fires once (recordWatch no-ops
  *   in fixture mode and when signed out). Resumes/seeks never
- *   re-fire; a different entry or mode records again.
+ *   re-fire; a different entry or mode records again. A FAILED
+ *   post does not count as fired — the key settles only on
+ *   success, so the next play-state change retries it (counts
+ *   fix RC3; the decision is src/historyRecording.ts).
  * - Leaving/unmounting pauses the players (the hook releases
  *   them), so no audio leaks over other screens. Background
- *   playback and PiP stay deliberately off (the expo-audio mode
- *   in src/audioEngine.ts disables background too).
+ *   playback is ON (owner ruling 2026-11-12 — the expo-audio
+ *   mode in src/audioEngine.ts keeps audio playing when the app
+ *   is backgrounded); PiP stays deliberately off.
  *
  * Playback-plan additions (2026-11-10):
  *
@@ -1532,19 +1543,39 @@ export function usePlayback(args: {
     };
   }, [gateClaimKey]);
 
-  // History: once per entry+mode, when playback first truly starts.
-  const recordedKeyRef = useRef<string | null>(null);
+  // History: once per entry+mode, when playback first truly
+  // starts. The decision lives in src/historyRecording.ts (pure,
+  // unit-pinned): the dedupe key settles as recorded only when
+  // the POST succeeds — a dropped POST (the API cold-starts and
+  // drops requests) re-fires on the next play-state change
+  // instead of silently eating that entry+mode's record
+  // (counts fix RC3, 2026-11-12).
+  const historyRecordStateRef = useRef<HistoryRecordState>(
+    INITIAL_HISTORY_RECORD_STATE,
+  );
   useEffect(() => {
-    if (!isPlaying || !detail || !entry) return;
-    const key = `${detail.slug}:${entry.atEntryId}:${mode}`;
-    if (recordedKeyRef.current === key) return;
-    recordedKeyRef.current = key;
+    const key =
+      detail && entry
+        ? historyRecordKey(detail.slug, entry.atEntryId, mode)
+        : null;
+    const plan = planHistoryRecord(historyRecordStateRef.current, {
+      isPlaying,
+      key,
+    });
+    historyRecordStateRef.current = plan.state;
+    if (!plan.fireKey || !detail || !entry) return;
+    const fireKey = plan.fireKey;
     recordWatch({
       slug: detail.slug,
       atEntryId: entry.atEntryId,
       mode,
     })
       .then(() => {
+        historyRecordStateRef.current = settleHistoryRecord(
+          historyRecordStateRef.current,
+          fireKey,
+          true,
+        );
         // Perf problem 4: the account's saved profile stats are
         // now stale by this play — dirty the cache entry so the
         // next profile paint waits for the fetch instead of
@@ -1552,6 +1583,11 @@ export function usePlayback(args: {
         void markOwnProfileStatsDirty();
       })
       .catch(() => {
+        historyRecordStateRef.current = settleHistoryRecord(
+          historyRecordStateRef.current,
+          fireKey,
+          false,
+        );
         // History is best-effort — a failed record never interrupts
         // playback (recordWatch already no-ops for fixture/signed-out).
       });

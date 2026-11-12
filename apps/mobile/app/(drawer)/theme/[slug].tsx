@@ -242,8 +242,14 @@ export default function ThemeDetailScreen() {
      across progress ticks — so a progress tick never re-renders
      this page body; the ticks are consumed inside the heroes'
      progress components (src/components/DetailProgress.tsx). */
-  const { playback, session, startSession, updateSession, endSession } =
-    usePlaybackSlowSession();
+  const {
+    playback,
+    session,
+    startSession,
+    updateSession,
+    endSession,
+    startQueue,
+  } = usePlaybackSlowSession();
   const sessionSlugRef = useRef<string | null>(session.slug);
   useEffect(() => {
     sessionSlugRef.current = session.slug;
@@ -802,6 +808,30 @@ export default function ThemeDetailScreen() {
       .map((d) => ({ ...d, items: buckets[d.key] }))
       .filter((g) => g.items.length > 0);
   }, [detail, similar, similarState]);
+
+  /** The related rows flattened in display order — the queue a
+      related row's PLAY DISC claims (owner ruling 2026-11-12:
+      the disc plays in the mini player and never navigates;
+      without an onPlay the disc fell back to the row's
+      navigation, which is exactly what the ruling removed). */
+  const relatedFlat = useMemo(
+    () => relatedGroups.flatMap((g) => g.items),
+    [relatedGroups],
+  );
+  const playRelated = useCallback(
+    (slug: string) => {
+      const index = relatedFlat.findIndex((t) => t.slug === slug);
+      if (index >= 0) {
+        startQueue(
+          queueItemsFromSummaries(relatedFlat),
+          index,
+          openMode,
+          'other',
+        );
+      }
+    },
+    [relatedFlat, startQueue, openMode],
+  );
 
   /* ---------------- Slice M3: downloads (per selected entry) -------- */
 
@@ -1469,6 +1499,7 @@ export default function ThemeDetailScreen() {
                         savePending={favorites.isPending(item.slug)}
                         onToggleSave={() => void favorites.toggle(item.slug)}
                         onPress={() => router.push(`/theme/${item.slug}`)}
+                        onPlay={() => playRelated(item.slug)}
                       />
                     ))}
                   </View>

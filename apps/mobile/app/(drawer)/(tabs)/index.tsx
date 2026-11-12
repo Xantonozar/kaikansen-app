@@ -33,6 +33,7 @@ import {
   queueItemsFromSummaries,
   usePlaybackSession,
 } from '../../../src/playback-context';
+import { getOpenThemesAs } from '../../../src/playbackSettings';
 import { fetchFriendsActivity, fetchUserNetwork } from '../../../src/socialApi';
 import { Avatar } from '../../../src/components/Avatar';
 import { PopularCard } from '../../../src/components/PopularCard';
@@ -1093,12 +1094,18 @@ export default function HomeScreen() {
               onPlay={() => {
                 // The shown (type-filtered) Popular list is the
                 // queue (Slice 2.5): the play disc claims it at
-                // this row, then opens the theme detail — the
-                // player route is playlist/offline-only (owner
-                // ruling 2026-11-10), and the detail hero renders
-                // the claimed session inline.
-                startQueue(queueItemsFromSummaries(popular), index, 'watch', 'other');
-                openTheme(item.slug);
+                // this row and plays in the mini player ONLY —
+                // it no longer opens the theme detail (owner
+                // ruling 2026-11-12; the card's own press opens
+                // the detail). The claim mode is the user's
+                // Open-themes-as mode, so the play records as
+                // what is actually heard (counts fix RC1).
+                startQueue(
+                  queueItemsFromSummaries(popular),
+                  index,
+                  getOpenThemesAs(),
+                  'other',
+                );
               }}
               saved={favorites.isFavorite(item.slug)}
               savePending={favorites.isPending(item.slug)}

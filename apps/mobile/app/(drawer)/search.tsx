@@ -43,6 +43,7 @@ import {
   queueItemsFromSummaries,
   usePlaybackSession,
 } from '../../src/playback-context';
+import { getOpenThemesAs } from '../../src/playbackSettings';
 import { plainStorage } from '../../src/storage';
 import { PersonRow } from '../../src/components/PersonRow';
 import { ThemeRow } from '../../src/components/ThemeRow';
@@ -475,10 +476,17 @@ export default function SearchScreen() {
   const playFromList = (items: ThemeSummary[], index: number) => {
     const item = items[index];
     if (!item) return;
-    startQueue(queueItemsFromSummaries(items), index, 'watch', 'other');
-    // Theme detail, not the player route — the player route is
-    // playlist/offline-only (owner ruling 2026-11-10).
-    router.push(`/theme/${item.slug}`);
+    // The row's PLAY DISC (owner ruling 2026-11-12): claim
+    // only, no navigation — the song plays in the mini player;
+    // the card's own press opens the theme detail. The claim
+    // mode is the user's Open-themes-as mode, so the play
+    // records as what is actually heard (counts fix RC1).
+    startQueue(
+      queueItemsFromSummaries(items),
+      index,
+      getOpenThemesAs(),
+      'other',
+    );
   };
 
   const openTheme = (slug: string) => {

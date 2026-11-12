@@ -21,6 +21,7 @@ import {
   queueItemsFromSummaries,
   usePlaybackSession,
 } from '../../src/playback-context';
+import { getOpenThemesAs } from '../../src/playbackSettings';
 import {
   fontFamilies,
   radii,
@@ -135,15 +136,22 @@ export default function FavouritesScreen() {
   }, [fav, favBusy, favPage]);
 
   const playAt = useCallback(
-    (index: number, slug: string) => {
+    (index: number) => {
+      // The row's PLAY DISC (owner ruling 2026-11-12): claim
+      // only, no navigation — the song plays in the mini player;
+      // the card's own press opens the theme detail. The claim
+      // mode is the user's Open-themes-as mode, so the play
+      // records as what is actually heard (counts fix RC1).
       if (fav && fav.themes.length > 0) {
-        startQueue(queueItemsFromSummaries(fav.themes), index, 'watch', 'other');
+        startQueue(
+          queueItemsFromSummaries(fav.themes),
+          index,
+          getOpenThemesAs(),
+          'other',
+        );
       }
-      // Theme detail, not the player route — the player route is
-      // playlist/offline-only (owner ruling 2026-11-10).
-      router.push(`/theme/${slug}`);
     },
-    [fav, router, startQueue],
+    [fav, startQueue],
   );
 
   const goBack = () => {
@@ -229,7 +237,7 @@ export default function FavouritesScreen() {
                 item={item}
                 typeChip={false}
                 onPress={() => router.push(`/theme/${item.slug}`)}
-                onPlay={() => playAt(index, item.slug)}
+                onPlay={() => playAt(index)}
                 saved
                 savePending={favorites.isPending(item.slug)}
                 onToggleSave={() => unsave(item.slug)}

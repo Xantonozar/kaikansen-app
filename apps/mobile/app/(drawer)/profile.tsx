@@ -89,6 +89,15 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * Settings AniList rows (link state + action). A failed
  * satellite read degrades to a dash or a hidden rank row, never
  * a fabricated number.
+ *
+ * Compact pass (owner, 2026-11-12): the first build's sizes read
+ * way too large next to the Stitch mocks, so this screen's type,
+ * card padding, tile and row sizes were pulled down one step
+ * across the board (structure, order and anatomy unchanged —
+ * sizes only). Every Text here also caps the system font-size
+ * multiplier at 1.15 (maxFontSizeMultiplier) so a large system
+ * font setting cannot balloon the screen back up; the cap is
+ * this screen's only — other screens are untouched.
  */
 export default function OwnProfileScreen() {
   const theme = useTheme();
@@ -189,15 +198,25 @@ export default function OwnProfileScreen() {
       <View style={styles.menuIcon}>
         <Icon size={18} color={theme.onAccentContainer} strokeWidth={2} />
       </View>
-      <Text style={styles.menuLabel}>{label}</Text>
+      <Text style={styles.menuLabel} maxFontSizeMultiplier={1.15}>
+        {label}
+      </Text>
       <ChevronRight size={16} color={theme.muted} strokeWidth={2} />
     </Pressable>
   );
 
   const stat = (label: string, value: string, divided = false) => (
     <View style={[styles.statBlock, divided && styles.statBlockDivided]}>
-      <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
+      <Text style={styles.statValue} maxFontSizeMultiplier={1.15}>
+        {value}
+      </Text>
+      <Text
+        style={styles.statLabel}
+        numberOfLines={1}
+        maxFontSizeMultiplier={1.15}
+      >
+        {label}
+      </Text>
     </View>
   );
 
@@ -225,7 +244,9 @@ export default function OwnProfileScreen() {
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.topBar}>
-        <Text style={styles.title}>Profile</Text>
+        <Text style={styles.title} maxFontSizeMultiplier={1.15}>
+          Profile
+        </Text>
         <Pressable
           onPress={() => router.push('/settings')}
           hitSlop={3}
@@ -242,13 +263,17 @@ export default function OwnProfileScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         {!signedIn || !user ? (
           <>
-            <Text style={styles.note}>You’re not signed in.</Text>
+            <Text style={styles.note} maxFontSizeMultiplier={1.15}>
+              You’re not signed in.
+            </Text>
             <Pressable
               onPress={() => router.replace('/login')}
               style={styles.primary}
               accessibilityRole="button"
             >
-              <Text style={styles.primaryLabel}>Log in</Text>
+              <Text style={styles.primaryLabel} maxFontSizeMultiplier={1.15}>
+                Log in
+              </Text>
             </Pressable>
           </>
         ) : (
@@ -274,10 +299,16 @@ export default function OwnProfileScreen() {
                 </View>
               </Pressable>
 
-              <Text style={styles.displayName} numberOfLines={1}>
+              <Text
+                style={styles.displayName}
+                numberOfLines={1}
+                maxFontSizeMultiplier={1.15}
+              >
                 {user.displayName || user.username}
               </Text>
-              <Text style={styles.handle}>@{user.username}</Text>
+              <Text style={styles.handle} maxFontSizeMultiplier={1.15}>
+                @{user.username}
+              </Text>
 
               <View style={styles.socialRow}>
                 <Pressable
@@ -288,14 +319,19 @@ export default function OwnProfileScreen() {
                   accessibilityLabel={`${followers} followers`}
                   style={({ pressed }) => pressed && styles.pressed}
                 >
-                  <Text style={styles.socialText}>
+                  <Text
+                    style={styles.socialText}
+                    maxFontSizeMultiplier={1.15}
+                  >
                     <Text style={styles.socialNumber}>
                       {formatCount(followers)}
                     </Text>{' '}
                     Followers
                   </Text>
                 </Pressable>
-                <Text style={styles.socialDot}>·</Text>
+                <Text style={styles.socialDot} maxFontSizeMultiplier={1.15}>
+                  ·
+                </Text>
                 <Pressable
                   onPress={() =>
                     router.push(`/network/${user.username}?tab=following`)
@@ -304,7 +340,10 @@ export default function OwnProfileScreen() {
                   accessibilityLabel={`${following} following`}
                   style={({ pressed }) => pressed && styles.pressed}
                 >
-                  <Text style={styles.socialText}>
+                  <Text
+                    style={styles.socialText}
+                    maxFontSizeMultiplier={1.15}
+                  >
                     <Text style={styles.socialNumber}>
                       {formatCount(following)}
                     </Text>{' '}
@@ -327,7 +366,12 @@ export default function OwnProfileScreen() {
                   color={theme.onAccentContainer}
                   strokeWidth={2}
                 />
-                <Text style={styles.editPillText}>Edit Profile</Text>
+                <Text
+                  style={styles.editPillText}
+                  maxFontSizeMultiplier={1.15}
+                >
+                  Edit Profile
+                </Text>
               </Pressable>
 
             </View>
@@ -397,7 +441,9 @@ export default function OwnProfileScreen() {
                 pressed && styles.pressed,
               ]}
             >
-              <Text style={styles.logoutLabel}>Log Out</Text>
+              <Text style={styles.logoutLabel} maxFontSizeMultiplier={1.15}>
+                Log Out
+              </Text>
             </Pressable>
           </>
         )}
@@ -441,10 +487,11 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
     },
     title: {
-      // The mock's screen title is text-2xl bold (24) — the
-      // display face at 24, not the 18px section heading.
+      // Compact pass (owner, 2026-11-12): the shipped sizes read
+      // way too large next to the Stitch mocks — the screen title
+      // is the display face at 20, not the mock-literal 24.
       ...typeStyles.display,
-      fontSize: 24,
+      fontSize: 20,
       letterSpacing: -0.5,
       color: theme.text,
       flex: 1,
@@ -459,7 +506,7 @@ const createStyles = (theme: Theme) =>
     heroCard: {
       backgroundColor: theme.surface,
       borderRadius: radii.card,
-      padding: spacing.xl,
+      padding: spacing.lg,
       marginTop: spacing.sm,
       alignItems: 'center',
     },
@@ -482,14 +529,14 @@ const createStyles = (theme: Theme) =>
     },
     displayName: {
       ...typeStyles.display,
-      fontSize: 22,
+      fontSize: 19,
       color: theme.text,
       marginTop: spacing.md,
       textAlign: 'center',
     },
     handle: {
       ...typeStyles.body,
-      fontSize: 14,
+      fontSize: 13,
       color: theme.muted,
       marginTop: 2,
       textAlign: 'center',
@@ -502,7 +549,7 @@ const createStyles = (theme: Theme) =>
     },
     socialText: {
       ...typeStyles.body,
-      fontSize: 15,
+      fontSize: 13,
       color: theme.muted,
     },
     socialNumber: {
@@ -511,7 +558,7 @@ const createStyles = (theme: Theme) =>
     },
     socialDot: {
       ...typeStyles.body,
-      fontSize: 15,
+      fontSize: 13,
       color: theme.muted,
     },
     editPill: {
@@ -522,12 +569,12 @@ const createStyles = (theme: Theme) =>
       alignSelf: 'stretch',
       backgroundColor: theme.accentContainer,
       borderRadius: radii.pill,
-      minHeight: 44,
+      minHeight: 38,
       marginTop: spacing.lg,
     },
     editPillText: {
       ...typeStyles.body,
-      fontSize: 15,
+      fontSize: 14,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.onAccentContainer,
     },
@@ -539,13 +586,13 @@ const createStyles = (theme: Theme) =>
       gap: spacing.lg,
       backgroundColor: theme.surface,
       borderRadius: radii.card,
-      padding: spacing.xl,
-      marginTop: 14,
+      padding: spacing.lg,
+      marginTop: 10,
     },
     rankSkeletonDisc: {
-      width: 84,
-      height: 84,
-      borderRadius: 20,
+      width: 60,
+      height: 60,
+      borderRadius: 16,
       backgroundColor: theme.raised,
     },
     rankSkeletonLines: {
@@ -554,23 +601,23 @@ const createStyles = (theme: Theme) =>
     },
     rankSkeletonBar: {
       width: '70%',
-      height: 14,
-      borderRadius: 7,
+      height: 10,
+      borderRadius: 5,
       backgroundColor: theme.raised,
     },
     rankSkeletonBarShort: {
       width: '45%',
-      height: 10,
-      borderRadius: 5,
+      height: 6,
+      borderRadius: 3,
       backgroundColor: theme.raised,
     },
     statsCard: {
       flexDirection: 'row',
       backgroundColor: theme.surface,
       borderRadius: radii.card,
-      paddingVertical: 18,
+      paddingVertical: 14,
       paddingHorizontal: spacing.sm,
-      marginTop: 14,
+      marginTop: 10,
     },
     statBlock: {
       flex: 1,
@@ -584,12 +631,12 @@ const createStyles = (theme: Theme) =>
     },
     statValue: {
       ...typeStyles.display,
-      fontSize: 24,
+      fontSize: 20,
       color: theme.text,
     },
     statLabel: {
       ...typeStyles.bodySmall,
-      fontSize: 13,
+      fontSize: 12,
       color: theme.muted,
     },
     menuCard: {
@@ -598,22 +645,22 @@ const createStyles = (theme: Theme) =>
       // No horizontal padding on the card: the mock's rows carry
       // their own padding and its hairlines run full-bleed.
       overflow: 'hidden',
-      marginTop: 14,
+      marginTop: 10,
     },
     menuRow: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
       paddingHorizontal: 14,
-      paddingVertical: 14,
+      paddingVertical: 10,
     },
     menuRowDivider: {
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: theme.border,
     },
     menuIcon: {
-      width: 32,
-      height: 32,
+      width: 28,
+      height: 28,
       borderRadius: radii.pill,
       backgroundColor: theme.accentContainer,
       alignItems: 'center',
@@ -622,7 +669,7 @@ const createStyles = (theme: Theme) =>
     },
     menuLabel: {
       ...typeStyles.body,
-      fontSize: 15,
+      fontSize: 14,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.text,
       flex: 1,
@@ -631,7 +678,7 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
       minHeight: 36,
-      marginTop: 14,
+      marginTop: 10,
     },
     logoutLabel: {
       // Muted mauve in the mock, centered under the menu card.

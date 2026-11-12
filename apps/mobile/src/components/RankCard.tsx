@@ -142,12 +142,14 @@ export function RankResultCard({
 /**
  * The PROFILE QUIZ RANK card (approved rank mock, 2026-11-10) —
  * a standalone white card on the own-Profile screen: the
- * rank's icon tile (84px), "QUIZ RANK" eyebrow, "Jonin · 5,340
- * RP" as one line, the progress bar with the "N RP to
+ * rank's icon tile (60px since the Profile compact pass,
+ * 2026-11-12 — it was 84px), "QUIZ RANK" eyebrow, "Jonin ·
+ * 5,340 RP" as one line, the progress bar with the "N RP to
  * <target>" line UNDER it, and the "View full ladder ›" link
  * at the card's bottom-left (the mockup's placement) opening
  * /quiz/ladder. The whole card is the press target as well.
  * At Pirate King the to-next line goes away; the link stays.
+ * Its Texts carry the Profile screen's 1.15 font-scaling cap.
  */
 export function RankProfileCard({
   profile,
@@ -168,10 +170,12 @@ export function RankProfileCard({
       style={({ pressed }) => [styles.card, pressed && styles.pressed]}
     >
       <View style={styles.headRow}>
-        <RankIcon rank={standing.rank} size={84} tileRadius={20} />
+        <RankIcon rank={standing.rank} size={60} tileRadius={16} />
         <View style={styles.nameBlock}>
-          <Text style={styles.eyebrow}>QUIZ RANK</Text>
-          <Text style={styles.rankLine}>
+          <Text style={styles.eyebrow} maxFontSizeMultiplier={1.15}>
+            QUIZ RANK
+          </Text>
+          <Text style={styles.rankLine} maxFontSizeMultiplier={1.15}>
             {ladderLabel(standing.rank)} · {formatRp(profile.rp)}
           </Text>
           <View style={styles.barTrack}>
@@ -183,14 +187,16 @@ export function RankProfileCard({
             />
           </View>
           {standing.nextRank && (
-            <Text style={styles.toNext}>
+            <Text style={styles.toNext} maxFontSizeMultiplier={1.15}>
               {standing.toNext.toLocaleString('en-US')} RP to{' '}
               {ladderLabel(standing.nextRank)}
             </Text>
           )}
         </View>
       </View>
-      <Text style={styles.ladderLink}>View full ladder ›</Text>
+      <Text style={styles.ladderLink} maxFontSizeMultiplier={1.15}>
+        View full ladder ›
+      </Text>
     </Pressable>
   );
 }
@@ -200,9 +206,10 @@ const createProfileStyles = (theme: Theme) =>
     card: {
       backgroundColor: theme.surface,
       // The approved Profile mock's cards sit at radii.card (24)
-      // like the screen's other cards.
+      // like the screen's other cards. Padding lg since the
+      // Profile compact pass (2026-11-12).
       borderRadius: radii.card,
-      padding: spacing.xl,
+      padding: spacing.lg,
       gap: spacing.lg,
     },
     pressed: {
@@ -219,17 +226,18 @@ const createProfileStyles = (theme: Theme) =>
     },
     eyebrow: {
       fontFamily: fontFamilies.sectionLabel,
-      fontSize: 12,
+      fontSize: 11,
       letterSpacing: 1,
       color: theme.secondary,
     },
     rankLine: {
       fontFamily: fontFamilies.display,
-      fontSize: 21,
+      fontSize: 18,
       color: theme.text,
     },
     toNext: {
       ...typeStyles.bodySmall,
+      fontSize: 11,
       color: theme.muted,
     },
     ladderLink: {
@@ -238,14 +246,14 @@ const createProfileStyles = (theme: Theme) =>
       color: theme.accent,
     },
     barTrack: {
-      height: 8,
-      borderRadius: 4,
+      height: 6,
+      borderRadius: 3,
       backgroundColor: theme.accentContainer,
       overflow: 'hidden',
     },
     barFill: {
       height: '100%',
-      borderRadius: 4,
+      borderRadius: 3,
       backgroundColor: theme.accent,
     },
   });

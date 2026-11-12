@@ -18,9 +18,10 @@ import {
  * FILE TYPE inside the chain (src/mediaEngine.ts owns the pure
  * routing decisions); this module owns the native player itself:
  *
- * - the app-wide audio mode (background playback DISABLED and
- *   recording OFF — the owner ruled both off; the config plugin
- *   in app.json mirrors them in the native manifest/permissions);
+ * - the app-wide audio mode (background playback ENABLED since
+ *   the owner's 2026-11-12 ruling, and recording OFF — the owner
+ *   ruled the mic off; the config plugin in app.json mirrors both
+ *   in the native manifest/permissions);
  * - the two engine players (the shared playback engine's audio
  *   half + the quiz engine's audio half) so their imports and
  *   options live in exactly one place;
@@ -60,9 +61,12 @@ export const AUDIO_PLAYER_OPTIONS = {
 
 /**
  * The app's one audio-mode configuration. `shouldPlayInBackground`
- * is false: background audio stays deliberately OFF (the same
- * ruling that keeps PiP off; the expo-audio config plugin sets
- * enableBackgroundPlayback false to match). Recording is off
+ * is true (owner ruling 2026-11-12, reversing the 2026-11-10
+ * background-off ruling): audio keeps playing when the app is
+ * backgrounded or the screen locks, like a music player; the
+ * expo-audio config plugin sets enableBackgroundPlayback true to
+ * match (the Android foreground-service declaration). PiP for
+ * video stays off — that is a separate ruling. Recording is off
  * (allowsRecording false + plugin microphonePermission false), so
  * no mic permission exists anywhere in the app.
  * `playsInSilentMode` matches the video engine's behaviour: the
@@ -73,7 +77,7 @@ export const AUDIO_MODE: AudioMode = {
   playsInSilentMode: true,
   interruptionMode: 'doNotMix',
   allowsRecording: false,
-  shouldPlayInBackground: false,
+  shouldPlayInBackground: true,
   shouldRouteThroughEarpiece: false,
 };
 
@@ -81,8 +85,9 @@ let audioModeApplied = false;
 
 /**
  * Apply AUDIO_MODE once per launch (idempotent; failures are
- * swallowed — a platform without the module keeps the defaults,
- * which still never include background playback on Android).
+ * swallowed — a platform without the module keeps the platform
+ * defaults, and Android's defaults do not keep audio playing in
+ * the background without the mode + plugin declaration).
  */
 export function ensureAudioMode(): void {
   if (audioModeApplied) return;

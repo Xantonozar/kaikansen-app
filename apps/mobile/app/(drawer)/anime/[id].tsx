@@ -23,6 +23,7 @@ import {
   subscribeCache,
 } from '../../../src/api';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import { getOpenThemesAs } from '../../../src/playbackSettings';
 import {
   queueItemsFromSummaries,
   usePlaybackSession,
@@ -114,11 +115,14 @@ export default function AnimeDetailScreen() {
   const { startQueue } = usePlaybackSession();
   const playTheme = useCallback(
     (slug: string) => {
-      // The queue is the page's rows in display order: Openings
-      // (by sequence), then Endings (by sequence) — the same order
-      // renderRows draws them. Navigation goes to the theme
-      // detail, not the player route — the player route is
-      // playlist/offline-only (owner ruling 2026-11-10).
+      // The row's PLAY DISC (owner ruling 2026-11-12): claim
+      // only, no navigation — the song plays in the mini player;
+      // the card's own press opens the theme detail. The queue
+      // is the page's rows in display order: Openings (by
+      // sequence), then Endings (by sequence) — the same order
+      // renderRows draws them. The claim mode is the user's
+      // Open-themes-as mode, so the play records as what is
+      // actually heard (counts fix RC1).
       if (data) {
         const ordered = (['OP', 'ED'] as const).flatMap((type) =>
           data.themes
@@ -127,12 +131,16 @@ export default function AnimeDetailScreen() {
         );
         const index = ordered.findIndex((t) => t.slug === slug);
         if (index >= 0) {
-          startQueue(queueItemsFromSummaries(ordered), index, 'watch', 'other');
+          startQueue(
+            queueItemsFromSummaries(ordered),
+            index,
+            getOpenThemesAs(),
+            'other',
+          );
         }
       }
-      openTheme(slug);
     },
-    [openTheme, data, startQueue],
+    [data, startQueue],
   );
 
   const renderRows = (rows: ThemeSummary[]) =>
