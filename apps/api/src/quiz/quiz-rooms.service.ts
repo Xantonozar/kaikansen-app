@@ -8,6 +8,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import type { Model, Types } from 'mongoose';
 import {
   ROUND_COUNTDOWN_SECONDS,
+  ROUND_START_READY_BOUND_SECONDS,
   type CreateRoomRequest,
   type PublicRoomListItem,
   type PublicRoomRequest,
@@ -324,6 +325,232 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Round-start gates (F4, clock batch 2026-11-12): per room,
+   * the CURRENT round's pending start — the members whose
+   * clients have not yet reported their round audio ready
+   * (`room:round-ready`), the bound timer that force-starts
+   * the round when the wait runs out, and the round-started
+   * payload pieces the completion broadcast re-sends.
+   *
+   * In-memory like the rematch votes, for the same reason: the
+   * shared room document's schema cannot express "not started"
+   * (rounds[].startedAt is a required Date — a field-for-field
+   * port of the web's schema), so while the gate is pending the
+   * document holds the BASE countdown moment and THIS map is
+   * the authoritative started-or-not signal. completeRoundStart
+   * re-stamps the document with the real start moment and the
+   * gate is dropped; from then on the round is indistinguishable
+   * from a pre-F4 round. A server restart loses pending gates
+   * with the room timers — the round then simply never starts
+   * (its timer was lost too, the pre-existing restart posture
+   * for in-flight rounds).
+   */
+  private readonly roundStartGates = new Map<
+    string,
+    {
+      roundNumber: number;
+      awaiting: Set<string>;
+      boundTimer: ReturnType<typeof setTimeout> | null;
+      payload: {
+        videoUrl: string;
+        mediaCandidates: string[];
+        options: string[];
+        timeLimitSeconds: number;
+        baseStartAtIso: string;
+      };
+    }
+  >();
+
+  /** Opens a round's start gate (beginRound): everyone currently
+   *  in the room is awaited; the bound timer force-starts the
+   *  round ROUND_START_READY_BOUND_SECONDS past the base moment. */
+  private openRoundStartGate(
+    roomId: string,
+    roundNumber: number,
+    memberIds: string[],
+    baseStartAt: Date,
+    payload: {
+      videoUrl: string;
+      mediaCandidates: string[];
+      options: string[];
+      timeLimitSeconds: number;
+    },
+  ): void {
+    this.dropRoundStartGate(roomId);
+    const gate: NonNullable<
+      ReturnType<typeof this.roundStartGates.get>
+    > = {
+      roundNumber,
+      awaiting: new Set(memberIds),
+      boundTimer: null,
+      payload: {
+        ...payload,
+        baseStartAtIso: baseStartAt.toISOString(),
+      },
+    };
+    const boundAtMs =
+      baseStartAt.getTime() + ROUND_START_READY_BOUND_SECONDS * 1000;
+    gate.boundTimer = setTimeout(() => {
+      void this.forceRoundStartAtBound(roomId, roundNumber).catch(
+        () => undefined,
+      );
+    }, Math.max(0, boundAtMs - Date.now()));
+    gate.boundTimer.unref?.();
+    this.roundStartGates.set(roomId, gate);
+  }
+
+  /** Drops a room's start gate (start completed, round ended, room died). */
+  private dropRoundStartGate(roomId: string): void {
+    const gate = this.roundStartGates.get(roomId);
+    if (!gate) return;
+    if (gate.boundTimer) clearTimeout(gate.boundTimer);
+    this.roundStartGates.delete(roomId);
+  }
+
+  /** Whether a room's given round is still start-pending. */
+  private roundStartGatePending(room: RoomDoc, roundNumber: number): boolean {
+    const gate = this.roundStartGates.get(String(room._id));
+    return !!gate && gate.roundNumber === roundNumber;
+  }
+
+  /** Prunes a gate's awaited set to the room's current members. */
+  private pruneGateToMembers(
+    room: RoomDoc,
+    gate: { awaiting: Set<string> },
+  ): void {
+    const memberIds = new Set(room.players.map((p) => p.userId));
+    for (const userId of [...gate.awaiting]) {
+      if (!memberIds.has(userId)) gate.awaiting.delete(userId);
+    }
+  }
+
+  /**
+   * Completes a round's start when every current member has
+   * reported (shared by the report action and the leave /
+   * cleanup paths — a departure can complete the wait for the
+   * rest, exactly like the rematch denominator). Callers hold
+   * the room lock.
+   */
+  private async maybeCompleteRoundStart(
+    models: RoomModels,
+    room: RoomDoc,
+  ): Promise<void> {
+    if (room.status !== 'in_progress' || room.players.length === 0) {
+      return;
+    }
+    const gate = this.roundStartGates.get(String(room._id));
+    if (!gate || gate.roundNumber !== room.currentRound) return;
+    this.pruneGateToMembers(room, gate);
+    if (gate.awaiting.size > 0) return;
+    await this.completeRoundStart(models, room);
+  }
+
+  /**
+   * The start itself: stamp the round's authoritative
+   * startedAt NOW, persist, re-broadcast room:round-started in
+   * its started shape, and re-arm the round timer for the
+   * answer window alone (beginRound's arming spanned countdown
+   * + bound + window). From here the round's length and scoring
+   * are exactly the pre-F4 behaviour — everything derives from
+   * startedAt as it always did. Callers hold the room lock.
+   */
+  private async completeRoundStart(
+    models: RoomModels,
+    room: RoomDoc,
+  ): Promise<void> {
+    const roomId = String(room._id);
+    const gate = this.roundStartGates.get(roomId);
+    if (!gate) return;
+    const round = room.rounds[room.currentRound - 1];
+    this.dropRoundStartGate(roomId);
+    if (!round || round.endedAt) return;
+    round.startedAt = new Date();
+    await room.save();
+
+    this.emit(room, 'room:round-started', {
+      round: gate.roundNumber,
+      theme: {
+        videoUrl: gate.payload.videoUrl,
+        mediaCandidates: gate.payload.mediaCandidates,
+        options: gate.payload.options,
+      },
+      startedAt: round.startedAt.toISOString(),
+      startPending: false,
+      baseStartAt: gate.payload.baseStartAtIso,
+      timeLimitSeconds: gate.payload.timeLimitSeconds,
+      countdownSeconds: ROUND_COUNTDOWN_SECONDS,
+    });
+    this.armRoundTimer(roomId, gate.payload.timeLimitSeconds);
+  }
+
+  /** The bound firing: the round starts with whoever reported;
+   *  non-reporters play catch-up (their answers flow normally
+   *  once the window is open — only their audio is late). */
+  private async forceRoundStartAtBound(
+    roomId: string,
+    roundNumber: number,
+  ): Promise<void> {
+    const models = this.requireModels();
+    await this.withRoomLock(roomId, async () => {
+      const gate = this.roundStartGates.get(roomId);
+      if (!gate || gate.roundNumber !== roundNumber) return;
+      const room = (await models.rooms
+        .findById(roomId)
+        .exec()) as RoomDoc | null;
+      if (!room || room.status !== 'in_progress') {
+        this.dropRoundStartGate(roomId);
+        return;
+      }
+      if (room.players.length === 0) {
+        this.dropRoundStartGate(roomId);
+        return;
+      }
+      if (room.currentRound !== roundNumber) {
+        this.dropRoundStartGate(roomId);
+        return;
+      }
+      await this.completeRoundStart(models, room);
+    });
+  }
+
+  /**
+   * room:round-ready — a client's per-round audio report (F4):
+   * its round audio is genuinely playing, or its chain failed.
+   * When every CURRENT member has reported, the round starts
+   * (completeRoundStart). Reports are idempotent; a report for
+   * a round that already started, a stale round number, or from
+   * a game not in progress is accepted as a no-op — a slow
+   * client's late report must never disturb a live round.
+   */
+  async reportRoundReady(
+    userId: string,
+    roomId: string,
+    roundNumber: number,
+    state: 'playing' | 'failed',
+  ): Promise<QuizRoomAck> {
+    const models = this.requireModels();
+    if (!roomId) throw new RoomActionError('Missing roomId');
+    if (typeof roundNumber !== 'number') {
+      throw new RoomActionError('Missing roundNumber');
+    }
+    if (state !== 'playing' && state !== 'failed') {
+      throw new RoomActionError('Invalid round-ready state');
+    }
+    return this.withRoomLock(roomId, async () => {
+      const room = await this.loadRoom(models, roomId);
+      this.requirePlayer(room, userId);
+      if (room.status === 'in_progress' && roundNumber === room.currentRound) {
+        const gate = this.roundStartGates.get(String(room._id));
+        if (gate && gate.roundNumber === roundNumber) {
+          gate.awaiting.delete(userId);
+          await this.maybeCompleteRoundStart(models, room);
+        }
+      }
+      return { success: true };
+    });
+  }
+
+  /**
    * Discards cached contributions after a membership change and
    * marks the room dirty: the next match must recompute every
    * contribution of the new line-up before round 1 (owner
@@ -498,10 +725,25 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       players: room.players.map((p) => this.toPlayer(p)),
       rounds: room.rounds.map((round) => {
         const ended = round.endedAt != null;
+        // F4 (2026-11-12): while the live round's start gate is
+        // pending, the document's startedAt holds only the BASE
+        // countdown moment — serve the pending shape (null
+        // startedAt + startPending + baseStartAt) so a joining
+        // or resyncing client waits for the authoritative stamp
+        // like everyone else. Ended rounds and started rounds
+        // serve their stamp exactly as before.
+        const startPending =
+          !ended &&
+          room.status === 'in_progress' &&
+          round.roundNumber === room.currentRound &&
+          this.roundStartGatePending(room, round.roundNumber);
         return {
           roundNumber: round.roundNumber,
           options: round.options,
-          startedAt: iso(round.startedAt),
+          startedAt: startPending ? null : iso(round.startedAt),
+          ...(startPending
+            ? { startPending: true, baseStartAt: iso(round.startedAt) }
+            : {}),
           endedAt: ended ? iso(round.endedAt) : null,
           answers: round.answers.map((a) =>
             ended ? this.toRoundAnswerSummary(a) : this.toRoundAnswer(a),
@@ -1595,6 +1837,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       }
       if (room.players.length === 0) {
         this.dropRematchVotes(roomId);
+        this.dropRoundStartGate(roomId);
       }
       await room.save();
 
@@ -1604,6 +1847,14 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         newHostId: room.hostId ? String(room.hostId) : null,
         roomStatus: room.status,
       });
+
+      // F4 (2026-11-12): leaving mid-countdown shrinks the
+      // start gate's denominator the same way — the leaver
+      // stops being awaited, and if every remaining member has
+      // reported, the round starts for the rest.
+      if (room.status === 'in_progress') {
+        await this.maybeCompleteRoundStart(models, room);
+      }
 
       // Play-again (2026-11-12): leaving an ENDED room shrinks
       // the rematch denominator — the leaver's own vote is
@@ -1962,6 +2213,13 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     // ROUND_COUNTDOWN_SECONDS ahead, and every consumer — the
     // scoring measurement, the server round timer, the clients'
     // countdown + ring — derives from that one timestamp.
+    // F4 (2026-11-12): that stamp is now the round's BASE
+    // moment only. The authoritative startedAt is stamped by
+    // completeRoundStart when every current member has
+    // reported its audio ready (bounded past the base) — until
+    // then the start gate (roundStartGates) is the started-or-
+    // not authority and submitAnswer refuses. The document
+    // keeps the base Date meanwhile (its schema requires one).
     const startedAt = new Date(
       Date.now() + ROUND_COUNTDOWN_SECONDS * 1000,
     );
@@ -2000,9 +2258,21 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     await room.save();
 
     const mediaCandidates = this.buildMediaCandidates(theme);
-    this.emit(room, 'room:round-started', {
-      round: roundNumber,
-      theme: {
+    const timeLimitSeconds = room.settings.timeLimitSeconds || 30;
+    // F4: open the start gate over the CURRENT roster and
+    // broadcast the round in its start-PENDING shape: clients
+    // preload + hold their audio at baseStartAt (the base
+    // countdown moment — the value they used to treat as the
+    // start) and report room:round-ready as their audio
+    // decides; the completion broadcast (completeRoundStart)
+    // carries the authoritative startedAt. The gate keeps the
+    // payload pieces that broadcast needs.
+    this.openRoundStartGate(
+      String(room._id),
+      roundNumber,
+      room.players.map((p) => p.userId),
+      startedAt,
+      {
         // The round's own video URL — NOT mediaCandidates[0]: the
         // candidate list is in playback order (audio first, see
         // buildMediaCandidates), so its head is the .ogg, while
@@ -2010,18 +2280,34 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         videoUrl: round.videoUrl,
         mediaCandidates,
         options,
+        timeLimitSeconds,
       },
-      startedAt: round.startedAt.toISOString(),
-      timeLimitSeconds: room.settings.timeLimitSeconds || 30,
+    );
+    this.emit(room, 'room:round-started', {
+      round: roundNumber,
+      theme: {
+        videoUrl: round.videoUrl,
+        mediaCandidates,
+        options,
+      },
+      startedAt: null,
+      startPending: true,
+      baseStartAt: round.startedAt.toISOString(),
+      timeLimitSeconds,
       countdownSeconds: ROUND_COUNTDOWN_SECONDS,
     });
 
-    // The server timer covers the countdown PLUS the window:
-    // the round ends timeLimitSeconds after startedAt, not
-    // after the broadcast.
+    // The server timer covers the countdown, the start gate's
+    // bound, PLUS the window — the latest moment the round can
+    // possibly end (completeRoundStart re-arms it tighter once
+    // the real start is stamped): the round ends
+    // timeLimitSeconds after its startedAt, not after the
+    // broadcast.
     this.armRoundTimer(
       String(room._id),
-      ROUND_COUNTDOWN_SECONDS + (room.settings.timeLimitSeconds || 30),
+      ROUND_COUNTDOWN_SECONDS +
+        ROUND_START_READY_BOUND_SECONDS +
+        timeLimitSeconds,
     );
   }
 
@@ -2086,6 +2372,15 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       const round = room.rounds[room.currentRound - 1];
       if (!round || round.endedAt) {
         throw new RoomActionError('Round already ended');
+      }
+      // F4 start gate (2026-11-12): while the gate is pending
+      // the round has NOT started — the document's startedAt is
+      // only the base countdown moment and no scoring window
+      // runs, however far past the base the clock has run. The
+      // refusal matches the countdown refusal below.
+      const pendingGate = this.roundStartGates.get(String(room._id));
+      if (pendingGate && pendingGate.roundNumber === roundNumber) {
+        throw new RoomActionError('Round has not started yet');
       }
       // Pre-round countdown (owner, 2026-11-10): the answer
       // window has not opened yet — the attempt is refused
@@ -2262,6 +2557,9 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
       room.status = 'ended';
     }
     this.disarmRoundTimer(String(room._id));
+    // A round that ends (timer expiry included) takes any
+    // still-pending start gate with it (F4).
+    this.dropRoundStartGate(String(room._id));
     await room.save();
 
     if (room.status === 'ended') {
@@ -2404,6 +2702,13 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
           reason: 'disconnect',
         });
       }
+
+      // F4 (2026-11-12): heartbeat-dropped players stop being
+      // awaited by the round-start gate — if every remaining
+      // member already reported, the round starts for them.
+      if (disconnectedPlayerIds.length > 0) {
+        await this.maybeCompleteRoundStart(models, room);
+      }
     }
 
     if (room.players.length === 0) {
@@ -2419,6 +2724,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         // Room death = cache death (perf problem 6).
         this.dropLibraryCache(String(room._id));
         this.dropRematchVotes(String(room._id));
+        this.dropRoundStartGate(String(room._id));
         this.emit(room, 'room:closed', { reason: 'inactivity' });
         return null;
       }
@@ -2451,6 +2757,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         // Room death = cache death (perf problem 6).
         this.dropLibraryCache(String(room._id));
         this.dropRematchVotes(String(room._id));
+        this.dropRoundStartGate(String(room._id));
         this.emit(room, 'room:closed', { reason: 'inactivity' });
       }
     }

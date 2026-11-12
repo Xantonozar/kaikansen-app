@@ -1069,7 +1069,22 @@ export interface QuizRoundAnswer {
 export interface QuizRoundState {
   roundNumber: number;
   options: string[];
-  startedAt: string;
+  /**
+   * When the round's answer window opened — or NULL while the
+   * round's start gate is still pending (F4, 2026-11-12: the
+   * server stamps this only once every current member has
+   * reported its round audio ready, `room:round-ready`, or the
+   * start bound elapses). While null, `startPending` is true
+   * and `baseStartAt` carries the base countdown moment the
+   * clients hold their audio at; the pending round's real
+   * startedAt arrives with the completion `room:round-started`
+   * broadcast and on any later state read.
+   */
+  startedAt: string | null;
+  /** True while the start gate is pending (live round only). */
+  startPending?: boolean;
+  /** The base countdown moment (ISO) while the gate is pending. */
+  baseStartAt?: string;
   endedAt: string | null;
   answers: QuizRoundAnswer[];
   firstCorrectUserId: string | null;
@@ -1204,10 +1219,38 @@ export interface PublicRoomRequest {
  * run from `startedAt`, and answers submitted before it are
  * refused. Clients derive the countdown from `startedAt` alone
  * (no per-client drift).
+ *
+ * F4 addendum (clock batch, 2026-11-12): the countdown moment is
+ * now the round's BASE start, not its authoritative start. The
+ * diagnosis found rounds had no playback-started signal at all —
+ * the ring and scoring ran from the pre-stamped `startedAt`
+ * while a slow client's audio was still loading into a running
+ * clock. Now each client reports `room:round-ready` when its
+ * round audio is genuinely playing (or has failed), and the
+ * server stamps the AUTHORITATIVE `startedAt` when every current
+ * member has reported — bounded by ROUND_START_READY_BOUND_SECONDS
+ * past the base moment so a dead or absent client cannot hold
+ * the room (at the bound the round starts with whoever reported;
+ * non-reporters play catch-up, exactly as rounds always behaved
+ * for them). Until the stamp, the round is start-pending: the
+ * first `room:round-started` broadcast carries `startedAt: null`
+ * + `startPending: true` + `baseStartAt`, and the completion
+ * re-broadcast carries the real stamp. Once stamped, round
+ * length and scoring are exactly as before.
  */
 export const ROUND_COUNTDOWN_SECONDS = 5;
 
-/** Server → clients `room:round-started` (the web Pusher payload's shape). */
+/**
+ * The round-start gate's bound (F4, 2026-11-12): seconds past
+ * the base countdown moment after which the round starts with
+ * whoever has reported ready, even if some members never did.
+ */
+export const ROUND_START_READY_BOUND_SECONDS = 10;
+
+/** Server → clients `room:round-started` (the web Pusher payload's shape).
+ *  Broadcast TWICE per round since F4: first in the start-pending
+ *  shape (startedAt null — see the countdown addendum), then again
+ *  when the gate completes with the authoritative startedAt. */
 export interface RoundStartedEvent {
   round: number;
   theme: {
@@ -1216,11 +1259,32 @@ export interface RoundStartedEvent {
     mediaCandidates: string[];
     options: string[];
   };
-  /** ISO timestamp the answer window opens (countdown end). */
-  startedAt: string;
+  /**
+   * ISO timestamp the answer window opens (countdown end) — or
+   * NULL on the first, start-pending broadcast (F4); the
+   * completion broadcast carries the authoritative stamp.
+   */
+  startedAt: string | null;
+  /** True on the start-pending broadcast; false/absent once started. */
+  startPending?: boolean;
+  /** The base countdown moment (ISO) on the start-pending broadcast. */
+  baseStartAt?: string;
   timeLimitSeconds: number;
   /** The pre-round countdown length (ROUND_COUNTDOWN_SECONDS). */
   countdownSeconds: number;
+}
+
+/**
+ * Client → server `room:round-ready` payload (F4, 2026-11-12):
+ * the client's report that its audio for this round is decided —
+ * 'playing' when genuinely playing (the watchdog's genuine-start
+ * test client-side), 'failed' when its chain is exhausted. The
+ * server opens the round when every current member has reported.
+ */
+export interface RoundReadyRequest {
+  roomId: string;
+  roundNumber: number;
+  state: 'playing' | 'failed';
 }
 
 /** Server → clients `room:player-answered`. */

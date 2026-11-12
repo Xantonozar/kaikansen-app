@@ -723,6 +723,33 @@ export function soloLoadSafetyMs(limitSeconds: number): number {
   return limitSeconds * 1000;
 }
 
+/**
+ * The value the solo countdown ring FREEZES at when the player
+ * answers (clock-lag fix F3, 2026-11-12): the seconds remaining
+ * at the answer moment, held unchanged through the feedback
+ * window. Before this the ring kept recomputing deadline − now
+ * during feedback, so it visibly kept counting down (and could
+ * hit 0) after the answer was already in — the question was
+ * over but the clock pretended otherwise (diagnosis §2.1).
+ *
+ * - Clock never started (answered during the media wait — the
+ *   options are live while buffering): the full window, exactly
+ *   what the ring's pre-start hold already shows.
+ * - Clock running: deadline − answer moment, clamped to
+ *   [0, totalSeconds] — a timeout racing the tap yields 0,
+ *   never a negative or over-window value.
+ */
+export function ringHoldSecondsAtAnswer(input: {
+  clockRunning: boolean;
+  deadlineMs: number;
+  answeredAtMs: number;
+  totalSeconds: number;
+}): number {
+  if (!input.clockRunning) return input.totalSeconds;
+  const left = (input.deadlineMs - input.answeredAtMs) / 1000;
+  return Math.min(input.totalSeconds, Math.max(0, left));
+}
+
 /* ------------------------------------------------------------------ */
 /* Video-leg status discipline (clock-stall fix, 2026-11-12)           */
 /*                                                                     */
@@ -776,7 +803,17 @@ export function quizVideoStatusAfterLoadIssued(): QuizVideoStatus {
     on every phase but 'buffering' (soloClockStartsOnPhase):
     'failed' / 'empty' are the verdict, 'playing' a genuine
     start, and a held (countdown) or still-loading/idle source
-    is 'buffering' — the wait is never the player's time. */
+    is 'buffering' — the wait is never the player's time.
+    A transient 'error' status is 'buffering' too (clock-lag
+    fix F1, 2026-11-12): an error is a CANDIDATE dying, not
+    the question starting — the chain is advancing to its
+    fallback, and the fallback's own genuine start (or the
+    watchdog's latched 'failed' verdict when the chain runs
+    out) is what may start the clock. Before this, 'error'
+    fell through to 'playing', so the clock started at the
+    moment a candidate died and the once-per-question guard
+    locked the fallback's whole load time out of the player's
+    window (diagnosis QUIZ-CLOCK-LAG-DIAGNOSIS-2026-11-12 §1.4). */
 export function quizAudioPhase(input: {
   failed: boolean;
   hasUrl: boolean;
@@ -788,11 +825,46 @@ export function quizAudioPhase(input: {
   if (
     input.holdPending ||
     input.status === 'loading' ||
-    input.status === 'idle'
+    input.status === 'idle' ||
+    input.status === 'error'
   ) {
     return 'buffering';
   }
   return 'playing';
+}
+
+/**
+ * The quiz engine's status for one expo-audio status snapshot
+ * (the audio leg's tick status — QuizMedia's bridge keeps the
+ * latest snapshot in a ref and derives the hook status through
+ * this). Clock-lag fix F2 (2026-11-12): 'readyToPlay' — the
+ * status the phase formula reads as "the song is on" — now
+ * requires a GENUINE start, the watchdog's own test
+ * (quizSampleStarted): the player is loaded AND (playing OR
+ * its position has moved past zero). Before this, `isLoaded`
+ * alone sufficed: the clock started when the file's metadata
+ * landed, while the native player's start-buffer was still
+ * filling — seconds of the player's window gone on a slow
+ * flow before any sound (diagnosis §1.1). A loaded-but-never-
+ * started candidate now stays 'loading', so the solo stall
+ * watchdog judges it by its (frozen) progress signature,
+ * exactly like a candidate still fetching bytes.
+ */
+export interface QuizAudioStatusSnapshot {
+  isLoaded: boolean;
+  playing: boolean;
+  currentTime: number;
+  error?: unknown;
+}
+
+export function quizAudioTickStatus(
+  status: QuizAudioStatusSnapshot | null,
+): 'loading' | 'readyToPlay' | 'error' {
+  if (!status) return 'loading';
+  if (status.error) return 'error';
+  return status.isLoaded && (status.playing || status.currentTime > 0)
+    ? 'readyToPlay'
+    : 'loading';
 }
 
 /* ------------------------------------------------------------------ */

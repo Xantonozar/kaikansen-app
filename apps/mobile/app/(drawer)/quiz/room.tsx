@@ -68,7 +68,11 @@ import {
 } from '../../../src/components/QuizMedia';
 import { quizAudioCandidates } from '../../../src/playback';
 import { reconcileResync } from '../../../src/roomSession';
-import { countdownSecondsLeft } from '../../../src/quizTiming';
+import {
+  countdownSecondsLeft,
+  observeRoundReadyPhase,
+  type RoundReadyObservation,
+} from '../../../src/quizTiming';
 import { QuizOptions } from '../../../src/components/QuizOptions';
 import {
   fontFamilies,
@@ -202,10 +206,20 @@ export default function QuizRoomScreen() {
     phase: 'buffering',
     muted: false,
     toggleMute: () => undefined,
+    mediaKey: '',
   });
   const handleRoomAudioState = useCallback((state: QuizAudioState) => {
     setRoomAudio(state);
   }, []);
+  /** F4 (2026-11-12): the round-ready observation — which
+   *  phases this screen has seen for the live round's mediaKey
+   *  and whether its room:round-ready report already went out
+   *  (the pure rule lives in quizTiming.observeRoundReadyPhase). */
+  const roundReadyObsRef = useRef<RoundReadyObservation>({
+    mediaKey: '',
+    sawBuffering: false,
+    reported: false,
+  });
   /**
    * Waiting-roster rank standings for the design's "Chunin ·
    * 1,270 RP" player sublines (Slice 6) — GET /rank/players,
@@ -283,7 +297,14 @@ export default function QuizRoomScreen() {
                 mediaCandidates: [],
                 options: round.options,
               },
+              // F4: the state round can itself be start-pending
+              // (startedAt null) — carry the pending shape
+              // through so this screen waits for the completion
+              // broadcast like a client that never left.
               startedAt: round.startedAt,
+              startPending:
+                round.startPending ?? (round.startedAt === null),
+              baseStartAt: round.baseStartAt ?? undefined,
               timeLimitSeconds: next.settings.timeLimitSeconds,
               countdownSeconds: ROUND_COUNTDOWN_SECONDS,
             });
@@ -595,9 +616,12 @@ export default function QuizRoomScreen() {
   const onAnswer = useCallback(
     (option: string) => {
       if (!liveRound || myAnswer !== null || roundEnded) return;
-      // Pre-round countdown (owner, 2026-11-10): the answer
-      // window opens at the server's startedAt — taps before it
-      // are ignored here and refused by the server besides.
+      // Pre-round countdown (owner, 2026-11-10) + F4 start gate
+      // (2026-11-12): the answer window opens at the server's
+      // AUTHORITATIVE startedAt — while the round is still
+      // start-pending there is none, and taps are ignored here
+      // and refused by the server besides.
+      if (!liveRound.startedAt) return;
       if (Date.parse(liveRound.startedAt) > Date.now()) return;
       // Optimistic lock-in; a failed send unlocks so the player can
       // retry while the round is still live (the error shows above).
@@ -671,21 +695,38 @@ export default function QuizRoomScreen() {
     };
   }, [waitingIds]);
 
-  const deadlineMs = liveRound
-    ? Date.parse(liveRound.startedAt) + liveRound.timeLimitSeconds * 1000
+  // F4 (2026-11-12): a round is start-PENDING while it has no
+  // authoritative startedAt (the first round-started broadcast
+  // and a pending resync both carry null) — ring, scoring and
+  // answers all wait for the completion broadcast's stamp.
+  const roundPending = !!liveRound && liveRound.startedAt === null;
+  // The hold moment for the round's audio: the authoritative
+  // start once stamped; while pending, the BASE countdown
+  // moment (the value clients used to treat as the start).
+  const roundHoldMs = liveRound
+    ? Date.parse(liveRound.startedAt ?? liveRound.baseStartAt ?? '')
     : 0;
 
+  const deadlineMs =
+    liveRound && liveRound.startedAt
+      ? Date.parse(liveRound.startedAt) + liveRound.timeLimitSeconds * 1000
+      : 0;
+
   // Pre-round countdown display (owner design, 2026-11-10):
-  // whole seconds until the server's startedAt — derived from
-  // that one timestamp, so every client in the room counts the
-  // same countdown. 0 once the answer window is open.
+  // whole seconds until the round's base start moment — derived
+  // from that one timestamp, so every client in the room counts
+  // the same countdown. 0 once that moment passes; while the
+  // start gate is still pending past it, the countdown wrap
+  // stays up in its waiting shape (see the ring block).
   const [countdownLeft, setCountdownLeft] = useState(0);
   useEffect(() => {
     if (!liveRound) {
       setCountdownLeft(0);
       return;
     }
-    const opensAt = Date.parse(liveRound.startedAt);
+    const opensAt = Date.parse(
+      liveRound.startedAt ?? liveRound.baseStartAt ?? '',
+    );
     const update = () => {
       const left = countdownSecondsLeft(opensAt, Date.now());
       setCountdownLeft(left);
@@ -697,7 +738,37 @@ export default function QuizRoomScreen() {
     }, 200);
     return () => clearInterval(id);
   }, [liveRound]);
-  const inCountdown = countdownLeft > 0;
+  const inCountdown = countdownLeft > 0 || roundPending;
+
+  /* F4 ready report (2026-11-12): when this client's round
+     audio is DECIDED — genuinely playing, or its chain failed —
+     tell the server, once per round (quizTiming's pure rule
+     decides from the phase levels; a 'playing'/'failed' level
+     counts only after a 'buffering' report for the SAME
+     mediaKey, so a phase left over from the previous round can
+     never report for this one). The server stamps the round's
+     startedAt when every member has reported (or at the +10s
+     bound), and the completion round-started broadcast moves
+     this screen's ring/scoring onto the real start. Fire-and-
+     forget like the heartbeat: a lost report is backstopped by
+     the server's bound, never by a retry loop here. */
+  useEffect(() => {
+    if (!liveRound || !roomId) return;
+    const mediaKey = `${roomId}:${liveRound.round}`;
+    if (roomAudio.mediaKey !== mediaKey) return;
+    const { observation, report } = observeRoundReadyPhase(
+      roundReadyObsRef.current,
+      mediaKey,
+      roomAudio.phase,
+    );
+    roundReadyObsRef.current = observation;
+    if (!report) return;
+    void emitRoomEvent('room:round-ready', {
+      roomId,
+      roundNumber: liveRound.round,
+      state: report,
+    }).catch(() => undefined);
+  }, [roomAudio, liveRound, roomId]);
 
   // Owner rulings: quiz questions are AUDIO-ONLY (2026-11-09 — the
   // theme's video gives the anime away on sight, so no candidate is
@@ -1167,13 +1238,17 @@ export default function QuizRoomScreen() {
                   plays behind no surface at all — the ring and
                   the Playing pill below report its state. During
                   the pre-round countdown it LOADS but is held
-                  (playAtMs = the server's startedAt) so the whole
-                  room hears it start at 0 together. */}
+                  (playAtMs = the round's base start moment while
+                  the F4 start gate is pending; the authoritative
+                  startedAt once the gate completes) so the whole
+                  room hears it start together — and a client
+                  whose audio only becomes ready after the start
+                  plays immediately (catch-up), as it always has. */}
               <QuizAudioOnly
                 candidates={roundAudioCandidates}
                 mediaKey={`${roomId}:${liveRound.round}`}
                 onStateChange={handleRoomAudioState}
-                playAtMs={Date.parse(liveRound.startedAt)}
+                playAtMs={roundHoldMs}
               />
               {/* Players strip card (Quiz Room in-game design):
                   Avatar + answered badge + name per player, with
@@ -1259,10 +1334,14 @@ export default function QuizRoomScreen() {
               {/* Countdown ring + Playing pill: during the
                   pre-round countdown a big 5→1 number stands
                   where the ring will be (the audio is loading
-                  held behind it); from 0 the ring shows the
+                  held behind it); once the F4 start gate
+                  completes — every member's audio reported ready,
+                  or the server's bound — the ring shows the
                   round's real remaining time (the server's
-                  startedAt + limit, as before) and the pill
-                  reports the hidden audio's phase. The mute
+                  authoritative startedAt + limit) and the pill
+                  reports the hidden audio's phase. While the
+                  gate is pending past the countdown, the number
+                  gives way to the waiting caption. The mute
                   toggle sits at the ring's lower-right — the
                   solo screen's placement; the mock draws none,
                   but muting the clip is an existing capability
@@ -1271,10 +1350,12 @@ export default function QuizRoomScreen() {
                 {inCountdown ? (
                   <View style={styles.countdownWrap}>
                     <Text style={styles.countdownNumber}>
-                      {countdownLeft}
+                      {countdownLeft > 0 ? countdownLeft : '…'}
                     </Text>
                     <Text style={styles.countdownCaption}>
-                      Get ready
+                      {countdownLeft > 0
+                        ? 'Get ready'
+                        : "Starting when everyone's ready"}
                     </Text>
                   </View>
                 ) : (

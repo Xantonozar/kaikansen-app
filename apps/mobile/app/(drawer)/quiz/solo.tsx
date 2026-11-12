@@ -40,14 +40,19 @@ import { ApiRequestError } from '../../../src/api';
 import { warmAudioEngine } from '../../../src/audioEngine';
 import {
   resolveSoloNextPreload,
+  ringHoldSecondsAtAnswer,
   soloClockStartsOnPhase,
   soloLoadSafetyMs,
 } from '../../../src/mediaEngine';
 import {
+  QUIZ_SLICE_GRACE_MS,
   clearQuizSlices,
+  getQuizSliceState,
   getQuizSliceUri,
   pinQuizSlice,
   quizSliceCandidates,
+  sliceGraceApplies,
+  whenQuizSliceSettles,
 } from '../../../src/quizPrefetch';
 import {
   createSoloGame,
@@ -58,7 +63,10 @@ import { fetchMyRank } from '../../../src/socialApi';
 import { RankResultCard } from '../../../src/components/RankCard';
 import { CountdownRing } from '../../../src/components/CountdownRing';
 import { QuizGenerating } from '../../../src/components/QuizGenerating';
-import { GENERATING_MIN_DISPLAY_MS } from '../../../src/quizGenerating';
+import {
+  GENERATING_ERROR_MIN_DISPLAY_MS,
+  setupWindowShouldExit,
+} from '../../../src/quizGenerating';
 import {
   QuizAudioOnly,
   type QuizAudioState,
@@ -203,6 +211,7 @@ export default function SoloQuizScreen() {
     phase: 'empty',
     muted: false,
     toggleMute: () => {},
+    mediaKey: '',
   });
   const handleAudioState = useCallback((state: QuizAudioState) => {
     setAudioState(state);
@@ -222,16 +231,50 @@ export default function SoloQuizScreen() {
   const limitRef = useRef(20);
   const loadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [clockRunning, setClockRunning] = useState(false);
-  // Part 6: the live question's candidate chain, frozen when the
-  // question starts. The slice lookup happens once, at the
-  // freeze; a slice that lands mid-question must not swap the
-  // chain under a candidate that is already loading/playing
-  // (that would restart its load) — it simply serves the NEXT
-  // time this question would start, and the remote chain covers
-  // this one, exactly as before slices existed.
-  const chainSnapshotRef = useRef<{ key: string; list: string[] } | null>(
+  // F3 (clock-lag fix, 2026-11-12): ref mirrors of the two
+  // values the answer-moment ring freeze reads — submit's
+  // callback deps deliberately exclude the deadline/clock
+  // state, so the capture reads the mirrors (kept in lockstep
+  // at every setDeadlineMs / setClockRunning call site).
+  const deadlineMsRef = useRef(0);
+  const clockRunningRef = useRef(false);
+  // The ring value frozen at the answer moment, held through
+  // the feedback window (CountdownRing's holdSeconds); null
+  // outside feedback.
+  const [answerHoldSeconds, setAnswerHoldSeconds] = useState<number | null>(
     null,
   );
+  // Setup window (clock batch, 2026-11-12 — diagnosis §6):
+  // question 1, stashed the moment the create response lands so
+  // its player can mount BEHIND the generating screen and
+  // stream a head start on the remote chain. Carries everything
+  // the hoisted player + the exit gate need; cleared when the
+  // gate hands over into the question.
+  const [setup, setSetup] = useState<{
+    question: SoloQuestion;
+    timeLimitSeconds: number;
+    mediaKey: string;
+    candidates: string[];
+    mountedAtMs: number;
+  } | null>(null);
+  // When the current generating screen was shown — the setup
+  // gate's elapsed clock (the create effect stamps it).
+  const setupShownAtRef = useRef(0);
+  // Part 6 + F6 (2026-11-12): the live question's candidate
+  // chain, frozen when the question starts — STATE now, not a
+  // render-time snapshot, because the F6 grace makes the freeze
+  // asynchronous: when the question's slice prefetch is still
+  // in flight at question start, the freeze effect below holds
+  // the freeze (bounded) for the transfer to finalize so the
+  // slice can lead. Once frozen, the chain never changes for
+  // that question — a slice landing mid-question must not swap
+  // the chain under a candidate already loading/playing (that
+  // would restart its load); the remote chain covers this one,
+  // exactly as before slices existed.
+  const [frozenChain, setFrozenChain] = useState<{
+    key: string;
+    list: string[];
+  } | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -269,7 +312,10 @@ export default function SoloQuizScreen() {
       clearTimeout(loadTimerRef.current);
       loadTimerRef.current = null;
     }
-    setDeadlineMs(Date.now() + limitRef.current * 1000);
+    const startedDeadline = Date.now() + limitRef.current * 1000;
+    deadlineMsRef.current = startedDeadline;
+    setDeadlineMs(startedDeadline);
+    clockRunningRef.current = true;
     setClockRunning(true);
     const gid = gameIdRef.current;
     if (gid) {
@@ -288,7 +334,11 @@ export default function SoloQuizScreen() {
   }, []);
 
   const startQuestion = useCallback(
-    (q: SoloQuestion, limitSeconds: number) => {
+    (
+      q: SoloQuestion,
+      limitSeconds: number,
+      opts?: { fromSetup?: boolean },
+    ) => {
       // Part 6: pin this question's prefetched slice — its
       // player may read the file, so the next prefetch's
       // eviction must not delete it from under the player — and
@@ -309,15 +359,33 @@ export default function SoloQuizScreen() {
       // one full answer window, so it can only fire if the
       // media layer never reports a phase at all; playback and
       // the verdict start the clock long before it.
+      // SETUP EXCEPTION (2026-11-12, diagnosis §6): when this
+      // question is the setup-mounted Q1 (fromSetup), the
+      // 'buffering' reset is SKIPPED — the reported phase is
+      // this question's OWN level from its pre-mounted player
+      // (keyed by F5's mediaKey reports), possibly already
+      // 'playing'; resetting would erase the very level the
+      // clock effect consumes on the phase transition below,
+      // recreating the lost-edge stall the setup window exists
+      // to remove. The reset's stale-level hazard cannot occur
+      // here: the level belongs to this question's key, not a
+      // predecessor's.
       clockStartedForRef.current = 0;
+      clockRunningRef.current = false;
       setClockRunning(false);
-      setAudioState((s) => ({ ...s, phase: 'buffering' }));
+      // F3: a new question clears the previous answer's freeze.
+      setAnswerHoldSeconds(null);
+      if (!opts?.fromSetup) {
+        setAudioState((s) => ({ ...s, phase: 'buffering' }));
+      }
       if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
       loadTimerRef.current = setTimeout(
         () => startClock(q.index),
         soloLoadSafetyMs(limitSeconds),
       );
-      setDeadlineMs(Date.now() + limitSeconds * 1000);
+      const questionDeadline = Date.now() + limitSeconds * 1000;
+      deadlineMsRef.current = questionDeadline;
+      setDeadlineMs(questionDeadline);
       setPhase('question');
     },
     [startClock],
@@ -326,30 +394,23 @@ export default function SoloQuizScreen() {
   /* Create the game (and recreate on Play again via runId). */
   useEffect(() => {
     let live = true;
-    let applyTimer: ReturnType<typeof setTimeout> | null = null;
-    /* Generating-screen pacing (approved design cfc7c9ac): the
-       creating phase now shows the designed "Setting up your
-       quiz" screen, and a create that resolves near-instantly
-       would flash it for a frame — so the RESULT is applied
-       only once the screen has been up for
-       GENERATING_MIN_DISPLAY_MS. The request itself is never
-       delayed, and no game timing hangs off this: it paces the
-       phase transition, nothing else. */
+    let errorTimer: ReturnType<typeof setTimeout> | null = null;
+    /* Setup window (clock batch, 2026-11-12 — diagnosis §6):
+       the generating screen is a working wait now, not just
+       anti-flash pacing. The create request fires immediately
+       and its SUCCESS applies immediately too — Q1 is stashed
+       as the setup question, which mounts its player BEHIND
+       the screen so the remote chain streams a head start —
+       and the screen's EXIT is gated separately by the setup
+       gate effect below (4.5 s minimum + Q1's media decision,
+       10 s bound). Only a FAILURE keeps a display floor
+       (GENERATING_ERROR_MIN_DISPLAY_MS), so an instant error
+       still doesn't flash past the screen. (Pre-setup-window,
+       the 700 ms floor paced BOTH paths.) */
     const shownAt = Date.now();
-    const applyResult = (fn: () => void) => {
-      const wait = Math.max(
-        0,
-        GENERATING_MIN_DISPLAY_MS - (Date.now() - shownAt),
-      );
-      if (wait <= 0) {
-        fn();
-        return;
-      }
-      applyTimer = setTimeout(() => {
-        if (live) fn();
-      }, wait);
-    };
+    setupShownAtRef.current = shownAt;
     setPhase('creating');
+    setSetup(null);
     setError(null);
     feedbackRef.current = null;
     advancedForRef.current = 0;
@@ -366,33 +427,96 @@ export default function SoloQuizScreen() {
     createSoloGame({ quizType, source })
       .then((state) => {
         if (!live) return;
-        applyResult(() => {
-          gameIdRef.current = state.gameId;
-          setGameId(state.gameId);
-          setTotalQuestions(state.totalQuestions);
-          setTimeLimit(state.timeLimitSeconds);
-          if (state.question) {
-            startQuestion(state.question, state.timeLimitSeconds);
-          } else {
-            setFatalMessage('The game could not be started.');
-            setPhase('fatal');
-          }
-        });
+        gameIdRef.current = state.gameId;
+        setGameId(state.gameId);
+        setTotalQuestions(state.totalQuestions);
+        setTimeLimit(state.timeLimitSeconds);
+        if (state.question) {
+          // Pre-mount Q1 on the REMOTE chain — never a slice:
+          // Q1 has no prefetch by construction, and §6's math
+          // shows a slice could not finalize in-window at slow
+          // speeds anyway (1 MB ≈ 11.5 s at ~87 KB/s), while
+          // the same bytes as a stream are seconds of buffered
+          // audio. The chain is frozen into the same snapshot
+          // the question render consumes, so the player's
+          // candidates stay identical across the creating →
+          // question handover and the stream never restarts.
+          const q = state.question;
+          const key = `${state.gameId}:${q.index}`;
+          const chain = quizSliceCandidates(null, [
+            q.theme.audioUrl,
+            q.theme.videoUrl,
+          ]);
+          setFrozenChain({ key, list: chain });
+          setSetup({
+            question: q,
+            timeLimitSeconds: state.timeLimitSeconds,
+            mediaKey: key,
+            candidates: chain,
+            mountedAtMs: Date.now(),
+          });
+        } else {
+          setFatalMessage('The game could not be started.');
+          setPhase('fatal');
+        }
       })
       .catch((e: unknown) => {
         if (!live) return;
-        applyResult(() => {
+        const applyError = () => {
+          if (!live) return;
           setFatalMessage(
             e instanceof Error ? e.message : 'Could not start the game.',
           );
           setPhase('fatal');
-        });
+        };
+        const wait = Math.max(
+          0,
+          GENERATING_ERROR_MIN_DISPLAY_MS - (Date.now() - shownAt),
+        );
+        if (wait <= 0) applyError();
+        else errorTimer = setTimeout(applyError, wait);
       });
     return () => {
       live = false;
-      if (applyTimer) clearTimeout(applyTimer);
+      if (errorTimer) clearTimeout(errorTimer);
     };
-  }, [quizType, source, runId, startQuestion]);
+  }, [quizType, source, runId]);
+
+  /* Setup window exit gate: while the generating screen is up
+     with Q1 mounted behind it, poll the pure gate
+     (quizGenerating.setupWindowShouldExit). The media decision
+     reads the phase LEVEL reported for the SETUP KEY only
+     (F5's keyed reports): any phase but 'buffering' is a
+     decision — 'playing' (genuine start), 'failed' / 'empty'
+     (the verdict; the question is live either way and Q1's
+     clock starts from the same level when the phase flips).
+     The handover calls startQuestion with fromSetup so the
+     level is consumed, not reset (see startQuestion). */
+  useEffect(() => {
+    if (phase !== 'creating' || !setup) return;
+    const decide = () => {
+      const now = Date.now();
+      const mediaDecided =
+        audioState.mediaKey === setup.mediaKey &&
+        audioState.phase !== 'buffering';
+      if (
+        setupWindowShouldExit({
+          createApplied: true,
+          elapsedMs: now - setupShownAtRef.current,
+          mediaDecided,
+          mediaMountedMs: now - setup.mountedAtMs,
+        })
+      ) {
+        const q = setup.question;
+        const limit = setup.timeLimitSeconds;
+        setSetup(null);
+        startQuestion(q, limit, { fromSetup: true });
+      }
+    };
+    decide();
+    const id = setInterval(decide, 100);
+    return () => clearInterval(id);
+  }, [phase, setup, audioState, startQuestion]);
 
   /* The clock starts when the media wait ends (v2 — the clock
      obeys the song): the audio actually playing, or
@@ -409,6 +533,58 @@ export default function SoloQuizScreen() {
     if (!soloClockStartsOnPhase(audioState.phase)) return;
     startClock(question.index);
   }, [audioState.phase, phase, question, startClock]);
+
+  /* F6 chain freeze (2026-11-12): freeze the live question's
+     candidate chain, once per question, in the question phase
+     only. Normally instant (the slice is ready or absent).
+     When the slice prefetch is STILL IN FLIGHT, the freeze
+     holds for the bounded grace (QUIZ_SLICE_GRACE_MS), racing
+     the transfer's settle promise — a slice that finalizes
+     inside the grace leads the chain instead of being thrown
+     away; on expiry the freeze proceeds exactly as before.
+     While the freeze is pending the player is NOT mounted
+     (the render reads frozenChain), so no false 'empty' report
+     can start the clock early: the reported phase stays the
+     'buffering' startQuestion put there, which is the honest
+     state — media not decided yet. A freeze never STARTS in
+     the feedback phase: a question answered inside its grace
+     simply never mounts a player, rather than starting the
+     song over the reveal. The setup-mounted Q1 arrives
+     pre-frozen by the create effect, so it never waits here. */
+  useEffect(() => {
+    if (!question || phase !== 'question') return;
+    const key = `${gameId ?? 'game'}:${question.index}`;
+    if (frozenChain?.key === key) return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const freezeNow = () => {
+      if (!live) return;
+      live = false;
+      if (timer) clearTimeout(timer);
+      setFrozenChain({
+        key,
+        list: quizSliceCandidates(getQuizSliceUri(key), [
+          question.theme.audioUrl,
+          question.theme.videoUrl,
+        ]),
+      });
+    };
+    if (sliceGraceApplies(getQuizSliceState(key))) {
+      const settles = whenQuizSliceSettles(key);
+      if (settles) {
+        timer = setTimeout(freezeNow, QUIZ_SLICE_GRACE_MS);
+        void settles.then(freezeNow);
+      } else {
+        freezeNow();
+      }
+    } else {
+      freezeNow();
+    }
+    return () => {
+      live = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [question, phase, gameId, frozenChain]);
 
   const advance = useCallback(() => {
     if (advanceTimerRef.current) {
@@ -449,6 +625,19 @@ export default function SoloQuizScreen() {
       if (!gameId || !question || submittingRef.current) return;
       if (phase !== 'question') return;
       submittingRef.current = true;
+      // F3: freeze the ring at THIS moment — the tap (or the
+      // timeout), before the network round trip — and hold the
+      // value through the feedback window. A failed submit
+      // never leaves the question phase, where the hold prop
+      // is not passed, so a retry re-captures cleanly.
+      setAnswerHoldSeconds(
+        ringHoldSecondsAtAnswer({
+          clockRunning: clockRunningRef.current,
+          deadlineMs: deadlineMsRef.current,
+          answeredAtMs: Date.now(),
+          totalSeconds: limitRef.current,
+        }),
+      );
       setPicked(answer);
       setError(null);
       try {
@@ -558,6 +747,17 @@ export default function SoloQuizScreen() {
   );
 
   let body: React.ReactNode;
+  // The question audio player, HOISTED out of the body (setup
+  // window, 2026-11-12): it occupies a stable first-child slot
+  // in the column (see the return) across the creating →
+  // question → feedback transitions, so React never unmounts
+  // it at the handover and the stream the setup window
+  // pre-loaded survives into the question. Assigned by the
+  // question branch below (question/feedback phases) and by
+  // the setup override after the branch chain (creating);
+  // null in every other phase, exactly when the player used
+  // to unmount.
+  let playerNode: React.ReactNode = null;
   if (phase === 'fatal') {
     body = (
       <View style={styles.center}>
@@ -674,27 +874,28 @@ export default function SoloQuizScreen() {
         </Text>
       </ScrollView>
     );
-  } else if (question) {
+  } else if (question && phase !== 'creating') {
+    // The phase guard matters (setup window): during a
+    // re-create the PREVIOUS game's question still sits in
+    // state while the new game's id is already applied — this
+    // branch must not run then (its chain freeze would key the
+    // old question's chain under the new game). The branch's
+    // body isn't rendered during 'creating' anyway.
     const inFeedback = phase === 'feedback' && feedback !== null;
     const audioFailed = audioState.phase === 'failed';
     const audioEmpty = audioState.phase === 'empty';
     const mediaKey = `${gameId ?? 'game'}:${question.index}`;
-    // Part 6: this question's chain, frozen at its start — its
-    // prefetched slice (when one landed in time) leads, then the
-    // remote chain in doctrine order (the API-resolved audio —
-    // the derived .ogg — first, then the theme's video file
-    // played audio-only as the last resort; the question reports
-    // unplayable only after all fail).
-    if (chainSnapshotRef.current?.key !== mediaKey) {
-      chainSnapshotRef.current = {
-        key: mediaKey,
-        list: quizSliceCandidates(getQuizSliceUri(mediaKey), [
-          question.theme.audioUrl,
-          question.theme.videoUrl,
-        ]),
-      };
-    }
-    const questionCandidates = chainSnapshotRef.current.list;
+    // Part 6 + F6: this question's chain, frozen by the freeze
+    // effect — its prefetched slice (ready at the freeze, or
+    // finalized inside the F6 grace) leads, then the remote
+    // chain in doctrine order (the API-resolved audio — the
+    // derived .ogg — first, then the theme's video file played
+    // audio-only as the last resort; the question reports
+    // unplayable only after all fail). While the freeze is
+    // still pending (the grace window) there is no chain yet
+    // and the player below stays unmounted.
+    const chainFrozen = frozenChain?.key === mediaKey;
+    const questionCandidates = chainFrozen ? frozenChain.list : null;
     // The next question's preload target (parts 5+6): the
     // feedback reveal when it exists, else the early reveal from
     // this question's playback-start signal — both feed the same
@@ -711,24 +912,26 @@ export default function SoloQuizScreen() {
         : null,
       earlyNext,
     });
+    playerNode = questionCandidates ? (
+      <QuizAudioOnly
+        candidates={questionCandidates}
+        mediaKey={mediaKey}
+        onStateChange={handleAudioState}
+        /* Playback plan (2026-11-10) + parts 5/6 (2026-11-11):
+           the NEXT question's audio prefetches as a file slice
+           while this one plays — triggered by the early reveal
+           at this question's playback start when available, and
+           by the feedback reveal (the answer response's
+           nextQuestion) otherwise — so the advance starts it
+           near-instantly. The clock still starts at actual
+           playback — a sliced clip simply reaches 'playing'
+           sooner, through the same phase signal. */
+        nextCandidates={nextPreload?.candidates}
+        nextMediaKey={nextPreload?.mediaKey}
+      />
+    ) : null;
     body = (
       <>
-        <QuizAudioOnly
-          candidates={questionCandidates}
-          mediaKey={mediaKey}
-          onStateChange={handleAudioState}
-          /* Playback plan (2026-11-10) + parts 5/6 (2026-11-11):
-             the NEXT question's audio prefetches as a file slice
-             while this one plays — triggered by the early reveal
-             at this question's playback start when available, and
-             by the feedback reveal (the answer response's
-             nextQuestion) otherwise — so the advance starts it
-             near-instantly. The clock still starts at actual
-             playback — a sliced clip simply reaches 'playing'
-             sooner, through the same phase signal. */
-          nextCandidates={nextPreload?.candidates}
-          nextMediaKey={nextPreload?.mediaKey}
-        />
         <ScrollView
           contentContainerStyle={styles.gameContent}
           showsVerticalScrollIndicator={false}
@@ -743,6 +946,9 @@ export default function SoloQuizScreen() {
               totalSeconds={timeLimit}
               onExpire={phase === 'question' ? onExpire : undefined}
               paused={phase === 'question' && !clockRunning}
+              holdSeconds={
+                phase === 'feedback' ? answerHoldSeconds : undefined
+              }
               size={168}
               glyph={
                 audioState.phase === 'buffering' ? (
@@ -906,9 +1112,24 @@ export default function SoloQuizScreen() {
     );
   }
 
+  // Setup window: behind the generating screen, Q1's player is
+  // already mounted on its frozen remote chain — same component,
+  // same first-child slot the question branch's playerNode uses,
+  // so the handover preserves the instance and its stream.
+  if (phase === 'creating' && setup) {
+    playerNode = (
+      <QuizAudioOnly
+        candidates={setup.candidates}
+        mediaKey={setup.mediaKey}
+        onStateChange={handleAudioState}
+      />
+    );
+  }
+
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.column}>
+        {playerNode}
         {phase === 'creating' ? (
           /* The generating screen is a full-column design of
              its own (approved cfc7c9ac): it carries its own top

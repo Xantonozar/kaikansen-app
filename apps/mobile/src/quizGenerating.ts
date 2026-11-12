@@ -13,6 +13,26 @@
  * so no displayed completion can contradict reality. Likewise
  * the progress value creeps toward a cap and never reaches 1:
  * the bar is honest about still waiting.
+ *
+ * Setup window (clock batch, 2026-11-12 — diagnosis §6): the
+ * screen is no longer just pacing a flash. Question 1 used to
+ * be categorically excluded from every preload: its audio load
+ * began only after this screen exited and the question mounted,
+ * so Q1 paid a full cold load (create round trip, then media)
+ * inside its own clock wait while later questions rode their
+ * prefetched slices. Now Q1's player is PRE-MOUNTED behind
+ * this screen the moment the create response lands, streaming
+ * its remote chain, and the screen's minimum display is a
+ * deliberate 4.5 s that gives that stream a head start. The
+ * exit itself is gated by setupWindowShouldExit below: the
+ * minimum elapsed AND Q1's media decided (genuinely playing,
+ * or the failed/empty verdict) — with a 10 s bound from the
+ * media mount so a never-deciding load still hands over to
+ * the question's own machinery instead of holding the screen.
+ * The remote chain, not the slice file: at the owner's
+ * measured ~87 KB/s worst-case flow a 1 MB slice needs ~11.5 s
+ * to finalize — outside any honest window — while the same
+ * bytes as a stream are ~9–18 s of buffered audio by exit.
  */
 
 /** The three steps, verbatim from the approved design. */
@@ -23,20 +43,64 @@ export const GENERATING_STEPS = [
 ] as const;
 
 /**
- * Minimum time the generating screen stays up once shown
- * (presentational pacing, approved with the design): a create
- * that resolves near-instantly would otherwise flash the screen
- * for a single frame. The create REQUEST is never delayed —
- * only the application of its result (phase transition) waits
- * out the remainder. 700 ms sits inside the brief's 600–900 ms
- * standard range.
+ * Minimum time the generating screen stays up once shown. As
+ * of the setup window (2026-11-12) this is a DELIBERATE 4.5 s:
+ * the window exists so question 1's pre-mounted player can
+ * stream a head start behind the screen (see the module
+ * docblock) — the exit gate (setupWindowShouldExit) requires
+ * this minimum AND Q1's media decision. (Before the setup
+ * window it was 700 ms of pure anti-flash pacing.)
  */
-export const GENERATING_MIN_DISPLAY_MS = 700;
+export const GENERATING_MIN_DISPLAY_MS = 4500;
 
-/** Elapsed-ms marks at which the ACTIVE step advances. Step 1
- *  completes at 600 ms, step 2 at 2000 ms; step 3 then stays
- *  active until the game actually arrives. */
-const STAGE_AT_MS = [600, 2000] as const;
+/**
+ * The floor for a FAILED create only: a fatal error still
+ * waits out a short beat so the screen never flashes straight
+ * into the error state. (The pre-setup-window minimum; the
+ * success path is governed by the setup window instead.)
+ */
+export const GENERATING_ERROR_MIN_DISPLAY_MS = 700;
+
+/** Elapsed-ms marks at which the ACTIVE step advances, spaced
+ *  across the 4.5 s setup window: step 1 completes at 1500 ms,
+ *  step 2 at 3000 ms; step 3 then stays active until the game
+ *  actually arrives. */
+const STAGE_AT_MS = [1500, 3000] as const;
+
+/**
+ * The setup window's outer bound, in ms from the moment Q1's
+ * player mounted behind the screen: if the media still has not
+ * decided (neither genuinely playing nor a verdict) by then,
+ * the screen hands over to the question anyway and the
+ * question's own stall/verdict machinery finishes the job —
+ * the window may never become a second hang.
+ */
+export const SETUP_MEDIA_BOUND_MS = 10_000;
+
+/**
+ * May the setup window exit into question 1? ALL of:
+ * - the create result has been applied (Q1 exists and its
+ *   player is mounted behind the screen);
+ * - the deliberate minimum has elapsed;
+ * - EITHER Q1's media has decided (genuinely playing, or the
+ *   failed/empty verdict — the question is live either way,
+ *   and the clock doctrine starts Q1's clock from that same
+ *   signal the moment the question phase begins),
+ *   OR the media-mount bound has elapsed (honest hold: the
+ *   screen waited as long as it may; the in-question machinery
+ *   takes over).
+ */
+export function setupWindowShouldExit(input: {
+  createApplied: boolean;
+  elapsedMs: number;
+  mediaDecided: boolean;
+  mediaMountedMs: number;
+}): boolean {
+  if (!input.createApplied) return false;
+  if (input.elapsedMs < GENERATING_MIN_DISPLAY_MS) return false;
+  if (input.mediaDecided) return true;
+  return input.mediaMountedMs >= SETUP_MEDIA_BOUND_MS;
+}
 
 /**
  * Which step is active after `elapsedMs` on the generating

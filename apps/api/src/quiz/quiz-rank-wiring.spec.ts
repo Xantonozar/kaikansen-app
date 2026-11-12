@@ -320,9 +320,17 @@ describe('QuizModule wiring — multiplayer rank application (Bug 2)', () => {
     const room = roomDocs.find((r) => String(r._id) === roomId)!;
     const round = (room.rounds as Record<string, unknown>[])[0];
     const correctAnswer = round.correctAnswer as string;
-    // The round opens with the 5s pre-round countdown (owner,
-    // 2026-11-10): move past it so answers are accepted.
-    round.startedAt = new Date();
+    // F4 (2026-11-12): the round's answer window opens when
+    // every member has reported its audio ready — drive the
+    // gate through the real report path.
+    for (const p of room.players as Record<string, unknown>[]) {
+      await roomsService.reportRoundReady(
+        String(p.userId),
+        roomId,
+        1,
+        'playing',
+      );
+    }
 
     // Duel semantics: the host's correct first answer auto-locks
     // the guest and ends the (single-round) game immediately.

@@ -421,13 +421,17 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     expect(theme.options).toContain('Correct EN');
     expect(JSON.stringify(startPayload)).not.toContain('correctAnswer');
 
-    // Pre-round countdown (owner design, 2026-11-10): the
-    // payload carries the countdown and a startedAt 5s out —
-    // the answer window opens there, not at the broadcast.
+    // Pre-round countdown (owner design, 2026-11-10) + F4
+    // start gate (2026-11-12): the first broadcast is
+    // start-PENDING — startedAt null; baseStartAt carries the
+    // countdown moment 5s out. The window does NOT open there:
+    // it opens when every member has reported its audio ready.
     expect(startPayload.countdownSeconds).toBe(5);
-    const windowOpensAt = Date.parse(startPayload.startedAt as string);
-    expect(windowOpensAt).toBeGreaterThan(Date.now());
-    // An answer during the countdown is refused by the server.
+    expect(startPayload.startedAt).toBeNull();
+    expect(startPayload.startPending).toBe(true);
+    const baseStartAt = Date.parse(startPayload.baseStartAt as string);
+    expect(baseStartAt).toBeGreaterThan(Date.now());
+    // An answer while the gate is pending is refused.
     const early = await emitAck(guest, 'room:answer', {
       roomId,
       roundNumber: 1,
@@ -437,10 +441,32 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
       success: false,
       error: 'Round has not started yet',
     });
-    // Wait out the countdown; from startedAt the window is open.
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.max(0, windowOpensAt - Date.now()) + 100),
+    // Both clients report their round audio ready; the
+    // completion broadcast carries the authoritative startedAt
+    // and from that moment the window is open.
+    const completedPromise = waitFor(
+      guest,
+      'room:round-started',
+      (p: never) => (p as Record<string, unknown>).startedAt !== null,
     );
+    await emitAck(host, 'room:round-ready', {
+      roomId,
+      roundNumber: 1,
+      state: 'playing',
+    });
+    await emitAck(guest, 'room:round-ready', {
+      roomId,
+      roundNumber: 1,
+      state: 'playing',
+    });
+    const completed = (await completedPromise) as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(completed.startPending).toBe(false);
+    expect(
+      Date.parse(completed.startedAt as string),
+    ).toBeLessThanOrEqual(Date.now() + 1000);
 
     // Guest answers correctly and instantly; the host (last
     // remaining player in a party) is auto-locked and the game ends.
@@ -505,10 +531,25 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     const roundStarted = waitFor(guest, 'room:round-started');
     await emitAck(host, 'room:start', { roomId });
     const startPayload = (await roundStarted) as unknown as Record<string, unknown>;
-    const windowOpensAt = Date.parse(startPayload.startedAt as string);
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.max(0, windowOpensAt - Date.now()) + 100),
+    // F4: the first broadcast is start-pending; the window
+    // opens when both members report their audio ready.
+    expect(startPayload.startedAt).toBeNull();
+    const completedPromise = waitFor(
+      guest,
+      'room:round-started',
+      (p: never) => (p as Record<string, unknown>).startedAt !== null,
     );
+    await emitAck(host, 'room:round-ready', {
+      roomId,
+      roundNumber: 1,
+      state: 'playing',
+    });
+    await emitAck(guest, 'room:round-ready', {
+      roomId,
+      roundNumber: 1,
+      state: 'playing',
+    });
+    await completedPromise;
 
     // Guest's correct answer ends the 1-round game (host auto-locked).
     const guestRank = waitFor(
@@ -583,10 +624,22 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     await emitAck(host, 'room:ready', { roomId });
     await emitAck(guest, 'room:ready', { roomId });
 
-    // The round now ends at countdown (5s) + the 1s window.
+    // F4: both clients report their audio ready as soon as the
+    // round is dealt, so the start gate completes at once and
+    // the round ends the 1s window later (server timer).
     const endedPromise = waitFor(guest, 'room:round-ended', () => true, 15000);
     const started = await emitAck(host, 'room:start', { roomId });
     expect(started.success).toBe(true);
+    await emitAck(host, 'room:round-ready', {
+      roomId,
+      roundNumber: 1,
+      state: 'playing',
+    });
+    await emitAck(guest, 'room:round-ready', {
+      roomId,
+      roundNumber: 1,
+      state: 'playing',
+    });
 
     const ended = (await endedPromise) as unknown as Record<string, unknown>;
     expect(ended.gameOver).toBe(true);

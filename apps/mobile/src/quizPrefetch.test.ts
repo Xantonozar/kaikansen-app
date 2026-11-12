@@ -98,8 +98,10 @@ jest.mock('expo-file-system/legacy', () => ({
 
 import {
   QUIZ_SLICE_CAP_BYTES,
+  QUIZ_SLICE_GRACE_MS,
   QUIZ_SLICE_MIN_BYTES,
   clearQuizSlices,
+  getQuizSliceState,
   getQuizSliceUri,
   isQuizSliceUri,
   pinQuizSlice,
@@ -107,7 +109,9 @@ import {
   quizSliceCandidates,
   sliceCapReached,
   sliceFileNameFor,
+  sliceGraceApplies,
   sliceIsUsable,
+  whenQuizSliceSettles,
 } from './quizPrefetch';
 
 const OGG_A = 'https://a.example/AnimeA-OP1.ogg';
@@ -265,5 +269,56 @@ describe('prefetchQuizSlice', () => {
     expect(getQuizSliceUri('game:2')).toBeNull();
     expect(getQuizSliceUri('game:3')).toBeNull();
     expect(mockFileSizes.size).toBe(0);
+  });
+});
+
+describe('F6 grace support (2026-11-12)', () => {
+  it('the grace is ~3 s and applies ONLY to an in-flight slice', () => {
+    expect(QUIZ_SLICE_GRACE_MS).toBe(3_000);
+    expect(sliceGraceApplies('fetching')).toBe(true);
+    // 'ready' freezes immediately with the slice — no wait.
+    expect(sliceGraceApplies('ready')).toBe(false);
+    // 'none' must never wait: nothing is coming, and holding
+    // would delay the question's own load/verdict for nothing.
+    expect(sliceGraceApplies('none')).toBe(false);
+  });
+
+  it('state + settle accessors track a real transfer', async () => {
+    script(OGG_A, 300_000);
+    expect(getQuizSliceState('game:2')).toBe('none');
+    expect(whenQuizSliceSettles('game:2')).toBeNull();
+
+    const inflight = prefetchQuizSlice('game:2', OGG_A);
+    // Synchronously after the call the transfer is in flight.
+    expect(getQuizSliceState('game:2')).toBe('fetching');
+    const settles = whenQuizSliceSettles('game:2');
+    expect(settles).not.toBeNull();
+    // The settle handle IS the prefetch's own promise (the
+    // grace waits on the real transfer, not a stand-in).
+    expect(settles).toBe(inflight);
+
+    await settles;
+    expect(getQuizSliceState('game:2')).toBe('ready');
+    expect(whenQuizSliceSettles('game:2')).toBeNull();
+    expect(getQuizSliceUri('game:2')).not.toBeNull();
+  });
+
+  it('the dedupe path returns the in-flight promise, not a resolved stand-in', async () => {
+    script(OGG_A, 300_000);
+    const first = prefetchQuizSlice('game:2', OGG_A);
+    const second = prefetchQuizSlice('game:2', OGG_A);
+    expect(second).toBe(first);
+    await second;
+    expect(getQuizSliceState('game:2')).toBe('ready');
+    expect(mockTasks).toHaveLength(1); // still never restarted
+  });
+
+  it('a settle that ends in failure leaves state none (the grace then freezes slice-less)', async () => {
+    script(OGG_A, 300_000, true);
+    const settles = prefetchQuizSlice('game:2', OGG_A);
+    expect(getQuizSliceState('game:2')).toBe('fetching');
+    await settles; // never rejects
+    expect(getQuizSliceState('game:2')).toBe('none');
+    expect(getQuizSliceUri('game:2')).toBeNull();
   });
 });

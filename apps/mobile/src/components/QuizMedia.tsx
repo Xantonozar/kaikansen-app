@@ -33,13 +33,17 @@ import {
 } from '../audioEngine';
 
 /** Normalise an expo-audio status into the quiz engine's status
-    vocabulary (the bridge listener keeps the latest in a ref). */
+    vocabulary (the bridge listener keeps the latest in a ref).
+    The decision is mediaEngine.quizAudioTickStatus: since the
+    clock-lag fix F2 (2026-11-12) a merely-LOADED player reads
+    'loading', not 'readyToPlay' — 'readyToPlay' requires the
+    genuine-start test (playing, or position past zero), so the
+    phase the screens consume can no longer start a clock at
+    metadata-load while the start-buffer is still filling. */
 function audioTickStatus(
   status: AudioStatus | null,
 ): 'loading' | 'readyToPlay' | 'error' {
-  if (!status) return 'loading';
-  if (status.error) return 'error';
-  return status.isLoaded ? 'readyToPlay' : 'loading';
+  return quizAudioTickStatus(status);
 }
 import {
   WATCHDOG_POLL_INTERVAL_MS,
@@ -47,6 +51,7 @@ import {
   firstCandidateIsVideo,
   pickPreloadCandidate,
   quizAudioPhase,
+  quizAudioTickStatus,
   quizFailedShouldClear,
   quizProgressSignature,
   quizQuestionStallShouldTrip,
@@ -859,6 +864,20 @@ export interface QuizAudioState {
   phase: QuizAudioPhase;
   muted: boolean;
   toggleMute: () => void;
+  /**
+   * The mediaKey this report belongs to (clock-lag fix F5,
+   * 2026-11-12): reports are LEVELS keyed by mediaKey — the
+   * report effect re-fires when the key changes even if the
+   * phase value is unchanged, so a consumer that starts
+   * listening at a question boundary (solo entering its
+   * question phase, the room screen's round-ready report)
+   * consumes the current level instead of waiting for an edge
+   * that may already have happened. Consumers match the key
+   * against the question/round they are showing before acting
+   * on a phase, which also keeps a previous question's level
+   * from being read as the new one's.
+   */
+  mediaKey: string;
 }
 
 /**
@@ -915,9 +934,14 @@ export function QuizAudioOnly({
 
   const reportRef = useRef(onStateChange);
   reportRef.current = onStateChange;
+  // F5 (2026-11-12): mediaKey is a report dependency — a new
+  // question/round re-reports the CURRENT phase level under
+  // its own key even when the phase value did not change, so
+  // the level can never be lost to a consumer that subscribed
+  // (or changed phase) after the edge. See QuizAudioState.
   useEffect(() => {
-    reportRef.current?.({ phase, muted, toggleMute });
-  }, [phase, muted, toggleMute]);
+    reportRef.current?.({ phase, muted, toggleMute, mediaKey });
+  }, [phase, muted, toggleMute, mediaKey]);
 
   // Surface rule: an audio candidate renders NOTHING (expo-audio
   // has no surface — the question stays surface-free); a video

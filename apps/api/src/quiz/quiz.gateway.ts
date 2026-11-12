@@ -61,6 +61,10 @@ interface AuthedSocket extends Socket {
  * - room:rematch       { roomId } — play-again vote on an ended room
  *   (owner feature, 2026-11-12; unanimity restarts the game in
  *   the same room — see QuizRoomsService.voteRematch)
+ * - room:round-ready   { roomId, roundNumber, state } — the
+ *   client's per-round audio report (F4, 2026-11-12): its round
+ *   audio is 'playing' or 'failed'; the round's startedAt is
+ *   stamped once every current member has reported (bounded)
  *
  * Authentication: the access token rides the handshake
  * (`auth.token`, or an `Authorization: Bearer …` header) and is
@@ -286,6 +290,25 @@ export class QuizGateway implements OnGatewayInit, OnGatewayConnection {
   ): Promise<QuizRoomAck> {
     return this.run(client, () =>
       this.roomsService!.voteRematch(this.user(client).userId, body?.roomId ?? ''),
+    );
+  }
+
+  @SubscribeMessage('room:round-ready')
+  roundReady(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody()
+    body: { roomId?: string; roundNumber?: number; state?: string },
+  ): Promise<QuizRoomAck> {
+    return this.run(
+      client,
+      () =>
+        this.roomsService!.reportRoundReady(
+          this.user(client).userId,
+          body?.roomId ?? '',
+          body?.roundNumber as number,
+          body?.state as 'playing' | 'failed',
+        ),
+      false,
     );
   }
 

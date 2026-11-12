@@ -393,6 +393,32 @@ function roomDoc(models: ReturnType<typeof makeFakeModels>, roomId: string) {
   return models.roomModel.docs.find((r) => String(r._id) === roomId)!;
 }
 
+/**
+ * F4 (clock batch, 2026-11-12): a round's answer window opens
+ * only once every current member has reported its audio ready
+ * (room:round-ready), or the start bound fires. Tests that play
+ * a round drive the window open through the REAL report path —
+ * every member reports 'playing' — after which the gate is
+ * gone and the tests' existing startedAt mutations (moving the
+ * stamp into the past to simulate elapsed time) behave exactly
+ * as they did before the gate existed.
+ */
+async function openRoundWindow(
+  models: ReturnType<typeof makeFakeModels>,
+  roomId: string,
+  roundNumber = 1,
+) {
+  const doc = roomDoc(models, roomId);
+  for (const p of doc.players as Record<string, unknown>[]) {
+    await models.service.reportRoundReady(
+      String(p.userId),
+      roomId,
+      roundNumber,
+      'playing',
+    );
+  }
+}
+
 describe('QuizRoomsService — lobby state machine', () => {
   it('creates a party room with the defaults; duels are capped at 2', async () => {
     const m = makeFakeModels();
@@ -618,14 +644,20 @@ describe('QuizRoomsService — game flow + scoring', () => {
       timeLimitSeconds: 30,
       countdownSeconds: 5,
     });
-    // Pre-round countdown (owner, 2026-11-10): the broadcast's
-    // startedAt — the moment the answer window opens — is
-    // stamped the countdown length into the future, and the
-    // client-facing round state carries the same stamp.
-    const startedAtMs = Date.parse(event!.payload.startedAt as string);
-    expect(startedAtMs).toBeGreaterThan(Date.now() + 4000);
-    expect(startedAtMs).toBeLessThan(Date.now() + 6000);
-    expect(Date.parse(liveRound.startedAt)).toBe(startedAtMs);
+    // Pre-round countdown (owner, 2026-11-10) + F4 start gate
+    // (2026-11-12): the first broadcast is the start-PENDING
+    // shape — no authoritative startedAt yet. baseStartAt is
+    // the countdown moment (the value the pre-F4 stamp carried),
+    // and the client-facing round state mirrors the pending
+    // shape.
+    expect(event!.payload.startedAt).toBeNull();
+    expect(event!.payload.startPending).toBe(true);
+    const baseStartAtMs = Date.parse(event!.payload.baseStartAt as string);
+    expect(baseStartAtMs).toBeGreaterThan(Date.now() + 4000);
+    expect(baseStartAtMs).toBeLessThan(Date.now() + 6000);
+    expect(liveRound.startedAt).toBeNull();
+    expect(liveRound.startPending).toBe(true);
+    expect(Date.parse(liveRound.baseStartAt as string)).toBe(baseStartAtMs);
     const theme = (event!.payload.theme ?? {}) as Record<string, unknown>;
     expect(theme.videoUrl).toBe('https://video/main.webm');
     // Owner doctrine (2026-11-10): the fixture's stored audioUrl
@@ -649,6 +681,27 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect(stored.themeId).toBe('theme-correct');
     expect(doc.usedThemeIds).toEqual(['theme-correct']);
     expect(doc.timerAuthority).toBeTruthy();
+
+    // F4: once every member reports its audio ready, the
+    // completion broadcast carries the authoritative startedAt
+    // (≈ now — the moment the last report landed) and the
+    // client state flips to the started shape.
+    await openRoundWindow(m, roomId);
+    const broadcasts = m.events.filter(
+      (e) => e.event === 'room:round-started',
+    );
+    expect(broadcasts).toHaveLength(2);
+    const completion = broadcasts[1];
+    expect(completion.payload.startPending).toBe(false);
+    const startedAtMs = Date.parse(completion.payload.startedAt as string);
+    expect(startedAtMs).toBeLessThanOrEqual(Date.now());
+    expect(startedAtMs).toBeGreaterThan(Date.now() - 5000);
+    const afterState = m.service.toRoomState(doc as never);
+    expect(afterState.rounds[0].startedAt).not.toBeNull();
+    expect(
+      Date.parse(afterState.rounds[0].startedAt as string),
+    ).toBe(startedAtMs);
+    expect(afterState.rounds[0].startPending).toBeUndefined();
   });
 
   it('answers during the pre-round countdown are refused, then accepted at the window', async () => {
@@ -671,9 +724,21 @@ describe('QuizRoomsService — game flow + scoring', () => {
     expect(round.endedAt).toBeFalsy();
     expect(doc.status).toBe('in_progress');
 
-    // Once the countdown ends, the same answer scores against
-    // the full window (elapsed measured from startedAt).
-    round.startedAt = new Date();
+    // F4 (2026-11-12): the GATE, not the timestamp, is the
+    // authority while the start is pending — even with the
+    // document's base moment moved into the past, the answer
+    // is still refused until every member has reported.
+    round.startedAt = new Date(Date.now() - 1000);
+    await expect(
+      m.service.submitAnswer(GUEST, roomId, 1, 'Correct EN'),
+    ).rejects.toThrow('Round has not started yet');
+    expect(round.answers).toHaveLength(0);
+
+    // Once every member has reported ready, the window opens:
+    // completeRoundStart re-stamps startedAt at the completion
+    // moment, so the same answer scores against the full
+    // window (elapsed measured from the authoritative stamp).
+    await openRoundWindow(m, roomId);
     const ack = await m.service.submitAnswer(GUEST, roomId, 1, 'Correct EN');
     expect(ack).toMatchObject({ success: true, correct: true, secondsRemaining: 30 });
   });
@@ -714,6 +779,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     const { roomId } = await startedParty(m);
     const doc = roomDoc(m, roomId);
     const round = (doc.rounds as Record<string, unknown>[])[0];
+    await openRoundWindow(m, roomId);
     // Pretend 10s elapsed of the 30s limit → 20s remaining.
     round.startedAt = new Date(Date.now() - 10_000);
 
@@ -768,9 +834,9 @@ describe('QuizRoomsService — game flow + scoring', () => {
     ).toBeUndefined();
     expect(m.rank.scheduled).toEqual([]);
 
-    // A member answer right after still works normally (past the
-    // pre-round countdown — the window opens at startedAt).
-    round.startedAt = new Date();
+    // A member answer right after still works normally (the
+    // window opened when every member reported ready — F4).
+    await openRoundWindow(m, roomId);
     const ack = await m.service.submitAnswer(HOST, roomId, 1, 'Correct EN');
     expect(ack).toMatchObject({ success: true, correct: true });
   });
@@ -780,6 +846,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
     const doc = roomDoc(m, roomId);
     const round = (doc.rounds as Record<string, unknown>[])[0];
+    await openRoundWindow(m, roomId);
     round.startedAt = new Date(Date.now() - 25_000); // 5s remaining
 
     const wrong = await m.service.submitAnswer(HOST, roomId, 1, 'Distractor1 EN');
@@ -813,7 +880,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     const doc = roomDoc(m, roomId);
     expect(doc.status).toBe('in_progress');
     const round = (doc.rounds as Record<string, unknown>[])[0];
-    round.startedAt = new Date(); // past the pre-round countdown
+    await openRoundWindow(m, roomId);
 
     const wrong = await m.service.submitAnswer(HOST, roomId, 1, 'Distractor1 EN');
     expect(wrong.correct).toBe(false);
@@ -839,10 +906,10 @@ describe('QuizRoomsService — game flow + scoring', () => {
       m.service.submitAnswer(HOST, roomId, 99, 'Correct EN'),
     ).rejects.toThrow('round_mismatch: expected 1, got 99');
 
-    // Past the pre-round countdown, answers are accepted.
+    // Once the start gate completes (F4), answers are accepted.
     const doc = roomDoc(m, roomId);
     const round = (doc.rounds as Record<string, unknown>[])[0];
-    round.startedAt = new Date();
+    await openRoundWindow(m, roomId);
     await m.service.submitAnswer(HOST, roomId, 1, 'Correct EN');
     await expect(
       m.service.submitAnswer(HOST, roomId, 1, 'Correct EN'),
@@ -854,7 +921,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
     const doc0 = roomDoc(m, roomId);
     const round0 = (doc0.rounds as Record<string, unknown>[])[0];
-    round0.startedAt = new Date(); // past the pre-round countdown
+    await openRoundWindow(m, roomId);
     await m.service.submitAnswer(HOST, roomId, 1, 'Distractor1 EN'); // wrong, 1/3
     // A player leaving mid-round shrinks the denominator: now 1 of
     // the remaining 2 has answered, so the next attempt hits the
@@ -905,7 +972,7 @@ describe('QuizRoomsService — game flow + scoring', () => {
     const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
     const docPre = roomDoc(m, roomId);
     const roundPre = (docPre.rounds as Record<string, unknown>[])[0];
-    roundPre.startedAt = new Date(); // past the pre-round countdown
+    await openRoundWindow(m, roomId);
     await m.service.submitAnswer(HOST, roomId, 1, 'Correct EN');
 
     const doc = roomDoc(m, roomId);
@@ -986,6 +1053,7 @@ describe('QuizRoomsService — room state trim (perf problem 15, B6)', () => {
     const rounds = doc.rounds as AnyDoc[];
 
     // Round 1: guest correct, host wrong → guest2 auto-locked.
+    await openRoundWindow(m, roomId, 1);
     rounds[0].startedAt = new Date(Date.now() - 10_000);
     const wrong1 = (rounds[0].options as string[]).find(
       (o) => o !== rounds[0].correctAnswer,
@@ -999,6 +1067,7 @@ describe('QuizRoomsService — room state trim (perf problem 15, B6)', () => {
     // host's gain is strictly smaller — the standings comparison
     // below must not hinge on tie order.
     await m.service.nextRound(HOST, roomId, 1);
+    await openRoundWindow(m, roomId, 2);
     rounds[1].startedAt = new Date(Date.now() - 15_000);
     const wrong2 = (rounds[1].options as string[]).find(
       (o) => o !== rounds[1].correctAnswer,
@@ -1118,6 +1187,7 @@ describe('QuizRoomsService — room state trim (perf problem 15, B6)', () => {
     const rounds = doc.rounds as AnyDoc[];
 
     // Finish round 1 (guest correct, host wrong, guest2 locked).
+    await openRoundWindow(m, roomId, 1);
     rounds[0].startedAt = new Date(Date.now() - 10_000);
     const wrong1 = (rounds[0].options as string[]).find(
       (o) => o !== rounds[0].correctAnswer,
@@ -1127,6 +1197,7 @@ describe('QuizRoomsService — room state trim (perf problem 15, B6)', () => {
 
     // Round 2 starts; one answer lands and the round stays live.
     await m.service.nextRound(HOST, roomId, 1);
+    await openRoundWindow(m, roomId, 2);
     rounds[1].startedAt = new Date(Date.now() - 10_000);
     await m.service.submitAnswer(GUEST, roomId, 2, rounds[1].correctAnswer as string);
     expect(rounds[1].endedAt).toBeFalsy();
@@ -1382,10 +1453,9 @@ describe('QuizRoomsService — room library cache (perf problem 6)', () => {
     // correct answer exists among the answered rows, so the
     // guest answers first.)
     const doc = roomDoc(m, roomId);
-    // Same clock trick as elsewhere in this file: answers open
-    // once startedAt passes; move it into the past.
-    ((doc.rounds as Record<string, unknown>[])[0] as Record<string, unknown>).startedAt =
-      new Date(Date.now() - 1000);
+    // F4: answers open once every member has reported ready;
+    // the completion re-stamps startedAt at that moment.
+    await openRoundWindow(m, roomId);
     await m.service.submitAnswer(GUEST, roomId, 1, 'Alpha EN');
     await m.service.submitAnswer(HOST, roomId, 1, 'Alpha EN');
     expect(doc.status).toBe('ended');
@@ -2000,7 +2070,8 @@ describe('QuizRoomsService — play again / rematch (owner feature, 2026-11-12)'
     const { roomId } = await startedParty(m, playerIds);
     const doc = roomDoc(m, roomId);
     const round = (doc.rounds as Record<string, unknown>[])[0];
-    round.startedAt = new Date(Date.now() - 1000); // window open
+    await openRoundWindow(m, roomId); // F4: all members reported → window open
+    round.startedAt = new Date(Date.now() - 1000); // 1s elapsed for scoring
     for (const id of playerIds.slice(0, -1)) {
       await m.service.submitAnswer(id, roomId, 1, 'Correct EN');
     }
@@ -2087,7 +2158,10 @@ describe('QuizRoomsService — play again / rematch (owner feature, 2026-11-12)'
     expect(m.rank.scheduled).toEqual([roomId]);
 
     // The rematch is a NEW game: ending it schedules its own.
+    // (Its round 1 carries a fresh start gate — opened through
+    // the same report path.)
     const round = rounds[0];
+    await openRoundWindow(m, roomId, 1);
     round.startedAt = new Date(Date.now() - 1000);
     await m.service.submitAnswer(HOST, roomId, 1, round.correctAnswer as string);
     expect(doc.status).toBe('ended');
@@ -2158,5 +2232,134 @@ describe('QuizRoomsService — play again / rematch (owner feature, 2026-11-12)'
     await expect(
       done.service.voteRematch(OUTSIDER, endedRoomId),
     ).rejects.toThrow('Player not in room');
+  });
+});
+
+describe('QuizRoomsService — round-start gate F4 (clock batch, 2026-11-12)', () => {
+  it('the round does not start until EVERY current member has reported', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
+    const doc = roomDoc(m, roomId);
+
+    await m.service.reportRoundReady(HOST, roomId, 1, 'playing');
+    await m.service.reportRoundReady(GUEST, roomId, 1, 'playing');
+    // 2 of 3: still pending — the state serves the pending
+    // shape and answers are refused; only the pending
+    // broadcast has gone out.
+    const state = m.service.toRoomState(doc as never);
+    expect(state.rounds[0].startedAt).toBeNull();
+    expect(state.rounds[0].startPending).toBe(true);
+    await expect(
+      m.service.submitAnswer(HOST, roomId, 1, 'Correct EN'),
+    ).rejects.toThrow('Round has not started yet');
+    expect(
+      m.events.filter((e) => e.event === 'room:round-started'),
+    ).toHaveLength(1);
+
+    const ack = await m.service.reportRoundReady(GUEST2, roomId, 1, 'playing');
+    expect(ack.success).toBe(true);
+    const after = m.service.toRoomState(doc as never);
+    expect(after.rounds[0].startedAt).not.toBeNull();
+    expect(after.rounds[0].startPending).toBeUndefined();
+    expect(
+      m.events.filter((e) => e.event === 'room:round-started'),
+    ).toHaveLength(2);
+  });
+
+  it('a failed report counts as ready (a dead chain must not hold the room)', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await startedParty(m);
+    const doc = roomDoc(m, roomId);
+    await m.service.reportRoundReady(HOST, roomId, 1, 'failed');
+    expect(m.service.toRoomState(doc as never).rounds[0].startedAt).toBeNull();
+    await m.service.reportRoundReady(GUEST, roomId, 1, 'playing');
+    expect(
+      m.service.toRoomState(doc as never).rounds[0].startedAt,
+    ).not.toBeNull();
+  });
+
+  it('the +10s bound starts the round with whoever reported; the silent member plays catch-up', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
+    const doc = roomDoc(m, roomId);
+    await m.service.reportRoundReady(HOST, roomId, 1, 'playing');
+    // GUEST + GUEST2 never report. The bound timer itself is a
+    // real ~15s setTimeout (base 5s + bound 10s) — the suite
+    // invokes the timer's own entry point directly, the same
+    // pattern the round-timer tests use for endRoundByTimer.
+    await (
+      m.service as unknown as {
+        forceRoundStartAtBound(id: string, round: number): Promise<void>;
+      }
+    ).forceRoundStartAtBound(roomId, 1);
+    const state = m.service.toRoomState(doc as never);
+    expect(state.rounds[0].startedAt).not.toBeNull();
+    expect(state.rounds[0].startPending).toBeUndefined();
+    // Catch-up: a member who never reported can still answer
+    // normally once the window is open.
+    const ack = await m.service.submitAnswer(GUEST, roomId, 1, 'Correct EN');
+    expect(ack.success).toBe(true);
+    expect(ack.correct).toBe(true);
+  });
+
+  it('a leaver stops being awaited and unblocks the start for the rest', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await startedParty(m, [HOST, GUEST, GUEST2]);
+    const doc = roomDoc(m, roomId);
+    await m.service.reportRoundReady(HOST, roomId, 1, 'playing');
+    await m.service.reportRoundReady(GUEST, roomId, 1, 'playing');
+    expect(m.service.toRoomState(doc as never).rounds[0].startedAt).toBeNull();
+    await m.service.leaveRoom(GUEST2, roomId);
+    expect(
+      m.service.toRoomState(doc as never).rounds[0].startedAt,
+    ).not.toBeNull();
+  });
+
+  it('scoring is unchanged after the start: elapsed runs from the authoritative stamp', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await startedParty(m);
+    const doc = roomDoc(m, roomId);
+    const round = (doc.rounds as Record<string, unknown>[])[0];
+    await openRoundWindow(m, roomId);
+    // 10s after the authoritative start: identical numbers to
+    // the pre-F4 owner formula (20s remaining × (1 pending + 1)).
+    round.startedAt = new Date(Date.now() - 10_000);
+    const ack = await m.service.submitAnswer(GUEST, roomId, 1, 'Correct EN');
+    expect(ack).toMatchObject({
+      success: true,
+      correct: true,
+      baseScore: 40,
+      bonusScore: 0,
+      secondsRemaining: 20,
+    });
+  });
+
+  it('reports are idempotent, late/stale reports are no-ops, non-members are refused', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await startedParty(m);
+    await expect(
+      m.service.reportRoundReady(OUTSIDER, roomId, 1, 'playing'),
+    ).rejects.toThrow('Player not in room');
+    await expect(
+      m.service.reportRoundReady(HOST, roomId, 1, 'bogus' as never),
+    ).rejects.toThrow('Invalid round-ready state');
+
+    await m.service.reportRoundReady(HOST, roomId, 1, 'playing');
+    await m.service.reportRoundReady(HOST, roomId, 1, 'playing'); // repeat: fine
+    await m.service.reportRoundReady(GUEST, roomId, 1, 'playing'); // completes
+    const doc = roomDoc(m, roomId);
+    const startedAt = (doc.rounds as Record<string, unknown>[])[0].startedAt;
+    expect(startedAt).toBeTruthy();
+
+    // A stale-round report and a post-start report change
+    // nothing: no re-stamp, no extra broadcast.
+    await m.service.reportRoundReady(HOST, roomId, 99, 'playing');
+    await m.service.reportRoundReady(GUEST, roomId, 1, 'failed');
+    expect((doc.rounds as Record<string, unknown>[])[0].startedAt).toBe(
+      startedAt,
+    );
+    expect(
+      m.events.filter((e) => e.event === 'room:round-started'),
+    ).toHaveLength(2);
   });
 });

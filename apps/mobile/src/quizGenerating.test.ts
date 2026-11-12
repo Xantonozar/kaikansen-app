@@ -1,10 +1,13 @@
 import { describe, expect, it } from '@jest/globals';
 import {
+  GENERATING_ERROR_MIN_DISPLAY_MS,
   GENERATING_MIN_DISPLAY_MS,
   GENERATING_PROGRESS_CAP,
   GENERATING_STEPS,
+  SETUP_MEDIA_BOUND_MS,
   generatingProgressAt,
   generatingStageAt,
+  setupWindowShouldExit,
 } from './quizGenerating';
 
 describe('generating screen cadence (approved design cfc7c9ac)', () => {
@@ -16,19 +19,24 @@ describe('generating screen cadence (approved design cfc7c9ac)', () => {
     ]);
   });
 
-  it('keeps a 700 ms minimum display (inside the 600–900 brief)', () => {
-    expect(GENERATING_MIN_DISPLAY_MS).toBe(700);
+  it('keeps the deliberate 4.5 s setup-window minimum (2026-11-12)', () => {
+    // Was 700 ms of anti-flash pacing before the setup window;
+    // the window now exists so Q1's pre-mounted player can
+    // stream a head start behind the screen (diagnosis §6).
+    expect(GENERATING_MIN_DISPLAY_MS).toBe(4500);
+    // A failed create still uses the short floor only.
+    expect(GENERATING_ERROR_MIN_DISPLAY_MS).toBe(700);
   });
 
   it('starts on the first step', () => {
     expect(generatingStageAt(0)).toBe(0);
-    expect(generatingStageAt(599)).toBe(0);
+    expect(generatingStageAt(1499)).toBe(0);
   });
 
-  it('completes step 1 at 600 ms and step 2 at 2000 ms', () => {
-    expect(generatingStageAt(600)).toBe(1);
-    expect(generatingStageAt(1999)).toBe(1);
-    expect(generatingStageAt(2000)).toBe(2);
+  it('completes step 1 at 1500 ms and step 2 at 3000 ms (re-spaced over the window)', () => {
+    expect(generatingStageAt(1500)).toBe(1);
+    expect(generatingStageAt(2999)).toBe(1);
+    expect(generatingStageAt(3000)).toBe(2);
   });
 
   it('never advances past the last step, however long the wait', () => {
@@ -67,5 +75,71 @@ describe('generating screen progress (never claims completion)', () => {
     );
     expect(generatingProgressAt(10 * 60_000)).toBeGreaterThan(0.85);
     expect(generatingProgressAt(10 * 60_000)).toBeLessThan(1);
+  });
+});
+
+describe('setup window exit gate (2026-11-12, diagnosis §6)', () => {
+  it('never exits before the create lands, however long the wait', () => {
+    expect(
+      setupWindowShouldExit({
+        createApplied: false,
+        elapsedMs: 60_000,
+        mediaDecided: true,
+        mediaMountedMs: 60_000,
+      }),
+    ).toBe(false);
+  });
+
+  it('never exits inside the 4.5 s minimum, even with media already decided', () => {
+    expect(
+      setupWindowShouldExit({
+        createApplied: true,
+        elapsedMs: GENERATING_MIN_DISPLAY_MS - 1,
+        mediaDecided: true,
+        mediaMountedMs: 1_000,
+      }),
+    ).toBe(false);
+  });
+
+  it('exits at the minimum once Q1 media has decided', () => {
+    expect(
+      setupWindowShouldExit({
+        createApplied: true,
+        elapsedMs: GENERATING_MIN_DISPLAY_MS,
+        mediaDecided: true,
+        mediaMountedMs: 2_000,
+      }),
+    ).toBe(true);
+  });
+
+  it('holds past the minimum while media is undecided, exits at the 10 s mount bound', () => {
+    expect(SETUP_MEDIA_BOUND_MS).toBe(10_000);
+    expect(
+      setupWindowShouldExit({
+        createApplied: true,
+        elapsedMs: GENERATING_MIN_DISPLAY_MS + 3_000,
+        mediaDecided: false,
+        mediaMountedMs: SETUP_MEDIA_BOUND_MS - 1,
+      }),
+    ).toBe(false);
+    expect(
+      setupWindowShouldExit({
+        createApplied: true,
+        elapsedMs: GENERATING_MIN_DISPLAY_MS + 6_000,
+        mediaDecided: false,
+        mediaMountedMs: SETUP_MEDIA_BOUND_MS,
+      }),
+    ).toBe(true);
+  });
+
+  it('a decision landing after the minimum exits immediately (no extra wait)', () => {
+    expect(
+      setupWindowShouldExit({
+        createApplied: true,
+        elapsedMs: GENERATING_MIN_DISPLAY_MS + 1_200,
+        mediaDecided: true,
+        mediaMountedMs: 5_700,
+      }),
+    ).toBe(true);
   });
 });

@@ -65,6 +65,21 @@ import {
  * mediaKey + URL: a slice in flight or ready for a key is never
  * restarted; a FAILED prefetch leaves no entry, so the later
  * reveal may retry once.
+ *
+ * F6 grace (clock batch, 2026-11-12): a question that starts
+ * while its slice is STILL IN FLIGHT no longer throws the
+ * transfer's progress away. The screen holds its chain freeze
+ * for a short bounded grace (QUIZ_SLICE_GRACE_MS), waiting on
+ * the entry's settle promise (whenQuizSliceSettles); if the
+ * slice finalizes inside the grace it leads the chain exactly
+ * as a slice that landed early would have. The grace is free
+ * under the clock doctrine — the answer clock starts on
+ * genuine audio start, so a loading beat costs no answer
+ * time — and it is bounded so a stuck transfer delays the
+ * freeze by at most the grace, never more. Partial-byte
+ * adoption (starting playback from an UNFINISHED slice file)
+ * was evaluated and NOT adopted — see the batch report
+ * BATCH-109-2026-11-12.md §F6 for the mechanism-A/B evidence.
  */
 
 export const quizSlicesSupported = Platform.OS !== 'web';
@@ -99,6 +114,32 @@ export function sliceIsUsable(
   minBytes: number = QUIZ_SLICE_MIN_BYTES,
 ): boolean {
   return sizeBytes >= minBytes;
+}
+
+/**
+ * F6 grace bound (2026-11-12): how long a starting question
+ * may hold its chain freeze for an in-flight slice to
+ * finalize. ~3 s at the owner's measured ~87 KB/s worst-case
+ * flow is ~260 KB — a large share of the remaining distance
+ * for a slice that spent a whole question + feedback window
+ * downloading — while a slice nowhere near done expires the
+ * grace and the question proceeds exactly as before.
+ */
+export const QUIZ_SLICE_GRACE_MS = 3_000;
+
+/** A mediaKey's slice situation, for the freeze decision. */
+export type QuizSliceState = 'none' | 'fetching' | 'ready';
+
+/**
+ * The F6 grace decision: the freeze waits ONLY for a slice
+ * that is actually in flight. 'ready' needs no wait (the
+ * freeze reads it immediately) and 'none' must never wait —
+ * there is nothing coming, and holding would only delay the
+ * question's own load (and its failed/empty verdict paths)
+ * for nothing.
+ */
+export function sliceGraceApplies(state: QuizSliceState): boolean {
+  return state === 'fetching';
 }
 
 /** The slice's file name for a mediaKey (`game:3` → `game_3.ogg`).
@@ -150,6 +191,13 @@ interface SliceEntry {
   /** The live question's slice: exempt from eviction. */
   pinned: boolean;
   task: DownloadResumable | null;
+  /**
+   * The in-flight fetch's own promise (F6): resolves when the
+   * fetch settles — ready, discarded, or failed — and never
+   * rejects. The question-start grace waits on THIS rather
+   * than polling the registry.
+   */
+  settled: Promise<void>;
 }
 
 const slices = new Map<string, SliceEntry>();
@@ -190,8 +238,11 @@ export function prefetchQuizSlice(
   const existing = slices.get(mediaKey);
   if (existing && existing.url === url) {
     // Dedupe: in flight or ready — both reveals name the same
-    // slice; never restart it.
-    return Promise.resolve();
+    // slice; never restart it. Returns the entry's OWN settle
+    // promise (F6): a caller waiting on finalization (the
+    // question-start grace) must observe the real transfer,
+    // not an already-resolved stand-in.
+    return existing.settled;
   }
   if (existing) evictEntry(existing);
   // Keep only the target slice among the unpinned: yesterday's
@@ -209,9 +260,11 @@ export function prefetchQuizSlice(
     status: 'fetching',
     pinned: false,
     task: null,
+    settled: Promise.resolve(),
   };
   slices.set(mediaKey, entry);
-  return runSliceFetch(entry);
+  entry.settled = runSliceFetch(entry);
+  return entry.settled;
 }
 
 async function runSliceFetch(entry: SliceEntry): Promise<void> {
@@ -268,6 +321,27 @@ async function runSliceFetch(entry: SliceEntry): Promise<void> {
 export function getQuizSliceUri(mediaKey: string): string | null {
   const entry = slices.get(mediaKey);
   return entry && entry.status === 'ready' ? entry.uri : null;
+}
+
+/** A mediaKey's slice situation right now (F6 freeze decision). */
+export function getQuizSliceState(mediaKey: string): QuizSliceState {
+  const entry = slices.get(mediaKey);
+  if (!entry) return 'none';
+  return entry.status;
+}
+
+/**
+ * The promise that resolves when a mediaKey's IN-FLIGHT slice
+ * settles (ready, discarded, or failed — it never rejects), or
+ * null when no fetch is in flight for the key. The F6 grace
+ * races this against QUIZ_SLICE_GRACE_MS; on expiry the caller
+ * simply re-reads getQuizSliceUri, exactly like a freeze with
+ * no grace.
+ */
+export function whenQuizSliceSettles(mediaKey: string): Promise<void> | null {
+  const entry = slices.get(mediaKey);
+  if (!entry || entry.status !== 'fetching') return null;
+  return entry.settled;
 }
 
 /**

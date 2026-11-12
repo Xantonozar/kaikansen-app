@@ -17,6 +17,17 @@ import { useTheme } from '../theme-context';
  * it until the question's audio actually starts, so load time
  * never eats the displayed window; the caller moves the deadline
  * to the real start moment as it unpauses.
+ *
+ * `holdSeconds` (clock-lag fix F3, 2026-11-12): while non-null
+ * the ring renders EXACTLY that many seconds remaining and never
+ * ticks or expires — solo passes the value captured at the
+ * answer moment (mediaEngine.ringHoldSecondsAtAnswer) through
+ * the feedback window, so the displayed clock stops when the
+ * answer lands instead of counting down over the reveal. It is
+ * a distinct mode from `paused` on purpose: `paused` means
+ * "not started yet, show the full window", `holdSeconds` means
+ * "finished, show where it stopped". Hold wins when both are
+ * set.
  */
 export function CountdownRing({
   deadlineMs,
@@ -27,6 +38,7 @@ export function CountdownRing({
   caption,
   variant = 'standard',
   paused = false,
+  holdSeconds,
 }: {
   deadlineMs: number;
   totalSeconds: number;
@@ -34,6 +46,9 @@ export function CountdownRing({
   size?: number;
   /** Held at the full window: no ticking, no expiry. */
   paused?: boolean;
+  /** Frozen at this many seconds remaining: no ticking, no
+   *  expiry. Null/undefined = not held (see the docblock). */
+  holdSeconds?: number | null;
   /** Large rings only: a glyph rendered above the seconds number
    *  (the solo question screen's music note / buffering spinner). */
   glyph?: ReactNode;
@@ -55,6 +70,13 @@ export function CountdownRing({
   expireRef.current = onExpire;
 
   useEffect(() => {
+    if (holdSeconds != null) {
+      // Frozen at the answer moment (see the docblock): render
+      // the held value verbatim — no ticking, no expiry, and
+      // never the deadline's live remainder.
+      setRemainingMs(Math.max(0, holdSeconds * 1000));
+      return;
+    }
     if (paused) {
       // Held at the full window (see the docblock): no ticking,
       // no expiry — the deadline takes over when `paused` lifts.
@@ -74,7 +96,7 @@ export function CountdownRing({
     tick();
     const id = setInterval(tick, 100);
     return () => clearInterval(id);
-  }, [deadlineMs, paused, totalSeconds]);
+  }, [deadlineMs, paused, totalSeconds, holdSeconds]);
 
   const totalMs = Math.max(1, totalSeconds * 1000);
   const fraction = Math.min(1, Math.max(0, remainingMs / totalMs));

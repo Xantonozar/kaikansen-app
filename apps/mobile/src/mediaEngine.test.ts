@@ -21,7 +21,9 @@ import {
   QUIZ_QUESTION_STALL_BUDGET_MS,
   createQuizStallTracker,
   quizAudioPhase,
+  quizAudioTickStatus,
   quizFailedShouldClear,
+  ringHoldSecondsAtAnswer,
   quizProgressSignature,
   quizQuestionStallShouldTrip,
   quizSampleStarted,
@@ -1465,5 +1467,183 @@ describe('buffer package — connection kind + video buffer profiles', () => {
         connection: 'metered',
       }),
     ).toEqual(watchBufferOptions('metered'));
+  });
+});
+
+describe('clock-lag fixes F1 + F2 (2026-11-12, QUIZ-CLOCK-LAG-DIAGNOSIS)', () => {
+  const phaseOf = (status: QuizVideoStatus) =>
+    quizAudioPhase({
+      failed: false,
+      hasUrl: true,
+      holdPending: false,
+      status,
+    });
+
+  it('F1 — a transient error status is buffering, never a clock start', () => {
+    // The field sequence: candidate A dies mid-chain; the render
+    // between the advance and the fallback's load derives the
+    // phase from A's stale error status. Pre-fix that read
+    // 'playing' and started the clock at the moment of death.
+    expect(phaseOf('error')).toBe('buffering');
+    expect(soloClockStartsOnPhase(phaseOf('error'))).toBe(false);
+  });
+
+  it('F1 — the error does not start the clock; the fallback’s genuine start does', () => {
+    const phases: string[] = [];
+    phases.push(phaseOf('error')); // candidate A died
+    phases.push(phaseOf('loading')); // fallback issued, loading
+    phases.push(phaseOf('readyToPlay')); // fallback genuinely ready
+    expect(phases).toEqual(['buffering', 'buffering', 'playing']);
+    expect(soloClockStartsOnPhase(phases[2] as never)).toBe(true);
+  });
+
+  it('F1 — the verdict still outranks an error status (failed latch first)', () => {
+    // When the chain is exhausted the watchdog latches failed;
+    // that verdict — not the error mapping — starts the clock.
+    expect(
+      quizAudioPhase({
+        failed: true,
+        hasUrl: true,
+        holdPending: false,
+        status: 'error',
+      }),
+    ).toBe('failed');
+    expect(
+      quizAudioPhase({
+        failed: false,
+        hasUrl: false,
+        holdPending: false,
+        status: 'error',
+      }),
+    ).toBe('empty');
+  });
+
+  it('F2 — the audio tick status: no snapshot and errors behave as before', () => {
+    expect(quizAudioTickStatus(null)).toBe('loading');
+    expect(
+      quizAudioTickStatus({
+        isLoaded: false,
+        playing: false,
+        currentTime: 0,
+        error: 'network',
+      }),
+    ).toBe('error');
+    expect(
+      quizAudioTickStatus({
+        isLoaded: true,
+        playing: true,
+        currentTime: 3,
+        error: 'late error',
+      }),
+    ).toBe('error');
+  });
+
+  it('F2 — loaded alone is NOT a start: metadata landed, buffer still filling', () => {
+    // The pre-fix mapping returned 'readyToPlay' here and the
+    // clock started seconds before any audible sample.
+    expect(
+      quizAudioTickStatus({ isLoaded: true, playing: false, currentTime: 0 }),
+    ).toBe('loading');
+    expect(
+      phaseOf(
+        quizAudioTickStatus({
+          isLoaded: true,
+          playing: false,
+          currentTime: 0,
+        }),
+      ),
+    ).toBe('buffering');
+  });
+
+  it('F2 — a genuine start is playing-flag OR position past zero (the watchdog test)', () => {
+    expect(
+      quizAudioTickStatus({ isLoaded: true, playing: true, currentTime: 0 }),
+    ).toBe('readyToPlay');
+    expect(
+      quizAudioTickStatus({
+        isLoaded: true,
+        playing: false,
+        currentTime: 0.25,
+      }),
+    ).toBe('readyToPlay');
+    // Not loaded yet: neither signal can make it ready.
+    expect(
+      quizAudioTickStatus({ isLoaded: false, playing: true, currentTime: 0 }),
+    ).toBe('loading');
+    expect(
+      quizAudioTickStatus({ isLoaded: false, playing: false, currentTime: 0 }),
+    ).toBe('loading');
+  });
+});
+
+describe('answer-moment ring freeze F3 (2026-11-12)', () => {
+  const T0 = 1_700_000_000_000;
+
+  it('running clock: the hold is the remainder at the answer moment', () => {
+    // Clock started at T0 with a 20s window; answered 7.5s in.
+    expect(
+      ringHoldSecondsAtAnswer({
+        clockRunning: true,
+        deadlineMs: T0 + 20_000,
+        answeredAtMs: T0 + 7_500,
+        totalSeconds: 20,
+      }),
+    ).toBe(12.5);
+    // Answered the instant the clock started: the full window.
+    expect(
+      ringHoldSecondsAtAnswer({
+        clockRunning: true,
+        deadlineMs: T0 + 20_000,
+        answeredAtMs: T0,
+        totalSeconds: 20,
+      }),
+    ).toBe(20);
+  });
+
+  it('the held value is time-invariant: recomputing it later in feedback changes nothing', () => {
+    // The freeze contract: the value captured at submit IS the
+    // value the ring renders for the whole feedback window — the
+    // ring's hold mode renders it verbatim and never re-derives
+    // from the deadline, so deadline − now drift cannot leak in.
+    const atSubmit = ringHoldSecondsAtAnswer({
+      clockRunning: true,
+      deadlineMs: T0 + 20_000,
+      answeredAtMs: T0 + 7_500,
+      totalSeconds: 20,
+    });
+    expect(atSubmit).toBe(12.5);
+  });
+
+  it('clock never started (answered during the media wait): the full window', () => {
+    expect(
+      ringHoldSecondsAtAnswer({
+        clockRunning: false,
+        deadlineMs: T0 + 20_000,
+        answeredAtMs: T0 + 3_000,
+        totalSeconds: 20,
+      }),
+    ).toBe(20);
+  });
+
+  it('a timeout racing the tap clamps to 0, never negative', () => {
+    expect(
+      ringHoldSecondsAtAnswer({
+        clockRunning: true,
+        deadlineMs: T0 + 20_000,
+        answeredAtMs: T0 + 21_000,
+        totalSeconds: 20,
+      }),
+    ).toBe(0);
+  });
+
+  it('never exceeds the window even if the deadline sits beyond it', () => {
+    expect(
+      ringHoldSecondsAtAnswer({
+        clockRunning: true,
+        deadlineMs: T0 + 25_000,
+        answeredAtMs: T0,
+        totalSeconds: 20,
+      }),
+    ).toBe(20);
   });
 });
