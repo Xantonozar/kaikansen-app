@@ -485,6 +485,80 @@ describe('Quiz rooms over Socket.IO (e2e)', () => {
     expect(models.historyRows).toHaveLength(2);
   }, 30000);
 
+  it('play again: unanimous rematch votes restart the game in the same room, RP applied once per game', async () => {
+    const rowsBefore = models.historyRows.length;
+    const host = await connect(tokenFor(HOST, 'host'));
+    const guest = await connect(tokenFor(GUEST, 'guest'));
+
+    const created = await emitAck(host, 'room:create', {
+      roomType: 'party',
+      poolMode: 'random',
+      guessType: 'anime',
+      roundCount: 1,
+      matchmaking: 'invite',
+    });
+    const roomId = created.roomId as string;
+    await emitAck(guest, 'room:join', { roomCode: created.roomCode });
+    await emitAck(host, 'room:ready', { roomId });
+    await emitAck(guest, 'room:ready', { roomId });
+
+    const roundStarted = waitFor(guest, 'room:round-started');
+    await emitAck(host, 'room:start', { roomId });
+    const startPayload = (await roundStarted) as unknown as Record<string, unknown>;
+    const windowOpensAt = Date.parse(startPayload.startedAt as string);
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.max(0, windowOpensAt - Date.now()) + 100),
+    );
+
+    // Guest's correct answer ends the 1-round game (host auto-locked).
+    const guestRank = waitFor(
+      guest,
+      'room:rank-updated',
+      (p: never) => (p as Record<string, unknown>).userId === GUEST,
+    );
+    const answerAck = await emitAck(guest, 'room:answer', {
+      roomId,
+      roundNumber: 1,
+      submittedAnswer: 'Correct EN',
+    });
+    expect(answerAck.correct).toBe(true);
+    await guestRank; // game 1's RP has been applied
+    expect(models.historyRows).toHaveLength(rowsBefore + 2);
+
+    // Host votes: the count shows on state and broadcasts; no restart yet.
+    const voteBroadcast = waitFor(host, 'room:rematch-vote');
+    const hostVote = await emitAck(host, 'room:rematch', { roomId });
+    expect(hostVote.success).toBe(true);
+    expect(hostVote.gameRestarted).toBeUndefined();
+    expect(
+      (hostVote.room as Record<string, unknown>).rematchVotedUserIds,
+    ).toEqual([HOST]);
+    const votePayload = (await voteBroadcast) as unknown as Record<string, unknown>;
+    expect(votePayload).toMatchObject({ userId: HOST, votes: 1, total: 2 });
+
+    // Guest's vote completes unanimity: the game restarts in
+    // the same room — fresh round 1, scores zeroed — and game
+    // 1's RP is NOT applied a second time.
+    const rematchStarted = waitFor(host, 'room:rematch-started');
+    const rematchRound = waitFor(host, 'room:round-started');
+    const guestVote = await emitAck(guest, 'room:rematch', { roomId });
+    expect(guestVote.success).toBe(true);
+    expect(guestVote.gameRestarted).toBe(true);
+    const restartedPayload = (await rematchStarted) as unknown as Record<
+      string,
+      unknown
+    >;
+    const restartedRoom = restartedPayload.room as Record<string, unknown>;
+    expect(restartedRoom.roomId).toBe(roomId);
+    expect(restartedRoom.status).toBe('in_progress');
+    for (const p of restartedRoom.players as Record<string, unknown>[]) {
+      expect(p.totalScore).toBe(0);
+    }
+    const roundPayload = (await rematchRound) as unknown as Record<string, unknown>;
+    expect(roundPayload.round).toBe(1);
+    expect(models.historyRows).toHaveLength(rowsBefore + 2);
+  }, 30000);
+
   it('server timer ends an unanswered round on its own', async () => {
     const host = await connect(tokenFor(HOST, 'host'));
     const guest = await connect(tokenFor(GUEST, 'guest'));

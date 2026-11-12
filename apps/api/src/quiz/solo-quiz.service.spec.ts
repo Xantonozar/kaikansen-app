@@ -945,6 +945,321 @@ describe('SoloQuizService — earlier reveal (part 5, 2026-11-11)', () => {
   });
 });
 
+describe('SoloQuizService — personal-pool options (owner ruling, 2026-11-12)', () => {
+  /* Fixtures: personal themes carry 'Mine …' values and are NOT
+     popular; popular sentinels carry 'Popular …' values and are
+     never in a personal pool. The fake $sample takes the first N
+     matches in array order, so option composition is exact. */
+  function personalTheme(id: string, n: number, extra: Record<string, unknown> = {}) {
+    return {
+      _id: id,
+      slug: `${id}-slug`,
+      songTitle: `Mine Song ${n}`,
+      animeTitle: `Mine Anime ${n}`,
+      animeTitleEnglish: `Mine Anime ${n} EN`,
+      animeTitleAlternative: [],
+      artistName: `Mine Artist ${n}`,
+      anilistId: 5000 + n,
+      animeCoverImage: null,
+      animeCoverImageSmall: null,
+      type: 'OP',
+      sequence: 1,
+      entries: [{ atEntryId: 7000 + n }],
+      videoUrl: `https://v.animethemes.moe/Mine${n}-OP1.webm`,
+      audioUrl: null,
+      isPopular: false,
+      ...extra,
+    };
+  }
+
+  function popularTheme(id: string, n: number, extra: Record<string, unknown> = {}) {
+    return {
+      ...personalTheme(id, n, extra),
+      songTitle: `Popular Song ${n}`,
+      animeTitle: `Popular Anime ${n}`,
+      animeTitleEnglish: `Popular Anime ${n} EN`,
+      artistName: `Popular Artist ${n}`,
+      anilistId: 9000 + n,
+      videoUrl: `https://v.animethemes.moe/Popular${n}-OP1.webm`,
+      isPopular: true,
+    };
+  }
+
+  const valueOf = (t: Record<string, unknown>, quizType: string): string =>
+    quizType === 'anime'
+      ? (t.animeTitleEnglish as string)
+      : quizType === 'title'
+        ? (t.songTitle as string)
+        : (t.artistName as string);
+
+  /** Plays a full game (skipping every question) and returns
+      each served question's options with its correct value. */
+  async function playGame(
+    service: SoloQuizService,
+    gameId: string,
+    firstOptions: string[],
+  ): Promise<{ options: string[]; correctValue: string }[]> {
+    const seen: { options: string[]; correctValue: string }[] = [];
+    let options = firstOptions;
+    for (let i = 0; i < 10; i++) {
+      const res = await service.submitAnswer(USER_1, gameId, null);
+      seen.push({ options, correctValue: res.correctValue });
+      if (res.gameOver) break;
+      options = res.nextQuestion!.options;
+    }
+    return seen;
+  }
+
+  function seedCatalogue(
+    models: ReturnType<typeof makeFakeModels>,
+    docs: Record<string, unknown>[],
+  ) {
+    models.themeModel.docs.splice(0, models.themeModel.docs.length, ...docs);
+  }
+
+  function seedPool(
+    models: ReturnType<typeof makeFakeModels>,
+    source: 'anilist' | 'listened',
+    personal: Record<string, unknown>[],
+  ) {
+    if (source === 'listened') {
+      for (const t of personal) {
+        models.history.push({ userId: USER_1, themeId: t._id });
+      }
+    } else {
+      const user = models.users.find((u) => u._id === USER_1)!;
+      (user.anilist as { completedMediaIds: number[] }).completedMediaIds =
+        personal.map((t) => t.anilistId as number);
+    }
+  }
+
+  it.each([
+    ['anilist', 'anime'],
+    ['anilist', 'title'],
+    ['anilist', 'artist'],
+    ['listened', 'anime'],
+    ['listened', 'title'],
+    ['listened', 'artist'],
+  ] as const)(
+    'pin 1 — %s × %s: every option comes from the personal pool when it can supply 3',
+    async (source, quizType) => {
+      const { service, models } = makeService();
+      const popular = Array.from({ length: 6 }, (_, i) =>
+        popularTheme(`pop-${i + 1}`, i + 1),
+      );
+      const personal = Array.from({ length: 12 }, (_, i) =>
+        personalTheme(`mine-${i + 1}`, i + 1),
+      );
+      // Sentinels first: any accidental popular draw is visible.
+      seedCatalogue(models, [...popular, ...personal]);
+      seedPool(models, source, personal);
+
+      const personalValues = new Set(personal.map((t) => valueOf(t, quizType)));
+      const popularValues = new Set(popular.map((t) => valueOf(t, quizType)));
+
+      const state = await service.createGame(USER_1, { quizType, source });
+      const seen = await playGame(service, state.gameId, state.question!.options);
+      expect(seen).toHaveLength(10);
+      for (const q of seen) {
+        expect(q.options).toHaveLength(4);
+        expect(new Set(q.options).size).toBe(4); // D2: no duplicates
+        expect(q.options).toContain(q.correctValue);
+        for (const option of q.options) {
+          expect(popularValues.has(option)).toBe(false);
+          expect(personalValues.has(option)).toBe(true);
+        }
+      }
+    },
+  );
+
+  it('pin 2 — random games still draw every distractor from the popular pool', async () => {
+    const { service, models } = makeService();
+    const hidden = Array.from({ length: 4 }, (_, i) =>
+      personalTheme(`hidden-${i + 1}`, i + 1),
+    );
+    const popular = Array.from({ length: 12 }, (_, i) =>
+      popularTheme(`pop-${i + 1}`, i + 1),
+    );
+    // Non-popular themes first: both draws must skip them.
+    seedCatalogue(models, [...hidden, ...popular]);
+
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    let options = state.question!.options;
+    for (let i = 0; i < 3; i++) {
+      expect(options).toHaveLength(4);
+      for (const option of options) {
+        expect(option.startsWith('Popular Anime')).toBe(true);
+        expect(option.startsWith('Mine Anime')).toBe(false);
+      }
+      const res = await service.submitAnswer(USER_1, state.gameId, null);
+      options = res.nextQuestion!.options;
+    }
+  });
+
+  it('pin 3 — small pool: 2 personal values + exactly 1 popular fill, 4 distinct', async () => {
+    const { service, models } = makeService();
+    const mk = (id: string, anime: string, n: number) => ({
+      ...personalTheme(id, n),
+      animeTitle: anime,
+      animeTitleEnglish: `${anime} EN`,
+    });
+    const personal = [
+      mk('pa-1', 'Pool A', 1),
+      mk('pa-2', 'Pool A', 2),
+      mk('pa-3', 'Pool A', 3),
+      mk('pa-4', 'Pool A', 4),
+      mk('pb-1', 'Pool B', 5),
+      mk('pb-2', 'Pool B', 6),
+      mk('pb-3', 'Pool B', 7),
+      mk('pc-1', 'Pool C', 8),
+      mk('pc-2', 'Pool C', 9),
+      mk('pc-3', 'Pool C', 10),
+    ];
+    const popular = Array.from({ length: 5 }, (_, i) =>
+      popularTheme(`pop-${i + 1}`, i + 1),
+    );
+    seedCatalogue(models, [...personal, ...popular]);
+    seedPool(models, 'listened', personal);
+
+    const state = await service.createGame(USER_1, {
+      quizType: 'anime',
+      source: 'listened',
+    });
+    // Q1's correct theme is Pool A's first theme; the pool can
+    // only offer Pool B + Pool C as wrong anime — the third
+    // distractor is the popular fill (D1), never a duplicate.
+    expect(new Set(state.question!.options).size).toBe(4);
+    expect([...state.question!.options].sort()).toEqual(
+      ['Pool A EN', 'Pool B EN', 'Pool C EN', 'Popular Anime 1 EN'].sort(),
+    );
+
+    const seen = await playGame(service, state.gameId, state.question!.options);
+    expect(seen).toHaveLength(10);
+    for (const q of seen) {
+      expect(new Set(q.options).size).toBe(4);
+    }
+  });
+
+  it('pin 4 — zero-yield pool (one anime, anime type): all 3 distractors are the popular fill and the game completes', async () => {
+    const { service, models } = makeService();
+    const personal = Array.from({ length: 10 }, (_, i) => ({
+      ...personalTheme(`solo-${i + 1}`, i + 1),
+      animeTitle: 'Solo Anime',
+      animeTitleEnglish: 'Solo Anime EN',
+      anilistId: 6001,
+    }));
+    const popular = Array.from({ length: 5 }, (_, i) =>
+      popularTheme(`pop-${i + 1}`, i + 1),
+    );
+    seedCatalogue(models, [...personal, ...popular]);
+    seedPool(models, 'anilist', personal);
+
+    const state = await service.createGame(USER_1, {
+      quizType: 'anime',
+      source: 'anilist',
+    });
+    expect([...state.question!.options].sort()).toEqual(
+      [
+        'Solo Anime EN',
+        'Popular Anime 1 EN',
+        'Popular Anime 2 EN',
+        'Popular Anime 3 EN',
+      ].sort(),
+    );
+
+    const seen = await playGame(service, state.gameId, state.question!.options);
+    expect(seen).toHaveLength(10); // D1: the game never refuses
+    for (const q of seen) {
+      expect(q.correctValue).toBe('Solo Anime EN');
+      expect(
+        q.options.filter((o) => o.startsWith('Popular Anime')),
+      ).toHaveLength(3);
+    }
+  });
+
+  it('pin 5 — dedup: a pool of 2 artists yields 4 distinct options for artist games', async () => {
+    const { service, models } = makeService();
+    const personal = Array.from({ length: 10 }, (_, i) => ({
+      ...personalTheme(`art-${i + 1}`, i + 1),
+      artistName: i < 4 ? 'Pool Artist A' : 'Pool Artist B',
+    }));
+    const popular = Array.from({ length: 5 }, (_, i) =>
+      popularTheme(`pop-${i + 1}`, i + 1),
+    );
+    seedCatalogue(models, [...personal, ...popular]);
+    seedPool(models, 'listened', personal);
+
+    const state = await service.createGame(USER_1, {
+      quizType: 'artist',
+      source: 'listened',
+    });
+    // Q1's correct artist is A; the pool's only other artist is
+    // B (six themes of it) — without dedup the options would be
+    // B, B, B. Instead: B once + two popular fills.
+    expect([...state.question!.options].sort()).toEqual(
+      ['Pool Artist A', 'Pool Artist B', 'Popular Artist 1', 'Popular Artist 2'].sort(),
+    );
+  });
+
+  it('pin 6 — earlier questions’ themes may reappear as later distractor values (D3)', async () => {
+    const { service, models } = makeService();
+    const personal = Array.from({ length: 12 }, (_, i) =>
+      personalTheme(`mine-${i + 1}`, i + 1),
+    );
+    seedCatalogue(models, personal);
+    seedPool(models, 'listened', personal);
+
+    const state = await service.createGame(USER_1, {
+      quizType: 'title',
+      source: 'listened',
+    });
+    const first = await service.submitAnswer(USER_1, state.gameId, null);
+    expect(first.correctValue).toBe('Mine Song 1');
+    // Question 2's correct theme is mine-2; mine-1 is NOT
+    // excluded from its distractor sample, so Q1's song title
+    // shows up as a wrong option.
+    expect(first.nextQuestion!.options).toContain('Mine Song 1');
+    const second = await service.submitAnswer(USER_1, state.gameId, null);
+    expect(second.correctValue).toBe('Mine Song 2');
+  });
+
+  it('pin 7 — no-.ogg pool themes still supply their values as distractors', async () => {
+    const { service, models } = makeService();
+    const noOgg = (id: string, n: number) => ({
+      ...personalTheme(id, n),
+      animeTitle: `NoOgg Anime ${n}`,
+      animeTitleEnglish: `NoOgg Anime ${n} EN`,
+      // Non-derivable video + a stored video link as "audio":
+      // nothing resolves, so this theme can never be dealt as
+      // a question under the ogg-only rule.
+      videoUrl: `https://video/noogg${n}.webm`,
+      audioUrl: `https://audio/noogg${n}.webm`,
+    });
+    const dealable = Array.from({ length: 10 }, (_, i) =>
+      personalTheme(`mine-${i + 1}`, i + 1),
+    );
+    const personal = [
+      dealable[0],
+      noOgg('noogg-1', 1),
+      noOgg('noogg-2', 2),
+      ...dealable.slice(1),
+    ];
+    seedCatalogue(models, personal);
+    seedPool(models, 'listened', personal);
+
+    const state = await service.createGame(USER_1, {
+      quizType: 'anime',
+      source: 'listened',
+    });
+    expect(state.question!.options).toContain('NoOgg Anime 1 EN');
+    expect(state.question!.options).toContain('NoOgg Anime 2 EN');
+
+    // The full game still completes on the 10 dealable themes.
+    const seen = await playGame(service, state.gameId, state.question!.options);
+    expect(seen).toHaveLength(10);
+  });
+});
+
 describe('SoloQuizService — leaderboard (web route)', () => {
   it('returns the top 10 by score with authors populated', async () => {
     const { service, models } = makeService();

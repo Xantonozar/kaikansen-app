@@ -41,6 +41,7 @@ import type {
   QuizRoomSettings,
   QuizRoomState,
   RankUpdatedEvent,
+  RematchStartedEvent,
   RoomGuessType,
   RoundEndedEvent,
   RoundStartedEvent,
@@ -66,6 +67,7 @@ import {
   type QuizAudioState,
 } from '../../../src/components/QuizMedia';
 import { quizAudioCandidates } from '../../../src/playback';
+import { reconcileResync } from '../../../src/roomSession';
 import { countdownSecondsLeft } from '../../../src/quizTiming';
 import { QuizOptions } from '../../../src/components/QuizOptions';
 import {
@@ -148,7 +150,17 @@ const QUESTION_PROMPT: Record<RoomGuessType, string> = {
  * - reveal: room:round-ended — correct answer, everyone's results,
  *   running scoreboard; the host (or anyone in a hostless public
  *   room) advances with room:next;
- * - ended: final standings + per-player RP from room:rank-updated.
+ * - ended: final standings + per-player RP from room:rank-updated,
+ *   plus Play again (1.0.8): a per-player opt-in vote
+ *   (room:rematch); the state carries rematchVotedUserIds so the
+ *   screen shows "n/m want to play again", a voted player waits,
+ *   and unanimity restarts the game in the same room. Every exit
+ *   from this screen — Quiz home, New room, header, unmount —
+ *   performs the server leave first (an ended room's roster is
+ *   live state: leaving shrinks the vote denominator), and
+ *   entering a room resets the finished match's state (C1: the
+ *   old "New room" button did neither, so the room screen
+ *   reopened on the previous match's standings).
  *
  * Presence: a heartbeat every 15s (the gateway drops players at
  * 45s); a rejected heartbeat or room:closed lands on the closed
@@ -215,6 +227,8 @@ export default function QuizRoomScreen() {
   }, [router]);
 
   const liveRoundRef = useRef<RoundStartedEvent | null>(null);
+  const roundEndedRef = useRef<RoundEndedEvent | null>(null);
+  roundEndedRef.current = roundEnded;
 
   /** Authoritative resync: the subscribe ack carries full state. */
   const resync = useCallback(async () => {
@@ -230,6 +244,18 @@ export default function QuizRoomScreen() {
       }
       const next = ack.room;
       setRoom(next);
+      // Finished-match ephemera reconciliation (C1): the held
+      // round-ended event and the rank results belong to ONE
+      // match. When the authoritative state describes a waiting
+      // room or a new match already in progress (rematch), they
+      // are stale — drop them, or the screen resurrects the old
+      // match's standings page over the new room.
+      const reconciliation = reconcileResync(next.status, {
+        roundEndedPresent: roundEndedRef.current !== null,
+        roundEndedGameOver: roundEndedRef.current?.gameOver === true,
+      });
+      if (reconciliation.dropRoundEnded) setRoundEnded(null);
+      if (reconciliation.dropRanks) setRanks({});
       if (next.status === 'in_progress') {
         // Reattach to the live round: options + answers come from
         // the room state; the media does not (see header note).
@@ -278,6 +304,23 @@ export default function QuizRoomScreen() {
   /* ------------------------------------------------------------ */
   useEffect(() => {
     mountedRef.current = true;
+    // Entering a room (C1): this screen instance can be REUSED
+    // for a new roomId (the navigator keeps it mounted), so the
+    // previous match's ephemera and the left flag must reset
+    // here — otherwise the new room opens on the old match's
+    // Final standings, and its own leave would never emit.
+    leftRef.current = false;
+    setRoom(null);
+    setLiveRound(null);
+    setRoundEnded(null);
+    setRanks({});
+    setMyAnswer(null);
+    setMyResult(null);
+    setAnsweredUsers(new Set());
+    setActionError(null);
+    setFatal(null);
+    setClosedNote(null);
+    setMediaMissing(false);
     const unsubStatus = subscribeQuizSocketStatus((s) => setConnStatus(s));
     let offs: (() => void)[] = [];
     let firstConnect = true;
@@ -388,6 +431,23 @@ export default function QuizRoomScreen() {
         onRoomEvent('room:rank-updated', (p: RankUpdatedEvent) => {
           setRanks((prev) => ({ ...prev, [p.userId]: p }));
         }),
+        onRoomEvent('room:rematch-vote', () => {
+          // Carries counts only — resync for the authoritative
+          // voter list on the room state.
+          void resync();
+        }),
+        onRoomEvent('room:rematch-started', (p: RematchStartedEvent) => {
+          // The rematch began: adopt the fresh state and drop
+          // the finished match's ephemera (the new round 1 rides
+          // room:round-started, emitted just before this one).
+          setRoom(p.room);
+          setRoundEnded(null);
+          setRanks({});
+          setMyAnswer(null);
+          setMyResult(null);
+          setAnsweredUsers(new Set());
+          setActionError(null);
+        }),
         onRoomEvent('room:closed', () => {
           setClosedNote(
             'This room was closed due to inactivity. Everyone has been sent back.',
@@ -408,13 +468,12 @@ export default function QuizRoomScreen() {
       unsubStatus();
       for (const off of offs) off();
       // Leaving the screen leaves the room (once) and drops the
-      // socket this screen owns.
+      // socket this screen owns. The leave fires for ENDED rooms
+      // too (1.0.8): the ended roster is live state — leaving
+      // shrinks the play-again denominator server-side.
       if (!leftRef.current) {
         leftRef.current = true;
-        const current = roomRef.current;
-        if (current && current.status !== 'ended') {
-          void emitRoomEvent('room:leave', { roomId }).catch(() => undefined);
-        }
+        void emitRoomEvent('room:leave', { roomId }).catch(() => undefined);
       }
       clearRoomOwnership();
       disconnectQuizSocket();
@@ -481,26 +540,47 @@ export default function QuizRoomScreen() {
     [busy],
   );
 
-  const leaveExplicitly = useCallback(() => {
-    if (leftRef.current) {
-      goHome();
-      return;
-    }
-    leftRef.current = true;
-    const current = roomRef.current;
-    if (current && current.status !== 'ended') {
-      // Await the leave ack before navigating so the emit is not
-      // killed by the unmount teardown; the ack timeout bounds it,
-      // and the gateway's 45s presence sweep is the backstop.
+  /**
+   * Leave the room on the server, THEN navigate (C1): the emit
+   * is awaited so the unmount teardown cannot kill it — the ack
+   * timeout bounds the wait, and the gateway's 45s presence
+   * sweep is the backstop. The leave fires whatever the room's
+   * status: leaving an ENDED room is a real leave (it shrinks
+   * the play-again denominator server-side), which is exactly
+   * what the old "New room" button skipped — it navigated away
+   * while the server kept the player in the finished room, and
+   * the finished state was never cleared.
+   */
+  const leaveAndGo = useCallback(
+    (go: () => void) => {
+      if (leftRef.current) {
+        go();
+        return;
+      }
+      leftRef.current = true;
       void emitRoomEvent('room:leave', { roomId })
         .catch(() => undefined)
         .finally(() => {
-          if (mountedRef.current) goHome();
+          if (mountedRef.current) go();
         });
-    } else {
-      goHome();
-    }
-  }, [goHome, roomId]);
+    },
+    [roomId],
+  );
+
+  const leaveExplicitly = useCallback(() => {
+    leaveAndGo(goHome);
+  }, [leaveAndGo, goHome]);
+
+  /** "New room" on the ended screen: a proper leave first
+      (leaveAndGo), then the lobby with the create intent. */
+  const createNewRoom = useCallback(() => {
+    leaveAndGo(() =>
+      router.replace({
+        pathname: '/quiz/lobby',
+        params: { intent: 'create' },
+      }),
+    );
+  }, [leaveAndGo, router]);
 
   const onInvite = useCallback(() => {
     if (!room) return;
@@ -555,6 +635,21 @@ export default function QuizRoomScreen() {
     if (!room) return [];
     return [...room.players].sort((a, b) => b.totalScore - a.totalScore);
   }, [room]);
+
+  /* Play again (C2): the ended room's vote state rides the room
+     state (rematchVotedUserIds, current members only). My own
+     vote turns the button into a waiting state; when the last
+     member votes, the server restarts the game and the
+     round-started / rematch-started broadcasts take the screen
+     back to the playing phase. */
+  const rematchVoters = room?.rematchVotedUserIds ?? [];
+  const iVotedRematch = myId !== null && rematchVoters.includes(myId);
+  const onPlayAgain = useCallback(() => {
+    if (iVotedRematch) return;
+    void runAction('rematch', 'room:rematch', { roomId }, (ack) => {
+      if (ack.room) setRoom(ack.room);
+    });
+  }, [iVotedRematch, roomId, runAction]);
 
   // Waiting-roster rank sublines (Slice 6): one batched read-only
   // fetch whenever the waiting membership changes; failures leave
@@ -1509,27 +1604,54 @@ export default function QuizRoomScreen() {
                   </Text>
                 </View>
               )}
+              {/* Play again (C2): a per-player opt-in vote.
+                  Once I've voted the button waits — the server
+                  restarts the game in this room when every
+                  current member has voted. */}
+              {rematchVoters.length > 0 && (
+                <Text style={styles.hint}>
+                  {rematchVoters.length}/{room.players.length} want to play
+                  again
+                </Text>
+              )}
+              <Pressable
+                onPress={onPlayAgain}
+                disabled={iVotedRematch || busy !== null}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  iVotedRematch
+                    ? 'You voted to play again — waiting for the others'
+                    : 'Play again'
+                }
+                accessibilityState={{
+                  disabled: iVotedRematch || busy !== null,
+                  busy: busy === 'rematch',
+                }}
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  (iVotedRematch || busy !== null) && styles.buttonDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.primaryButtonText}>
+                  {iVotedRematch ? 'Waiting for others…' : 'Play again'}
+                </Text>
+              </Pressable>
               <View style={styles.overButtons}>
                 <Pressable
                   onPress={leaveExplicitly}
                   accessibilityRole="button"
                   accessibilityLabel="Back to quiz home"
                   style={({ pressed }) => [
-                    styles.primaryButton,
+                    styles.ghostButton,
                     styles.overButton,
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Text style={styles.primaryButtonText}>Quiz home</Text>
+                  <Text style={styles.ghostButtonText}>Quiz home</Text>
                 </Pressable>
                 <Pressable
-                  onPress={() => {
-                    leftRef.current = true;
-                    router.replace({
-                      pathname: '/quiz/lobby',
-                      params: { intent: 'create' },
-                    });
-                  }}
+                  onPress={createNewRoom}
                   accessibilityRole="button"
                   accessibilityLabel="Create a new room"
                   style={({ pressed }) => [

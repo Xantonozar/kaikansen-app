@@ -29,17 +29,39 @@ function matches(doc: Record<string, unknown>, filter: Record<string, unknown>):
     const value = getPath(doc, key);
     if (cond && typeof cond === 'object' && !Array.isArray(cond)) {
       const ops = cond as Record<string, unknown>;
+      // Every operator present must hold (Mongo semantics):
+      // combined clauses like { _id: { $in: pool, $ne: correct } }
+      // are conjunctions, not first-match-wins.
+      let sawOp = false;
       if ('$nin' in ops) {
-        return !(ops.$nin as unknown[]).some(
-          (v) => v === value || (v == null && value == null),
-        );
+        sawOp = true;
+        if (
+          (ops.$nin as unknown[]).some(
+            (v) => v === value || (v == null && value == null),
+          )
+        ) {
+          return false;
+        }
       }
-      if ('$ne' in ops) return value !== ops.$ne;
+      if ('$ne' in ops) {
+        sawOp = true;
+        if (value === ops.$ne) return false;
+      }
       if ('$in' in ops) {
-        return (ops.$in as unknown[]).some((v) => String(v) === String(value));
+        sawOp = true;
+        if (!(ops.$in as unknown[]).some((v) => String(v) === String(value))) {
+          return false;
+        }
       }
-      if ('$size' in ops) return Array.isArray(value) && value.length === ops.$size;
-      if ('$exists' in ops) return ops.$exists ? value !== undefined : value === undefined;
+      if ('$size' in ops) {
+        sawOp = true;
+        if (!(Array.isArray(value) && value.length === ops.$size)) return false;
+      }
+      if ('$exists' in ops) {
+        sawOp = true;
+        if (ops.$exists ? value === undefined : value !== undefined) return false;
+      }
+      if (sawOp) return true;
     }
     return value === cond;
   });
@@ -1721,5 +1743,420 @@ describe('QuizRoomsService — public rooms list (Slice 5)', () => {
       playerCount: 3,
       isFull: true,
     });
+  });
+});
+
+describe('QuizRoomsService — room-pool options (owner ruling, 2026-11-12)', () => {
+  /** Replaces the fake catalogue wholesale (docs is the array
+      the fake models read). */
+  function setCatalogue(
+    m: ReturnType<typeof makeFakeModels>,
+    docs: Record<string, unknown>[],
+  ) {
+    m.themeModel.docs.splice(0, m.themeModel.docs.length, ...docs);
+  }
+
+  function roundOptions(m: ReturnType<typeof makeFakeModels>, roomId: string) {
+    const doc = roomDoc(m, roomId);
+    const round = (doc.rounds as Record<string, unknown>[])[0];
+    return {
+      options: round.options as string[],
+      correctAnswer: round.correctAnswer as string,
+    };
+  }
+
+  async function startTwoPlayerRoom(
+    m: ReturnType<typeof makeFakeModels>,
+    create: Record<string, unknown>,
+  ) {
+    const ack = await m.service.createRoom(HOST, create as never);
+    const roomId = ack.roomId!;
+    await m.service.joinByCode(GUEST, ack.roomCode!);
+    await m.service.toggleReady(HOST, roomId);
+    await m.service.toggleReady(GUEST, roomId);
+    await m.service.startGame(HOST, roomId);
+    return roomId;
+  }
+
+  it('pin 1 (watched): options come from the watched pool when it can supply 3 distinct values', async () => {
+    const m = makeFakeModels();
+    const pool = Array.from({ length: 6 }, (_, i) =>
+      makeTheme(`wp-${i + 1}`, `WatchedPool${i + 1}`, { isPopular: false }),
+    );
+    const sentinels = Array.from({ length: 5 }, (_, i) =>
+      makeTheme(`pop-${i + 1}`, `Popular${i + 1}`),
+    );
+    setCatalogue(m, [...pool, ...sentinels]);
+    // The watched pool is the UNION of both players' libraries.
+    m.history.push(
+      { userId: HOST, themeId: 'wp-1' },
+      { userId: HOST, themeId: 'wp-2' },
+      { userId: HOST, themeId: 'wp-3' },
+      { userId: GUEST, themeId: 'wp-4' },
+      { userId: GUEST, themeId: 'wp-5' },
+      { userId: GUEST, themeId: 'wp-6' },
+    );
+
+    const roomId = await startTwoPlayerRoom(m, {
+      ...partyCreate,
+      poolMode: 'watched',
+    });
+    const { options, correctAnswer } = roundOptions(m, roomId);
+    expect(correctAnswer).toBe('WatchedPool1 EN');
+    expect(options).toHaveLength(4);
+    expect(new Set(options).size).toBe(4);
+    expect(options).toContain('WatchedPool1 EN');
+    for (const option of options) {
+      expect(option.startsWith('WatchedPool')).toBe(true);
+      expect(option.startsWith('Popular')).toBe(false);
+    }
+  });
+
+  it('pin 1 (common): options come from the shared pool when it can supply 3 distinct values', async () => {
+    const m = makeFakeModels();
+    const shared = Array.from({ length: 5 }, (_, i) =>
+      makeTheme(`cs-${i + 1}`, `Shared${i + 1}`, {
+        anilistId: 100,
+        isPopular: false,
+      }),
+    );
+    const sentinels = Array.from({ length: 5 }, (_, i) =>
+      makeTheme(`pop-${i + 1}`, `Popular${i + 1}`),
+    );
+    setCatalogue(m, [...shared, ...sentinels]);
+    for (const t of shared) {
+      m.history.push(
+        { userId: HOST, themeId: t._id },
+        { userId: GUEST, themeId: t._id },
+      );
+    }
+
+    const roomId = await startTwoPlayerRoom(m, {
+      ...partyCreate,
+      poolMode: 'common',
+      guessType: 'song',
+      roundCount: 2,
+    });
+    const { options, correctAnswer } = roundOptions(m, roomId);
+    expect(options).toHaveLength(4);
+    expect(new Set(options).size).toBe(4);
+    expect(options).toContain(correctAnswer);
+    for (const option of options) {
+      expect(option.startsWith('Shared')).toBe(true);
+      expect(option.startsWith('Popular')).toBe(false);
+    }
+  });
+
+  it('pin 2 (common): a small shared pool tops up from popular — personal values + fill, 4 distinct', async () => {
+    const m = makeFakeModels();
+    const shared = Array.from({ length: 3 }, (_, i) =>
+      makeTheme(`cs-${i + 1}`, `Shared${i + 1}`, {
+        anilistId: 100,
+        isPopular: false,
+      }),
+    );
+    const sentinels = Array.from({ length: 5 }, (_, i) =>
+      makeTheme(`pop-${i + 1}`, `Popular${i + 1}`),
+    );
+    setCatalogue(m, [...shared, ...sentinels]);
+    for (const t of shared) {
+      m.history.push(
+        { userId: HOST, themeId: t._id },
+        { userId: GUEST, themeId: t._id },
+      );
+    }
+
+    const roomId = await startTwoPlayerRoom(m, {
+      ...partyCreate,
+      poolMode: 'common',
+      guessType: 'song',
+      roundCount: 1,
+    });
+    const { options } = roundOptions(m, roomId);
+    expect(options).toHaveLength(4);
+    expect(new Set(options).size).toBe(4);
+    // All three shared songs are on the table (one is correct)…
+    expect(options).toEqual(
+      expect.arrayContaining(['Shared1 Song', 'Shared2 Song', 'Shared3 Song']),
+    );
+    // …and exactly one popular fill completes the four.
+    expect(options.filter((o) => o.startsWith('Popular'))).toEqual([
+      'Popular1 Song',
+    ]);
+  });
+
+  it('pin 2 (watched): a small watched pool tops up from popular the same way', async () => {
+    const m = makeFakeModels();
+    const pool = Array.from({ length: 3 }, (_, i) =>
+      makeTheme(`wp-${i + 1}`, `WatchedPool${i + 1}`, { isPopular: false }),
+    );
+    const sentinels = Array.from({ length: 5 }, (_, i) =>
+      makeTheme(`pop-${i + 1}`, `Popular${i + 1}`),
+    );
+    setCatalogue(m, [...pool, ...sentinels]);
+    m.history.push(
+      { userId: HOST, themeId: 'wp-1' },
+      { userId: HOST, themeId: 'wp-2' },
+      { userId: HOST, themeId: 'wp-3' },
+    );
+
+    const roomId = await startTwoPlayerRoom(m, {
+      ...partyCreate,
+      poolMode: 'watched',
+    });
+    const { options } = roundOptions(m, roomId);
+    expect([...options].sort()).toEqual(
+      [
+        'WatchedPool1 EN',
+        'WatchedPool2 EN',
+        'WatchedPool3 EN',
+        'Popular1 EN',
+      ].sort(),
+    );
+  });
+
+  it('pin 1 (anilist): options come from the AniList pool when it can supply 3 distinct values', async () => {
+    const m = makeFakeModels();
+    const pool = Array.from({ length: 6 }, (_, i) =>
+      makeTheme(`ap-${i + 1}`, `AniPool${i + 1}`, {
+        anilistId: 100,
+        isPopular: false,
+      }),
+    );
+    const sentinels = Array.from({ length: 5 }, (_, i) =>
+      makeTheme(`pop-${i + 1}`, `Popular${i + 1}`),
+    );
+    setCatalogue(m, [...pool, ...sentinels]);
+    // The AniList pool is the union of the players' synced
+    // lists; the host's list alone carries anime 100 here.
+    const host = m.userModel.docs.find((u) => u._id === HOST)!;
+    (host.anilist as { completedMediaIds: number[] }).completedMediaIds = [
+      100,
+    ];
+
+    const roomId = await startTwoPlayerRoom(m, {
+      ...partyCreate,
+      poolMode: 'anilist',
+    });
+    const { options, correctAnswer } = roundOptions(m, roomId);
+    expect(correctAnswer).toBe('AniPool1 EN');
+    expect(options).toHaveLength(4);
+    expect(new Set(options).size).toBe(4);
+    expect(options).toContain('AniPool1 EN');
+    for (const option of options) {
+      expect(option.startsWith('AniPool')).toBe(true);
+      expect(option.startsWith('Popular')).toBe(false);
+    }
+  });
+
+  it('pin 2 (anilist): a small AniList pool tops up from popular the same way', async () => {
+    const m = makeFakeModels();
+    const pool = Array.from({ length: 3 }, (_, i) =>
+      makeTheme(`ap-${i + 1}`, `AniPool${i + 1}`, {
+        anilistId: 100,
+        isPopular: false,
+      }),
+    );
+    const sentinels = Array.from({ length: 5 }, (_, i) =>
+      makeTheme(`pop-${i + 1}`, `Popular${i + 1}`),
+    );
+    setCatalogue(m, [...pool, ...sentinels]);
+    const host = m.userModel.docs.find((u) => u._id === HOST)!;
+    (host.anilist as { completedMediaIds: number[] }).completedMediaIds = [
+      100,
+    ];
+
+    const roomId = await startTwoPlayerRoom(m, {
+      ...partyCreate,
+      poolMode: 'anilist',
+    });
+    const { options } = roundOptions(m, roomId);
+    expect([...options].sort()).toEqual(
+      ['AniPool1 EN', 'AniPool2 EN', 'AniPool3 EN', 'Popular1 EN'].sort(),
+    );
+  });
+
+  it('pin 3 — random rooms are unchanged: distractors are the popular sample, exactly as before', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await startedParty(m);
+    const { options, correctAnswer } = roundOptions(m, roomId);
+    expect(correctAnswer).toBe('Correct EN');
+    expect([...options].sort()).toEqual(
+      ['Correct EN', 'Distractor1 EN', 'Distractor2 EN', 'Distractor3 EN'].sort(),
+    );
+  });
+});
+
+describe('QuizRoomsService — play again / rematch (owner feature, 2026-11-12)', () => {
+  /**
+   * Plays a 1-round party game to its end: everyone but the
+   * last player answers correctly; the last is auto-locked by
+   * the party rule and finishRound schedules the game's RP.
+   */
+  async function finishedParty(
+    m: ReturnType<typeof makeFakeModels>,
+    playerIds: string[] = [HOST, GUEST],
+  ) {
+    const { roomId } = await startedParty(m, playerIds);
+    const doc = roomDoc(m, roomId);
+    const round = (doc.rounds as Record<string, unknown>[])[0];
+    round.startedAt = new Date(Date.now() - 1000); // window open
+    for (const id of playerIds.slice(0, -1)) {
+      await m.service.submitAnswer(id, roomId, 1, 'Correct EN');
+    }
+    expect(doc.status).toBe('ended');
+    expect(m.rank.scheduled).toEqual([roomId]); // game 1's award
+    return { roomId, doc };
+  }
+
+  it('vote counting: votes show on ended state, broadcast, and are idempotent', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await finishedParty(m);
+
+    const ack = await m.service.voteRematch(HOST, roomId);
+    expect(ack.success).toBe(true);
+    expect(ack.gameRestarted).toBeUndefined();
+    expect(ack.room?.status).toBe('ended');
+    expect(ack.room?.rematchVotedUserIds).toEqual([HOST]);
+
+    const state = await m.service.getRoomStateForMember(GUEST, roomId);
+    expect(state.room?.rematchVotedUserIds).toEqual([HOST]);
+
+    const voteEvents = m.events.filter((e) => e.event === 'room:rematch-vote');
+    expect(voteEvents).toHaveLength(1);
+    expect(voteEvents[0].payload).toMatchObject({
+      userId: HOST,
+      votes: 1,
+      total: 2,
+      votedUserIds: [HOST],
+    });
+
+    // A repeat vote changes nothing and broadcasts nothing.
+    const again = await m.service.voteRematch(HOST, roomId);
+    expect(again.room?.rematchVotedUserIds).toEqual([HOST]);
+    expect(m.events.filter((e) => e.event === 'room:rematch-vote')).toHaveLength(1);
+    expect(m.rank.scheduled).toEqual([roomId]); // still just game 1
+  });
+
+  it('restart on unanimity: same room, scores zeroed, fresh round 1, no double RP', async () => {
+    const m = makeFakeModels();
+    const { roomId, doc } = await finishedParty(m);
+    const codeBefore = doc.roomCode as string;
+    expect(
+      (doc.players as Record<string, unknown>[]).some(
+        (p) => (p.totalScore as number) > 0,
+      ),
+    ).toBe(true);
+
+    await m.service.voteRematch(HOST, roomId);
+    const ack = await m.service.voteRematch(GUEST, roomId);
+    expect(ack.gameRestarted).toBe(true);
+    expect(ack.room?.status).toBe('in_progress');
+    expect(ack.room?.currentRound).toBe(1);
+    expect(ack.room?.rematchVotedUserIds).toBeUndefined();
+
+    // Same room + code; the finished match is gone.
+    expect(doc.roomCode).toBe(codeBefore);
+    expect(doc.status).toBe('in_progress');
+    expect(doc.currentRound).toBe(1);
+    expect(doc.players).toHaveLength(2);
+    for (const p of doc.players as Record<string, unknown>[]) {
+      expect(p.totalScore).toBe(0);
+    }
+    const rounds = doc.rounds as Record<string, unknown>[];
+    expect(rounds).toHaveLength(1); // fresh round 1 only
+    expect(rounds[0].roundNumber).toBe(1);
+    expect(rounds[0].options).toHaveLength(4);
+    expect(doc.usedThemeIds).toEqual([rounds[0].themeId]);
+
+    // Broadcasts: the restart notice + the new round 1.
+    const startedEvents = m.events.filter(
+      (e) => e.event === 'room:rematch-started',
+    );
+    expect(startedEvents).toHaveLength(1);
+    expect(
+      (startedEvents[0].payload.room as Record<string, unknown>).status,
+    ).toBe('in_progress');
+    expect(
+      m.events.filter(
+        (e) => e.event === 'room:round-started' && e.payload.round === 1,
+      ).length,
+    ).toBeGreaterThanOrEqual(2); // game 1's + the rematch's
+
+    // RP: the restart did NOT re-apply game 1's award.
+    expect(m.rank.scheduled).toEqual([roomId]);
+
+    // The rematch is a NEW game: ending it schedules its own.
+    const round = rounds[0];
+    round.startedAt = new Date(Date.now() - 1000);
+    await m.service.submitAnswer(HOST, roomId, 1, round.correctAnswer as string);
+    expect(doc.status).toBe('ended');
+    expect(m.rank.scheduled).toEqual([roomId, roomId]);
+  });
+
+  it('denominator shrink: a non-voter leaving an ended room completes unanimity for the rest', async () => {
+    const m = makeFakeModels();
+    const { roomId, doc } = await finishedParty(m, [HOST, GUEST, GUEST2]);
+
+    await m.service.voteRematch(HOST, roomId);
+    const two = await m.service.voteRematch(GUEST, roomId);
+    expect(two.gameRestarted).toBeUndefined(); // 2/3 — GUEST2 has not voted
+    expect(two.room?.rematchVotedUserIds).toEqual([HOST, GUEST]);
+    expect(doc.status).toBe('ended');
+
+    // GUEST2 (the non-voter) leaves: the remaining two are
+    // unanimous, so the game restarts without them.
+    const left = await m.service.leaveRoom(GUEST2, roomId);
+    expect(doc.status).toBe('in_progress');
+    expect((doc.players as unknown[])).toHaveLength(2);
+    expect(left.room?.status).toBe('in_progress');
+    expect(
+      m.events.some((e) => e.event === 'room:rematch-started'),
+    ).toBe(true);
+    expect(m.rank.scheduled).toEqual([roomId]); // no re-award
+  });
+
+  it('denominator shrink: a voter leaving takes their vote with them', async () => {
+    const m = makeFakeModels();
+    const { roomId, doc } = await finishedParty(m, [HOST, GUEST, GUEST2]);
+
+    await m.service.voteRematch(HOST, roomId);
+    await m.service.leaveRoom(HOST, roomId); // the voter leaves
+    expect(doc.status).toBe('ended'); // no restart: 0 of 2 voted
+
+    const state = await m.service.getRoomStateForMember(GUEST, roomId);
+    expect(state.room?.rematchVotedUserIds).toBeUndefined(); // vote pruned
+
+    await m.service.voteRematch(GUEST, roomId);
+    expect(doc.status).toBe('ended'); // 1 of 2
+    const ack = await m.service.voteRematch(GUEST2, roomId);
+    expect(ack.gameRestarted).toBe(true); // 2 of 2 — restart
+    expect(doc.status).toBe('in_progress');
+  });
+
+  it('a lone remaining member cannot restart a match alone', async () => {
+    const m = makeFakeModels();
+    const { roomId, doc } = await finishedParty(m);
+
+    await m.service.leaveRoom(GUEST, roomId);
+    const ack = await m.service.voteRematch(HOST, roomId);
+    expect(ack.success).toBe(true);
+    expect(ack.gameRestarted).toBeUndefined();
+    expect(ack.room?.rematchVotedUserIds).toEqual([HOST]); // 1/1, recorded
+    expect(doc.status).toBe('ended'); // …but no solo restart
+  });
+
+  it('votes are refused before the game ends and from non-members', async () => {
+    const m = makeFakeModels();
+    const { roomId } = await startedParty(m);
+    await expect(m.service.voteRematch(HOST, roomId)).rejects.toThrow(
+      'Play again is only available after the game ends',
+    );
+
+    const done = makeFakeModels();
+    const { roomId: endedRoomId } = await finishedParty(done);
+    await expect(
+      done.service.voteRematch(OUTSIDER, endedRoomId),
+    ).rejects.toThrow('Player not in room');
   });
 });

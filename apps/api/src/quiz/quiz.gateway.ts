@@ -58,6 +58,9 @@ interface AuthedSocket extends Socket {
  * - room:next          { roomId, expectedRound? }
  * - room:answer        { roomId, roundNumber, submittedAnswer }
  * - room:heartbeat     { roomId }
+ * - room:rematch       { roomId } — play-again vote on an ended room
+ *   (owner feature, 2026-11-12; unanimity restarts the game in
+ *   the same room — see QuizRoomsService.voteRematch)
  *
  * Authentication: the access token rides the handshake
  * (`auth.token`, or an `Authorization: Bearer …` header) and is
@@ -273,6 +276,16 @@ export class QuizGateway implements OnGatewayInit, OnGatewayConnection {
           body?.submittedAnswer ?? '',
         ),
       false,
+    );
+  }
+
+  @SubscribeMessage('room:rematch')
+  rematch(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() body: { roomId?: string },
+  ): Promise<QuizRoomAck> {
+    return this.run(client, () =>
+      this.roomsService!.voteRematch(this.user(client).userId, body?.roomId ?? ''),
     );
   }
 

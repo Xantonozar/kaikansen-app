@@ -57,20 +57,33 @@ export const getCorrectAnswer = getThemeValue;
  * The distractor filter for one correct theme — shared by the solo
  * question route and the room option generator on the web (both
  * exclude the correct theme and, per guess type, themes carrying
- * the correct value). `popularOnly` is the solo pool's base filter;
- * the room generator always samples popular distractors too, so
- * both call sites pass the same shape with different bases merged
- * by the caller.
+ * the correct value).
+ *
+ * The default scope is the web shape: distractors come from the
+ * POPULAR pool (`isPopular: true`). The solo service's named pools
+ * (owner ruling, 2026-11-12 — design QUIZ-PERSONAL-OPTIONS) pass
+ * `{ popularOnly: false, poolOr }` to scope the sampling to the
+ * game's own pool instead: `isPopular` is dropped and the pool's
+ * `$or` clauses are added; every other clause — the correct
+ * theme's exclusion and the per-type value exclusions — is
+ * identical either way. Rooms keep calling with the default.
  */
 export function distractorFilterFor(
   correctTheme: QuizThemeLike,
   guessType: string,
+  scope: { popularOnly: boolean; poolOr?: Record<string, unknown>[] } = {
+    popularOnly: true,
+  },
 ): Record<string, unknown> {
   const filter: Record<string, unknown> = {
     _id: { $ne: correctTheme._id },
-    isPopular: true,
     videoUrl: { $nin: [null, ''] },
   };
+  if (scope.popularOnly) {
+    filter.isPopular = true;
+  } else if (scope.poolOr) {
+    filter.$or = scope.poolOr;
+  }
   if (guessType === 'artist') {
     filter.artistName = { $nin: [null, '', 'Unknown', correctTheme.artistName] };
   } else if (guessType === 'song' || guessType === 'title') {
@@ -79,6 +92,35 @@ export function distractorFilterFor(
     filter.animeTitle = { $ne: correctTheme.animeTitle };
   }
   return filter;
+}
+
+/**
+ * The value-selection half of the room option derivation: from
+ * sampled candidates take their values in order, drop the
+ * correct value, any `excludeValues` (values already chosen from
+ * another pool) and duplicates, and keep at most `limit`.
+ * buildRoundOptions is built on it; the solo personal-pool draw
+ * uses it directly so both surfaces select distractors with the
+ * same semantics (owner ruling, 2026-11-12).
+ */
+export function distinctDistractorValues(
+  correctTheme: QuizThemeLike,
+  guessType: string,
+  candidates: QuizThemeLike[],
+  excludeValues: readonly string[] = [],
+  limit = 3,
+): string[] {
+  const correctValue = getThemeValue(correctTheme, guessType);
+  const seen = new Set<string>([correctValue, ...excludeValues]);
+  const values: string[] = [];
+  for (const candidate of candidates) {
+    const value = getThemeValue(candidate, guessType);
+    if (seen.has(value)) continue;
+    seen.add(value);
+    values.push(value);
+    if (values.length >= limit) break;
+  }
+  return values;
 }
 
 /**
@@ -95,13 +137,11 @@ export function buildRoundOptions(
   random: () => number = Math.random,
 ): string[] {
   const correctValue = getThemeValue(correctTheme, guessType);
-  const distractorValues = Array.from(
-    new Set(
-      distractorCandidates
-        .map((t) => getThemeValue(t, guessType))
-        .filter((v) => v !== correctValue),
-    ),
-  ).slice(0, 3);
+  const distractorValues = distinctDistractorValues(
+    correctTheme,
+    guessType,
+    distractorCandidates,
+  );
 
   return shuffle([correctValue, ...distractorValues], random);
 }

@@ -40,9 +40,11 @@ import { QuizAttempt, type QuizAttemptDocument } from './quiz-attempt.schema';
 import {
   buildSoloOptions,
   distractorFilterFor,
+  distinctDistractorValues,
   effectiveQuestionStart,
   getThemeValue,
   secondsRemainingAt,
+  shuffle,
   soloScoreFor,
   type QuizThemeLike,
 } from './quiz-game.utils';
@@ -494,24 +496,89 @@ export class SoloQuizService {
     }
   }
 
-  /** Build a drawn question around a sampled theme: the
-      distractors (always from the popular pool — the web route)
-      and the withheld answer. No session state changes here. */
+  /**
+   * Build a drawn question around a sampled theme: the
+   * distractors and the withheld answer. No session state
+   * changes here.
+   *
+   * Random games keep the web route verbatim: distractors are
+   * sampled from the popular pool (exactly 3, no value dedup —
+   * buildSoloOptions' mirrored quirk). Named-pool games
+   * (anilist / listened) draw their options from the SAME pool
+   * as the correct theme (owner ruling, 2026-11-12 — design
+   * QUIZ-PERSONAL-OPTIONS): a surplus of pool candidates is
+   * sampled and their values selected room-style (distinct,
+   * correct value excluded), because a personal pool is
+   * concentrated — the same anime/artist repeats across themes
+   * and duplicate option buttons would be common, not
+   * theoretical (decision D2). When the pool yields fewer than
+   * 3 distinct values the remainder is quietly filled from the
+   * popular pool under the existing rules (decision D1 — the
+   * game never refuses after passing the ≥10 gate). Earlier
+   * questions' themes are NOT excluded from the distractor
+   * sample (decision D3): only their names appear, never their
+   * audio, and small pools need the material. Distractors are
+   * strings on the wire, so the ogg-only rule does not apply
+   * to them — a pool theme that can never be dealt as a
+   * question still supplies its name as a wrong option.
+   */
   private async buildDrawn(
     models: SoloModels,
     session: SoloSession,
     correctTheme: ThemeDoc,
   ): Promise<DrawnQuestion> {
-    const distractors = (await models.themes
-      .aggregate([
-        { $match: distractorFilterFor(correctTheme, session.quizType) },
-        { $sample: { size: 3 } },
-      ])
-      .exec()) as ThemeDoc[];
+    const correctValue = getThemeValue(correctTheme, session.quizType);
+
+    if (session.source === 'random' || !session.poolOr) {
+      const distractors = (await models.themes
+        .aggregate([
+          { $match: distractorFilterFor(correctTheme, session.quizType) },
+          { $sample: { size: 3 } },
+        ])
+        .exec()) as ThemeDoc[];
+      return {
+        theme: correctTheme,
+        options: buildSoloOptions(correctTheme, session.quizType, distractors),
+        correctValue,
+      };
+    }
+
+    const sampleCandidates = async (
+      filter: Record<string, unknown>,
+    ): Promise<ThemeDoc[]> =>
+      (await models.themes
+        .aggregate([{ $match: filter }, { $sample: { size: 10 } }])
+        .exec()) as ThemeDoc[];
+
+    const personalCandidates = await sampleCandidates(
+      distractorFilterFor(correctTheme, session.quizType, {
+        popularOnly: false,
+        poolOr: session.poolOr,
+      }),
+    );
+    const distractorValues = distinctDistractorValues(
+      correctTheme,
+      session.quizType,
+      personalCandidates,
+    );
+    if (distractorValues.length < 3) {
+      const popularCandidates = await sampleCandidates(
+        distractorFilterFor(correctTheme, session.quizType),
+      );
+      distractorValues.push(
+        ...distinctDistractorValues(
+          correctTheme,
+          session.quizType,
+          popularCandidates,
+          distractorValues,
+          3 - distractorValues.length,
+        ),
+      );
+    }
     return {
       theme: correctTheme,
-      options: buildSoloOptions(correctTheme, session.quizType, distractors),
-      correctValue: getThemeValue(correctTheme, session.quizType),
+      options: shuffle([correctValue, ...distractorValues]),
+      correctValue,
     };
   }
 

@@ -472,6 +472,160 @@ describe('Solo quiz earlier reveal with derivable audio (e2e, part 5)', () => {
   });
 });
 
+describe('Solo quiz personal-pool options (e2e, owner ruling 2026-11-12)', () => {
+  let app: INestApplication;
+
+  /* Self-contained fakes: USER_1's AniList lists cover 12
+     non-popular 'Mine' themes (derivable .ogg, so they are
+     dealable); 5 popular 'Popular' sentinels sit outside the
+     lists. A named-pool game's options must come from the
+     personal pool — no sentinel may appear. */
+  const personal = Array.from({ length: 12 }, (_, i) => ({
+    _id: `mine-${i + 1}`,
+    slug: `mine-${i + 1}-op1`,
+    songTitle: `Mine Song ${i + 1}`,
+    animeTitle: `Mine Anime ${i + 1}`,
+    animeTitleEnglish: `Mine Anime ${i + 1} EN`,
+    animeTitleAlternative: [],
+    artistName: `Mine Artist ${i + 1}`,
+    anilistId: 3001 + i,
+    animeCoverImage: null,
+    animeCoverImageSmall: null,
+    type: 'OP',
+    sequence: 1,
+    entries: [{ atEntryId: 3000 + i }],
+    videoUrl: `https://v.animethemes.moe/Mine${i + 1}-OP1.webm`,
+    audioUrl: null,
+    isPopular: false,
+  }));
+  const sentinels = Array.from({ length: 5 }, (_, i) => ({
+    ...personal[i],
+    _id: `pop-${i + 1}`,
+    slug: `pop-${i + 1}-op1`,
+    songTitle: `Popular Song ${i + 1}`,
+    animeTitle: `Popular Anime ${i + 1}`,
+    animeTitleEnglish: `Popular Anime ${i + 1} EN`,
+    artistName: `Popular Artist ${i + 1}`,
+    anilistId: 9001 + i,
+    videoUrl: `https://v.animethemes.moe/Popular${i + 1}-OP1.webm`,
+    isPopular: true,
+  }));
+  const themes = [...sentinels, ...personal];
+  const users = [
+    {
+      _id: USER_1,
+      username: 'alice',
+      displayName: 'Alice',
+      avatarUrl: null,
+      anilist: {
+        completedMediaIds: personal.map((t) => t.anilistId),
+      },
+    },
+  ];
+  const models = {
+    themeModel: {
+      aggregate: (pipeline: Record<string, unknown>[]) => {
+        let result = [...themes];
+        for (const step of pipeline) {
+          if (step.$match) {
+            result = result.filter((t) =>
+              matches(t as never, step.$match as Record<string, unknown>),
+            );
+          }
+          if (step.$sample) {
+            result = result.slice(0, (step.$sample as { size: number }).size);
+          }
+        }
+        return queryOf(result);
+      },
+      countDocuments: (filter: Record<string, unknown>) =>
+        queryOf(
+          themes.filter((t) => matches(t as never, filter)).length,
+        ),
+    },
+    attemptModel: {
+      create: async (data: Record<string, unknown>) => ({ _id: 'a-1', ...data }),
+      find: () => chain([]),
+    },
+    userModel: {
+      findById: (id: string) =>
+        queryOf(users.find((u) => String(u._id) === id) ?? null),
+      find: () => queryOf(users),
+    },
+    watchHistoryModel: { distinct: () => queryOf([]) },
+  };
+
+  const token = () =>
+    jwt.sign(
+      {
+        userId: USER_1,
+        username: 'alice',
+        email: 'alice@example.com',
+        tokenType: 'access',
+      },
+      E2E_SECRET,
+      { expiresIn: '15m' },
+    );
+  const auth = () => ({ Authorization: `Bearer ${token()}` });
+
+  beforeAll(async () => {
+    process.env.JWT_SECRET = E2E_SECRET;
+    process.env.JWT_REFRESH_SECRET = E2E_REFRESH_SECRET;
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [ConfigModule.forRoot({ isGlobal: true })],
+      controllers: [QuizController],
+      providers: [
+        SoloQuizService,
+        AuthService,
+        AccessTokenGuard,
+        AnilistClient,
+        { provide: getModelToken(ThemeCache.name), useValue: models.themeModel },
+        { provide: getModelToken(QuizAttempt.name), useValue: models.attemptModel },
+        { provide: getModelToken(User.name), useValue: models.userModel },
+        { provide: getModelToken(WatchHistory.name), useValue: models.watchHistoryModel },
+      ],
+    }).compile();
+    app = moduleFixture.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    delete process.env.JWT_SECRET;
+    delete process.env.JWT_REFRESH_SECRET;
+  });
+
+  it('an anilist game’s options come from the listed anime’s themes, never the popular pool', async () => {
+    const http = request(app.getHttpServer());
+    const created = await http
+      .post('/quiz/solo/games')
+      .set(auth())
+      .send({ quizType: 'anime', source: 'anilist' })
+      .expect(201);
+
+    const options = created.body.question.options as string[];
+    expect(options).toHaveLength(4);
+    expect(new Set(options).size).toBe(4);
+    for (const option of options) {
+      expect(option.startsWith('Mine Anime')).toBe(true);
+      expect(option.startsWith('Popular Anime')).toBe(false);
+    }
+
+    // The answer-time draw (no playback signal sent) follows
+    // the same rule for the next question.
+    const answered = await http
+      .post(`/quiz/solo/games/${created.body.gameId}/answers`)
+      .set(auth())
+      .send({ answer: null })
+      .expect(200);
+    const nextOptions = answered.body.nextQuestion.options as string[];
+    expect(new Set(nextOptions).size).toBe(4);
+    for (const option of nextOptions) {
+      expect(option.startsWith('Mine Anime')).toBe(true);
+    }
+  });
+});
+
 describe('Solo quiz ogg-only pool (e2e, owner ruling 2026-11-12)', () => {
   let app: INestApplication;
   const models = makeFakeModels();

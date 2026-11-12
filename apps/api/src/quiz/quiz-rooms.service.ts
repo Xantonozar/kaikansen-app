@@ -15,6 +15,8 @@ import {
   type QuizRoomPlayer,
   type QuizRoomState,
   type QuizRoundAnswer,
+  type RematchStartedEvent,
+  type RematchVoteEvent,
 } from '@kaikansen/contracts';
 import { User, type UserDocument } from '../auth/user.schema';
 import { Favorite, type FavoriteDocument } from '../library/favorite.schema';
@@ -176,10 +178,14 @@ function intersectSets<T>(left: Set<T>, right: Set<T>): Set<T> {
  *   host starts a party (a hostless room may be started by
  *   anyone — the web's check only fires when a host exists).
  * - Rounds: themes are sampled per pool mode with used-theme
- *   exclusion; options come from the popular pool (sample 10,
- *   dedupe values, 3 distractors + correct, shuffled). Round
- *   state lives on the room document exactly as the web stores
- *   it, reveal metadata included.
+ *   exclusion; options are the correct value + 3 deduped
+ *   distractor values, shuffled. Random/AniList rooms sample
+ *   distractors from the popular pool (the web shape); Watched
+ *   and Common rooms sample them from the room's own pool
+ *   first, topping up from popular only when the pool yields
+ *   fewer than 3 distinct values (owner ruling, 2026-11-12).
+ *   Round state lives on the room document exactly as the web
+ *   stores it, reveal metadata included.
  * - Scoring (answer route): secondsRemaining is measured
  *   SERVER-side from the round's startedAt; the points are the
  *   OWNER'S formula (spec 2026-11-10): correct → secondsRemaining
@@ -204,6 +210,16 @@ function intersectSets<T>(left: Set<T>, right: Set<T>): Set<T> {
  *   timer expires (unanswered players get autoLocked rows —
  *   the web timer-end route's shape). Game end (last round)
  *   schedules the rank maintenance (RankService).
+ * - Play again (owner feature, 2026-11-12; the web has no
+ *   rematch): members of an ended room vote via room:rematch;
+ *   unanimity among the current members (≥2) restarts the game
+ *   in the same room — scores zeroed, rounds/used themes
+ *   cleared, fresh questions from the same pool. Votes live in
+ *   memory only (no document change); a member leaving the
+ *   ended room shrinks the denominator and can complete
+ *   unanimity. A rematch is a NEW game for RP: its end
+ *   schedules its own award; the finished game's award is
+ *   never re-applied.
  * - Presence: players heartbeat (the web: every ~15s); the
  *   sweeper applies the web cleanup verbatim — 45s staleness
  *   drops a player (host reassigns randomly), a room empty for
@@ -278,6 +294,33 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
   /** Drops a room's cached library contributions (room death). */
   private dropLibraryCache(roomId: string): void {
     this.libraryCache.delete(roomId);
+  }
+
+  /**
+   * Play-again votes (owner feature, 2026-11-12): per room, the
+   * set of member user ids who voted for a rematch on the ended
+   * screen. In-memory like the library cache — votes are
+   * ephemeral lobby state, not document state: nothing is
+   * written to the shared room document (no schema change), and
+   * a server restart simply clears pending votes along with the
+   * room timers. Votes are always read PRUNED to the room's
+   * current members, so a member leaving the ended room shrinks
+   * the denominator (and can complete unanimity for the rest).
+   */
+  private readonly rematchVotes = new Map<string, Set<string>>();
+
+  /** Drops a room's rematch votes (restart consumed them, or the room died). */
+  private dropRematchVotes(roomId: string): void {
+    this.rematchVotes.delete(roomId);
+  }
+
+  /** The room's rematch voters, in roster order, current members only. */
+  private currentRematchVoters(room: RoomDoc): string[] {
+    const votes = this.rematchVotes.get(String(room._id));
+    if (!votes || votes.size === 0) return [];
+    return room.players
+      .map((p) => p.userId)
+      .filter((userId) => votes.has(userId));
   }
 
   /**
@@ -436,7 +479,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
    * attached once a round has ended, as before.
    */
   toRoomState(room: RoomDoc): QuizRoomState {
-    return {
+    const state: QuizRoomState = {
       roomId: String(room._id),
       roomCode: room.roomCode,
       roomType: room.roomType as QuizRoomState['roomType'],
@@ -483,6 +526,16 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         };
       }),
     };
+    // Play-again votes ride ended states only (see the field's
+    // contract): the current members who voted, so every client
+    // can show "n/m want to play again" and its own voted state.
+    if (room.status === 'ended') {
+      const voters = this.currentRematchVoters(room);
+      if (voters.length > 0) {
+        state.rematchVotedUserIds = voters;
+      }
+    }
+    return state;
   }
 
   /* ---------------------------------------------------------------- */
@@ -972,13 +1025,13 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     return theme ?? null;
   }
 
-  /** generateRoundOptions with its query (popular distractors, sample 10). */
-  private async generateOptions(
+  /** The popular-pool distractor sample — generateRoundOptions' original query. */
+  private async samplePopularDistractorCandidates(
     models: RoomModels,
     correctTheme: RoomThemeDoc,
     guessType: string,
-  ): Promise<string[]> {
-    const distractors = (await models.themes
+  ): Promise<RoomThemeDoc[]> {
+    return (await models.themes
       .aggregate([
         { $match: distractorFilterFor(correctTheme, guessType) },
         { $sample: { size: 10 } },
@@ -993,6 +1046,123 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         },
       ])
       .exec()) as RoomThemeDoc[];
+  }
+
+  /**
+   * Distractor candidates from the room's OWN pool (owner
+   * ruling, 2026-11-12 — the solo personal-pool rule extended
+   * to rooms): for Watched, Common and AniList rooms the wrong
+   * options come from the same pool the correct themes are
+   * dealt from, so a player can't spot the answer by
+   * familiarity. The pool is represented exactly as the
+   * correct-theme sampler represents it:
+   * - common: the shared-candidate SET (commonCandidates) minus
+   *   the correct theme;
+   * - watched / anilist: the dynamic filter's `_id: { $in: … }`
+   *   set (the watched union, resp. the AniList-listed themes
+   *   resolved from the players' synced media ids), merged with
+   *   the distractor clauses (correct theme excluded, per-type
+   *   value exclusions) — minus `isPopular`, which pool
+   *   membership replaces.
+   * Distractors are names only: no audio/probe requirements,
+   * and themes dealt in earlier rounds are not excluded (their
+   * names may reappear, as in solo).
+   */
+  private async poolDistractorCandidates(
+    models: RoomModels,
+    room: RoomDoc,
+    correctTheme: RoomThemeDoc,
+  ): Promise<RoomThemeDoc[]> {
+    if (room.settings.poolMode === 'common') {
+      return this.commonCandidates(models, room, [String(correctTheme._id)]);
+    }
+    // Watched / AniList: rebuild the sampler's filter and merge
+    // the distractor constraints into it.
+    const poolFilter = await this.dynamicThemeFilter(models, room);
+    const distractorFilter = distractorFilterFor(
+      correctTheme,
+      room.settings.guessType,
+    );
+    delete distractorFilter.isPopular;
+    const poolId = poolFilter._id as { $in?: unknown[] } | undefined;
+    const correctId = distractorFilter._id as { $ne?: unknown };
+    const merged: Record<string, unknown> = {
+      ...poolFilter,
+      ...distractorFilter,
+      _id: {
+        ...(poolId && Array.isArray(poolId.$in) ? { $in: poolId.$in } : {}),
+        ...(correctId && '$ne' in correctId ? { $ne: correctId.$ne } : {}),
+      },
+    };
+    return (await models.themes
+      .aggregate([
+        { $match: merged },
+        { $sample: { size: 10 } },
+        {
+          $project: {
+            animeTitle: 1,
+            animeTitleEnglish: 1,
+            animeTitleAlternative: 1,
+            songTitle: 1,
+            artistName: 1,
+          },
+        },
+      ])
+      .exec()) as RoomThemeDoc[];
+  }
+
+  /**
+   * generateRoundOptions with its query. Random rooms keep the
+   * web shape: distractors sampled from the popular pool.
+   * Watched / Common / AniList rooms sample from the room's own
+   * pool first (see poolDistractorCandidates) and top up from
+   * the popular pool only when the pool yields fewer than 3
+   * distinct distractor values — buildRoundOptions' value
+   * dedup decides, pool candidates first so pool values win
+   * the slots.
+   */
+  private async generateOptions(
+    models: RoomModels,
+    room: RoomDoc,
+    correctTheme: RoomThemeDoc,
+  ): Promise<string[]> {
+    const guessType = room.settings.guessType;
+    const poolMode = room.settings.poolMode;
+    if (
+      poolMode === 'watched' ||
+      poolMode === 'common' ||
+      poolMode === 'anilist'
+    ) {
+      const poolCandidates = await this.poolDistractorCandidates(
+        models,
+        room,
+        correctTheme,
+      );
+      if (poolCandidates.length > 0) {
+        const options = buildRoundOptions(
+          correctTheme,
+          guessType,
+          poolCandidates,
+        );
+        if (options.length >= 4) return options;
+        const popularCandidates = await this.samplePopularDistractorCandidates(
+          models,
+          correctTheme,
+          guessType,
+        );
+        return buildRoundOptions(correctTheme, guessType, [
+          ...poolCandidates,
+          ...popularCandidates,
+        ]);
+      }
+      // The pool yielded nothing at all — today's behaviour:
+      // the popular sample below.
+    }
+    const distractors = await this.samplePopularDistractorCandidates(
+      models,
+      correctTheme,
+      guessType,
+    );
     return buildRoundOptions(correctTheme, guessType, distractors);
   }
 
@@ -1423,6 +1593,9 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
           this.dropLibraryCache(roomId);
         }
       }
+      if (room.players.length === 0) {
+        this.dropRematchVotes(roomId);
+      }
       await room.save();
 
       this.emit(room, 'room:player-left', {
@@ -1431,11 +1604,119 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         newHostId: room.hostId ? String(room.hostId) : null,
         roomStatus: room.status,
       });
+
+      // Play-again (2026-11-12): leaving an ENDED room shrinks
+      // the rematch denominator — the leaver's own vote is
+      // pruned with them, and if every remaining member has
+      // voted, the restart fires for the rest.
+      if (room.status === 'ended' && room.players.length > 0) {
+        await this.maybeRestartRematch(models, room);
+      }
+
       return {
         success: true,
         room: await this.stateWithCommonCount(models, room),
       };
     });
+  }
+
+  /**
+   * room:rematch — play-again vote (owner feature, 2026-11-12).
+   * A member of an ENDED room opts in to another match in the
+   * same room. Voting is idempotent (a repeat vote changes
+   * nothing and broadcasts nothing). Each new vote broadcasts
+   * room:rematch-vote with the pruned count; when the vote
+   * completes unanimity among the CURRENT members (and at
+   * least 2 remain — a match is never restarted for a lone
+   * player), the game restarts at once: see restartRematch.
+   */
+  async voteRematch(userId: string, roomId: string): Promise<QuizRoomAck> {
+    const models = this.requireModels();
+    if (!roomId) throw new RoomActionError('Missing roomId');
+    return this.withRoomLock(roomId, async () => {
+      const room = await this.loadRoom(models, roomId);
+      this.requirePlayer(room, userId);
+      if (room.status !== 'ended') {
+        throw new RoomActionError(
+          'Play again is only available after the game ends',
+        );
+      }
+
+      let votes = this.rematchVotes.get(roomId);
+      if (!votes) {
+        votes = new Set<string>();
+        this.rematchVotes.set(roomId, votes);
+      }
+      const isNewVote = !votes.has(userId);
+      votes.add(userId);
+
+      if (await this.maybeRestartRematch(models, room)) {
+        return {
+          success: true,
+          gameRestarted: true,
+          room: this.toRoomState(room),
+        };
+      }
+
+      if (isNewVote) {
+        const votedUserIds = this.currentRematchVoters(room);
+        this.emit(room, 'room:rematch-vote', {
+          userId,
+          votes: votedUserIds.length,
+          total: room.players.length,
+          votedUserIds,
+        } satisfies RematchVoteEvent);
+      }
+      return { success: true, room: this.toRoomState(room) };
+    });
+  }
+
+  /**
+   * Restarts the room's game when every current member has
+   * voted to play again. Returns whether a restart happened.
+   * Shared by the vote action and the leave path (a departure
+   * can complete unanimity for those who remain).
+   */
+  private async maybeRestartRematch(
+    models: RoomModels,
+    room: RoomDoc,
+  ): Promise<boolean> {
+    if (room.status !== 'ended') return false;
+    if (room.players.length < 2) return false;
+    const voters = this.currentRematchVoters(room);
+    if (voters.length < room.players.length) return false;
+    await this.restartRematch(models, room);
+    return true;
+  }
+
+  /**
+   * The rematch itself: same room, code, players, settings and
+   * source pool — scores zeroed, rounds and the used-theme set
+   * cleared (a small pool must be able to deal a full second
+   * game), and round 1 dealt by the existing sampler through
+   * the usual beginRound funnel (common-pool eligibility and
+   * the library-cache next-match rule included). The finished
+   * game's RP was already scheduled when it ended and is NOT
+   * touched here; the rematch is a NEW game, and its own end
+   * schedules its own award in finishRound as usual.
+   */
+  private async restartRematch(
+    models: RoomModels,
+    room: RoomDoc,
+  ): Promise<void> {
+    this.dropRematchVotes(String(room._id));
+    for (const player of room.players) {
+      player.totalScore = 0;
+    }
+    room.rounds = [] as unknown as RoomDoc['rounds'];
+    room.usedThemeIds = [];
+    room.currentRound = 0;
+
+    await this.beginRound(models, room, 1);
+
+    this.emit(room, 'room:rematch-started', {
+      room: this.toRoomState(room),
+    } satisfies RematchStartedEvent);
   }
 
   /** room:ready — the web's POST /api/quiz/room/ready (toggle). */
@@ -1674,11 +1955,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
     }
 
     const correctAnswer = getCorrectAnswer(theme, room.settings.guessType);
-    const options = await this.generateOptions(
-      models,
-      theme,
-      room.settings.guessType,
-    );
+    const options = await this.generateOptions(models, room, theme);
 
     // The answer window opens when the pre-round countdown ends
     // (owner design, 2026-11-10): startedAt is stamped
@@ -2141,6 +2418,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         this.disarmRoundTimer(String(room._id));
         // Room death = cache death (perf problem 6).
         this.dropLibraryCache(String(room._id));
+        this.dropRematchVotes(String(room._id));
         this.emit(room, 'room:closed', { reason: 'inactivity' });
         return null;
       }
@@ -2172,6 +2450,7 @@ export class QuizRoomsService implements OnModuleInit, OnModuleDestroy {
         await models.rooms.findByIdAndDelete(room._id).exec();
         // Room death = cache death (perf problem 6).
         this.dropLibraryCache(String(room._id));
+        this.dropRematchVotes(String(room._id));
         this.emit(room, 'room:closed', { reason: 'inactivity' });
       }
     }

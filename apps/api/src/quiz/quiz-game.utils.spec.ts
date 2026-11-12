@@ -2,6 +2,8 @@ import {
   buildRoundOptions,
   buildSoloOptions,
   creditedLoadMs,
+  distractorFilterFor,
+  distinctDistractorValues,
   effectiveQuestionStart,
   generateRoomCode,
   getBaseRP,
@@ -97,6 +99,80 @@ describe('option derivation', () => {
     expect(options).toHaveLength(4);
     // d1 and d3 both carry 'Other A' — the solo route does not dedupe.
     expect(options.filter((o) => o === 'Other A')).toHaveLength(2);
+  });
+});
+
+describe('distractorFilterFor scopes (personal-pool options, 2026-11-12)', () => {
+  it('the default call is exactly the web shape (rooms / random regression pin)', () => {
+    expect(distractorFilterFor(theme, 'anime')).toEqual({
+      _id: { $ne: 't1' },
+      isPopular: true,
+      videoUrl: { $nin: [null, ''] },
+      animeTitle: { $ne: 'Romaji Title' },
+    });
+    expect(distractorFilterFor(theme, 'song')).toEqual({
+      _id: { $ne: 't1' },
+      isPopular: true,
+      videoUrl: { $nin: [null, ''] },
+      songTitle: { $nin: [null, '', 'Unknown', 'The Song'] },
+    });
+    expect(distractorFilterFor(theme, 'artist')).toEqual({
+      _id: { $ne: 't1' },
+      isPopular: true,
+      videoUrl: { $nin: [null, ''] },
+      artistName: { $nin: [null, '', 'Unknown', 'The Artist'] },
+    });
+  });
+
+  it('the scoped call drops isPopular, carries the pool $or, and keeps the value exclusions', () => {
+    const poolOr = [{ anilistId: { $in: [11, 22] } }];
+    const scoped = distractorFilterFor(theme, 'anime', {
+      popularOnly: false,
+      poolOr,
+    });
+    expect(scoped).toEqual({
+      _id: { $ne: 't1' },
+      videoUrl: { $nin: [null, ''] },
+      $or: poolOr,
+      animeTitle: { $ne: 'Romaji Title' },
+    });
+    expect(scoped).not.toHaveProperty('isPopular');
+    expect(
+      distractorFilterFor(theme, 'artist', { popularOnly: false, poolOr }),
+    ).toEqual({
+      _id: { $ne: 't1' },
+      videoUrl: { $nin: [null, ''] },
+      $or: poolOr,
+      artistName: { $nin: [null, '', 'Unknown', 'The Artist'] },
+    });
+  });
+});
+
+describe('distinctDistractorValues (shared selection semantics)', () => {
+  const candidates: QuizThemeLike[] = [
+    { _id: 'd1', animeTitleEnglish: 'Other A' },
+    { _id: 'd2', animeTitleEnglish: 'Other B' },
+    { _id: 'd3', animeTitleEnglish: 'Other A' }, // duplicate value
+    { _id: 'd4', animeTitleEnglish: 'English Title' }, // the correct value
+    { _id: 'd5', animeTitleEnglish: 'Other C' },
+    { _id: 'd6', animeTitleEnglish: 'Other D' },
+  ];
+
+  it('keeps the first 3 distinct values, correct value excluded', () => {
+    expect(distinctDistractorValues(theme, 'anime', candidates)).toEqual([
+      'Other A',
+      'Other B',
+      'Other C',
+    ]);
+  });
+
+  it('honours excludeValues and a smaller limit (the popular top-up shape)', () => {
+    expect(
+      distinctDistractorValues(theme, 'anime', candidates, ['Other A'], 2),
+    ).toEqual(['Other B', 'Other C']);
+    expect(distinctDistractorValues(theme, 'anime', candidates, [], 1)).toEqual([
+      'Other A',
+    ]);
   });
 });
 

@@ -1114,6 +1114,17 @@ export interface QuizRoomState {
    * regardless of what the client shows.
    */
   commonPoolCount?: number | null;
+  /**
+   * Play-again votes (owner feature, 2026-11-12): on an ENDED
+   * room, the user ids of CURRENT members who have voted for a
+   * rematch (`room:rematch`). Present only while the room is
+   * ended and at least one current member has voted; the count
+   * clients show is `rematchVotedUserIds.length` against
+   * `players.length`. When every current member (≥2) has voted
+   * the server restarts the game in the same room and the field
+   * disappears with the finished match's state.
+   */
+  rematchVotedUserIds?: string[];
 }
 
 /**
@@ -1150,6 +1161,8 @@ export interface QuizRoomAck {
   /** `room:list-public` ack payload. */
   rooms?: PublicRoomListItem[];
   gameStarted?: boolean;
+  /** `room:rematch` result when the vote completed unanimity and the game restarted in the same room. */
+  gameRestarted?: boolean;
   alreadyAdvanced?: boolean;
   currentRound?: number;
   autoLocked?: boolean;
@@ -1221,6 +1234,31 @@ export interface PlayerAnsweredEvent {
   autoLocked: boolean;
   answeredCount: number;
   totalPlayers: number;
+}
+
+/**
+ * Server → clients `room:rematch-vote` (owner feature,
+ * 2026-11-12): a member of an ended room voted to play again.
+ * `votes` counts CURRENT members who have voted, `total` is
+ * the current member count; `votedUserIds` mirrors the room
+ * state's `rematchVotedUserIds`.
+ */
+export interface RematchVoteEvent {
+  userId: string;
+  votes: number;
+  total: number;
+  votedUserIds: string[];
+}
+
+/**
+ * Server → clients `room:rematch-started`: the rematch vote
+ * reached unanimity and the game restarted in the same room
+ * (same code, players, settings and pool; scores zeroed, fresh
+ * questions). Carries the full fresh room state; the new game's
+ * round 1 follows on `room:round-started` as usual.
+ */
+export interface RematchStartedEvent {
+  room: QuizRoomState;
 }
 
 /** Server → clients `room:round-ended`. */
