@@ -105,7 +105,9 @@ export function PopularCard({
           hitSlop={6}
           accessibilityRole="button"
           accessibilityLabel={
-            saved ? `Unsave ${item.songTitle}` : `Save ${item.songTitle}`
+            saved
+              ? `Unfavourite ${item.songTitle}`
+              : `Favourite ${item.songTitle}`
           }
           accessibilityState={{ selected: !!saved }}
           style={({ pressed }) => [

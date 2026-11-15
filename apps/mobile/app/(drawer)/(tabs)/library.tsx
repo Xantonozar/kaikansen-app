@@ -99,7 +99,7 @@ type Section = 'saved' | 'recent' | 'playlists' | 'anilist' | 'offline';
 type TypeFilter = 'ALL' | 'OP' | 'ED';
 
 /**
- * The segment order follows the MOCK IMAGES — Saved · Playlists ·
+ * The segment order follows the MOCK IMAGES — Favourites · Playlists ·
  * Recent · Offline · AniList (owner ruling 2026-11-09, superseding
  * the handoff pack's text order that Slice 6 shipped). The pills
  * are TEXT-ONLY on one row, as every Library mock draws them.
@@ -108,7 +108,7 @@ type TypeFilter = 'ALL' | 'OP' | 'ED';
  * scaled system font is the known text-cutting risk here.
  */
 const SECTIONS: { key: Section; label: string }[] = [
-  { key: 'saved', label: 'Saved' },
+  { key: 'saved', label: 'Favourites' },
   { key: 'playlists', label: 'Playlists' },
   { key: 'recent', label: 'Recent' },
   { key: 'offline', label: 'Offline' },
@@ -188,7 +188,7 @@ function playedAgo(iso: string): string | null {
 }
 
 /**
- * Library (Slice M2) — the real tab: Saved (favorites), Recent
+ * Library (Slice M2) — the real tab: Favourites, Recent
  * (watch history) and Playlists behind one segmented control (the
  * approved mockup's library treatment). Every list is fetched on
  * focus, so returning from the player or detail screen shows fresh
@@ -388,7 +388,9 @@ export default function LibraryScreen() {
           syncFavoriteSlugs(res.themes);
         })
         .catch((e: unknown) =>
-          setFavError(e instanceof Error ? e.message : 'Could not load saves.'),
+          setFavError(
+            e instanceof Error ? e.message : 'Could not load favourites.',
+          ),
         );
       fetchHistory(cacheOpts)
         .then((res) => {
@@ -475,7 +477,9 @@ export default function LibraryScreen() {
         });
         setLibError(null);
         setAnilistPageError(null);
-        syncFavoriteSlugs(fresh.themes);
+        // AniList themes are NOT favourites: loading them must
+        // never mark them favourited — only themes the user
+        // favourites herself count (auto-love bug, 2026-11-15).
       },
     );
   }, [signedIn, anilistLinked, anilistFirstPageKey]);
@@ -517,7 +521,8 @@ export default function LibraryScreen() {
           });
           setLibError(null);
           setAnilistPageError(null);
-          syncFavoriteSlugs(res.themes);
+          // No favourites sync here — see the AniList silent-swap
+          // note above (auto-love bug, 2026-11-15).
         })
         .catch((e: unknown) => {
           if (gen !== anilistGenRef.current) return;
@@ -571,7 +576,8 @@ export default function LibraryScreen() {
           anilistUser: res.anilistUser ?? null,
         });
         setAnilistPageError(null);
-        syncFavoriteSlugs(res.themes);
+        // No favourites sync here either — AniList pages never
+        // mark themes favourited (auto-love bug, 2026-11-15).
       })
       .catch((e: unknown) => {
         if (gen !== anilistGenRef.current) return;
@@ -597,7 +603,7 @@ export default function LibraryScreen() {
 
   /* Refetch on focus — the tab stays mounted, so freshness is
      focus-driven (returning from a play shows the new history
-     entry; an unsave elsewhere drops out of Saved). The AniList
+     entry; an unfavourite elsewhere drops out of Favourites). The AniList
      segment resets to page 1 under the current filter (no blank:
      the loaded groups stay until the fresh page lands). Downloads
      are local store state, but a focus pass re-verifies their
@@ -727,7 +733,7 @@ export default function LibraryScreen() {
       })
       .catch((e: unknown) =>
         setFavError(
-          e instanceof Error ? e.message : 'Could not load more saves.',
+          e instanceof Error ? e.message : 'Could not load more favourites.',
         ),
       )
       .finally(() => setFavBusy(false));
@@ -930,7 +936,7 @@ export default function LibraryScreen() {
       </View>
       <Text style={styles.centerTitle}>Your library</Text>
       <Text style={styles.centerNote}>
-        Log in to see your saved themes, watch history and playlists.
+        Log in to see your favourite themes, watch history and playlists.
       </Text>
       <Pressable
         onPress={() => router.push('/login')}
@@ -967,7 +973,7 @@ export default function LibraryScreen() {
     if (fixtureMode) {
       return (
         <Text style={styles.emptyText}>
-          Demo mode — saved themes live in your account on the live API.
+          Demo mode — favourite themes live in your account on the live API.
           Nothing is stored here.
         </Text>
       );
@@ -1018,7 +1024,7 @@ export default function LibraryScreen() {
         ))}
         {fav.themes.length === 0 && (
           <Text style={styles.emptyText}>
-            Nothing saved yet — tap the bookmark on any theme to keep it
+            No favourites yet — tap the bookmark on any theme to keep it
             here.
           </Text>
         )}
@@ -1027,7 +1033,7 @@ export default function LibraryScreen() {
           <Pressable
             onPress={loadMoreFavorites}
             accessibilityRole="button"
-            accessibilityLabel="Load more saved themes"
+            accessibilityLabel="Load more favourite themes"
             style={({ pressed }) => [
               styles.loadMore,
               pressed && styles.pressed,

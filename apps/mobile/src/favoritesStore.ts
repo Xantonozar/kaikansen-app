@@ -100,7 +100,9 @@ async function loadAll(force = false): Promise<void> {
     } catch (e) {
       emit({
         lastError:
-          e instanceof Error ? e.message : 'Could not load your saved themes.',
+          e instanceof Error
+            ? e.message
+            : 'Could not load your favourite themes.',
       });
     } finally {
       loadPromise = null;
@@ -136,7 +138,9 @@ export async function toggleFavorite(slug: string): Promise<string | null> {
     const nextPending = new Set(state.pending);
     nextPending.delete(slug);
     const message =
-      e instanceof Error ? e.message : 'Could not update your saved themes.';
+      e instanceof Error
+        ? e.message
+        : 'Could not update your favourite themes.';
     emit({ slugs: reverted, pending: nextPending, lastError: message });
     return message;
   }

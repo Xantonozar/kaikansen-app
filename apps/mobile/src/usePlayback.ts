@@ -42,6 +42,7 @@ import {
   progressFraction,
   queuePreloadKey,
   shouldPreloadNext,
+  shouldStartQueuePrepare,
   stabilizeProgress,
   stallShouldTrip,
   surfaceReadinessAfterSwap,
@@ -66,6 +67,16 @@ import {
   useDetailAudioProgress,
   type DetailAudioProgress,
 } from './detailAudio';
+import {
+  abandonQueueAudio,
+  getQueueAudioEntry,
+  pinQueueAudioWindow,
+  prepareQueueAudio,
+  queueAudioStallShouldTrip,
+  queueListenCandidates,
+  shouldPrepareSecondNext,
+  useQueueAudioProgress,
+} from './queueAudio';
 import {
   isPlausibleUrl,
   resolveListenCandidates,
@@ -170,15 +181,21 @@ import {
  *   NEVER killed for buffering (see stallShouldTrip in
  *   src/mediaEngine.ts). The quiz engine keeps its own 4s
  *   watchdog; this engine no longer uses it.
- * - PROBLEM 3 (queue next-track preload): while a queue track
- *   plays, the provider passes the NEXT queue item's resolved
- *   listen chain as `nextPreload`; the engine preloads its .ogg
- *   through the slot ONLY once the current track is no longer
- *   buffering (stable playing — src/mediaEngine.ts
- *   shouldPreloadNext), one track ahead; a skip or queue change
- *   re-keys and replaces it, and the eventual advance adopts it
- *   when the claim key matches. Offline next tracks need none
- *   (the provider passes nothing for them).
+ * - PROBLEM 3 (queue next-track preload) → ROLLING QUEUE
+ *   PRELOAD (owner order 2026-11-15): while a queue track
+ *   plays, the provider passes the NEXT TWO queue items'
+ *   resolved listen chains as `nextPreload` / `nextPreload2`.
+ *   In LISTEN mode the next item's .ogg is prepared as a
+ *   resumable full DOWNLOAD (src/queueAudio.ts) under the
+ *   relaxed gate (mediaEngine.shouldStartQueuePrepare — the
+ *   current load settled), the second-next only after the
+ *   next is ready and never on metered connections; the
+ *   advance leads its chain with the landed file or waits on
+ *   the same transfer (30s no-progress abandon to streaming).
+ *   WATCH queue claims keep the original slot path
+ *   (shouldPreloadNext, stable playing, one ahead). A skip or
+ *   queue change re-keys and replaces preparations in both
+ *   paths. Offline next tracks need none.
  * - BUFFER PACKAGE (2026-11-11 evening — the detail claims'
  *   answer to the owner's peak-hour freeze report: both modes
  *   buffering/stuck on a healthy edge, the choke being the
@@ -192,9 +209,12 @@ import {
  *   and activation either plays that file or WAITS on the same
  *   transfer — the player watchdog stands down while waiting,
  *   and the download's own 30s no-progress verdict abandons to
- *   the streamed chain, unchanged. Queue/quiz preload paths are
- *   untouched: only claims whose session key is the engine's
- *   own detail key (slug+entry+mode) take the download path.
+ *   the streamed chain, unchanged. (Since 2026-11-15 QUEUE
+ *   Listen claims take the parallel queue-audio download path
+ *   — see the rolling preload bullet above; quiz preload paths
+ *   are untouched.) Only claims whose session key is the
+ *   engine's own detail key (slug+entry+mode) take THIS
+ *   (detailAudio) download path.
  * - PROBLEM 8 (progress split): progress lives in its own state,
  *   QUANTIZED to whole seconds and reference-stabilised
  *   (stabilizeProgress) — same-second ticks produce no state
@@ -318,11 +338,17 @@ export function usePlayback(args: {
   /** Problem 3: the next queue item's listen chain, preloaded
       once the current track is stably playing. Null = none. */
   nextPreload?: NextTrackPreload | null;
+  /** Rolling preload (2026-11-15): the SECOND-next queue item's
+      listen chain — prepared as a download ONLY after the next
+      item's download is ready and never on metered connections
+      (queueAudio.shouldPrepareSecondNext). Null = none. */
+  nextPreload2?: NextTrackPreload | null;
 }) {
   const { slug, detail, entry, mode, active } = args;
   const watchAudioFallback = args.watchAudioFallback === true;
   const preloadRequest = args.preload ?? null;
   const nextPreload = args.nextPreload ?? null;
+  const nextPreload2 = args.nextPreload2 ?? null;
   const claimPreloadKey = args.claimPreloadKey ?? null;
   const downloads = useDownloads();
 
@@ -409,6 +435,37 @@ export function usePlayback(args: {
     prepareEntry.url === (candidates[0] ?? null)
       ? prepareEntry.uri
       : null;
+  /* Rolling queue prepare (owner order 2026-11-15): a QUEUE
+     claim (its session preload key is a `queue:` key — set by
+     claimQueueItem / goToQueueIndex in the provider) in LISTEN
+     mode runs its chain through the queue-audio download cache
+     (src/queueAudio.ts), exactly as a detail claim runs through
+     detailAudio: a landed prepare file leads the chain, a
+     still-fetching one makes the claim WAIT on that same
+     transfer (queueWait below), and a completed library
+     download still wins outright (localUsable short-circuits
+     above the chain entirely). Watch claims never take this
+     path — the queue prepare is Listen-only by the owner's
+     order, and Watch is untouched. */
+  const queueClaimKey =
+    claimPreloadKey !== null && claimPreloadKey.startsWith('queue:')
+      ? claimPreloadKey
+      : null;
+  const queuePrepareKey =
+    queueClaimKey !== null && mode === 'listen' ? queueClaimKey : null;
+  const queuePrepareProgress = useQueueAudioProgress(queuePrepareKey);
+  void queuePrepareProgress;
+  const queuePrepareEntry = queuePrepareKey
+    ? getQueueAudioEntry(queuePrepareKey)
+    : null;
+  const queuePreparedUri =
+    !localUsable &&
+    candidateIndex === 0 &&
+    queuePrepareEntry !== null &&
+    queuePrepareEntry.status === 'ready' &&
+    queuePrepareEntry.url === (candidates[0] ?? null)
+      ? queuePrepareEntry.uri
+      : null;
   const effectiveCandidates = useMemo(
     () =>
       prepareKey !== null
@@ -417,8 +474,14 @@ export function usePlayback(args: {
             preparedUri,
             remoteChain: candidates,
           })
-        : candidates,
-    [prepareKey, preparedUri, candidates],
+        : queuePrepareKey !== null
+          ? queueListenCandidates({
+              libraryUri: null,
+              preparedUri: queuePreparedUri,
+              remoteChain: candidates,
+            })
+          : candidates,
+    [prepareKey, preparedUri, queuePrepareKey, queuePreparedUri, candidates],
   );
   const detailWait =
     active &&
@@ -429,8 +492,21 @@ export function usePlayback(args: {
     prepareEntry !== null &&
     prepareEntry.status === 'fetching' &&
     prepareEntry.url === (candidates[0] ?? null);
-  const detailWaitRef = useRef(detailWait);
-  detailWaitRef.current = detailWait;
+  const queueWait =
+    active &&
+    queuePrepareKey !== null &&
+    !localUsable &&
+    candidateIndex === 0 &&
+    queuePreparedUri === null &&
+    queuePrepareEntry !== null &&
+    queuePrepareEntry.status === 'fetching' &&
+    queuePrepareEntry.url === (candidates[0] ?? null);
+  /** Either prepare cache is being waited on (detail or queue):
+      the streamed load must not start underneath the transfer,
+      and the player watchdog stands down for the wait. */
+  const prepareWait = detailWait || queueWait;
+  const detailWaitRef = useRef(prepareWait);
+  detailWaitRef.current = prepareWait;
   // The URLs whose failure was already handled (advanced past or
   // surfaced) — a failing source reports through BOTH the load
   // promise and the status listener; PER-URL attribution (watch
@@ -1113,7 +1189,7 @@ export function usePlayback(args: {
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, candidate?.url, candidate?.kind, detailWait]);
+  }, [active, candidate?.url, candidate?.kind, detailWait, queueWait]);
 
   // Deactivation (the detail screen switching themes): pause and
   // forget the loaded source so the next activation starts fresh.
@@ -1279,7 +1355,7 @@ export function usePlayback(args: {
       active,
       hasSource: url !== null,
       failed: playerError !== null,
-    }) && !detailWait;
+    }) && !prepareWait;
   useEffect(() => {
     if (!watchdogArmed) return;
     const id = setInterval(() => {
@@ -1328,6 +1404,32 @@ export function usePlayback(args: {
     }, WATCHDOG_POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [detailWait, prepareKey]);
+
+  /* The queue wait's stall poll — the same 30s no-progress
+     rule (queueAudioStallShouldTrip shares detailAudio's
+     decision): abandoning the transfer drops the entry, lifts
+     the wait, and the audio load effect falls through to the
+     streamed chain, unchanged. A started playback is immune
+     by construction (a wait means nothing has loaded). */
+  useEffect(() => {
+    if (!queueWait || !queuePrepareKey) return;
+    const key = queuePrepareKey;
+    const id = setInterval(() => {
+      const entry = getQueueAudioEntry(key);
+      if (!entry) return;
+      if (
+        queueAudioStallShouldTrip({
+          status: entry.status,
+          now: Date.now(),
+          lastProgressAt: entry.lastProgressAt,
+          playbackStarted: false,
+        })
+      ) {
+        abandonQueueAudio(key);
+      }
+    }, WATCHDOG_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [queueWait, queuePrepareKey]);
 
   /* ---------------- mode-matched preload (inactive) ---------------- */
   // While the claim is INACTIVE, preload the claim mode's media:
@@ -1493,13 +1595,101 @@ export function usePlayback(args: {
   // former adoption effect here always lost its race with the
   // load effect's second replaceAsync — diagnosis §1.3.)
 
-  /* ---------------- problem 3: next-track preload ---------------- */
-  // Once the current track is stably playing (isPlaying AND not
-  // buffering — the owner's gate), preload the next queue item's
-  // .ogg into the slot; the provider's advance claims the same
-  // key, so the track change adopts it. A skip/queue change
-  // re-keys (discard + replace); an offline next needs none.
-  const nextKey = shouldPreloadNext({
+  /* ------------- rolling queue preload (2026-11-15) ----------
+     Owner order, Listen mode: the next queue items' .ogg files
+     are prepared as resumable DOWNLOADS (src/queueAudio.ts)
+     instead of the problem-3 slot stream (avoiding double
+     traffic — a Listen queue claim now uses exactly one
+     prepare path). The gate is the RELAXED one
+     (mediaEngine.shouldStartQueuePrepare): it opens as soon
+     as the current track's load has settled (ready-to-play or
+     playing), not after stable non-buffering play — see that
+     function's note for why. The rolling second (N+2) is
+     prepared ONLY once N+1's entry is ready and never on a
+     metered connection (queueAudio.shouldPrepareSecondNext) —
+     sequential, never parallel. Skip/queue changes re-key:
+     preparations whose key leaves the live window (current
+     claim + next + second) are discarded; the live claim's own
+     key is never discarded (its entry is the chain head the
+     advance waits on / plays). Entries are otherwise left warm
+     in the bounded cache — there is deliberately no unmount
+     discard: the provider is app-level, and a backgrounded
+     app's transfers belong to the native download layer, not
+     to any screen's lifecycle.
+     Watch mode keeps the legacy problem-3 slot path below,
+     byte-for-byte in behaviour (the owner's order is
+     Listen-only; Watch is untouched). */
+  const nextCandidateUrl = useMemo(() => {
+    if (!nextPreload) return null;
+    const tagged = tagCandidates(nextPreload.candidates, 'listen');
+    return tagged.find((c) => c.kind === 'audio')?.url ?? null;
+  }, [nextPreload]);
+  const secondCandidateUrl = useMemo(() => {
+    if (!nextPreload2) return null;
+    const tagged = tagCandidates(nextPreload2.candidates, 'listen');
+    return tagged.find((c) => c.kind === 'audio')?.url ?? null;
+  }, [nextPreload2]);
+  const listenQueue = mode === 'listen';
+  const nextPrepareKey =
+    listenQueue &&
+    shouldStartQueuePrepare({
+      active,
+      currentLoaded: activeStatus === 'readyToPlay',
+      isPlaying,
+      next: nextPreload ? { slug: nextPreload.key, atEntryId: null } : null,
+      nextOffline: nextPreload?.offline ?? false,
+    })
+      ? (nextPreload?.key ?? null)
+      : null;
+  const nextEntryProgress = useQueueAudioProgress(nextPrepareKey);
+  const secondPrepareKey =
+    listenQueue &&
+    nextPrepareKey !== null &&
+    shouldPrepareSecondNext({
+      hasSecond:
+        nextPreload2 !== null && !nextPreload2.offline && secondCandidateUrl !== null,
+      firstStatus: nextEntryProgress?.status ?? null,
+      metered: bufferConnectionKind(connectionSample) === 'metered',
+    })
+      ? (nextPreload2?.key ?? null)
+      : null;
+  const preparedKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!listenQueue) return;
+    const live = new Set<string>();
+    if (queueClaimKey) live.add(queueClaimKey);
+    if (nextPrepareKey) live.add(nextPrepareKey);
+    if (secondPrepareKey) live.add(secondPrepareKey);
+    pinQueueAudioWindow([...live]);
+    for (const key of [...preparedKeysRef.current]) {
+      if (!live.has(key)) {
+        preparedKeysRef.current.delete(key);
+        abandonQueueAudio(key);
+      }
+    }
+    if (nextPrepareKey && nextCandidateUrl) {
+      preparedKeysRef.current.add(nextPrepareKey);
+      prepareQueueAudio(nextPrepareKey, nextCandidateUrl);
+    }
+    if (secondPrepareKey && secondCandidateUrl) {
+      preparedKeysRef.current.add(secondPrepareKey);
+      prepareQueueAudio(secondPrepareKey, secondCandidateUrl);
+    }
+  }, [
+    listenQueue,
+    queueClaimKey,
+    nextPrepareKey,
+    nextCandidateUrl,
+    secondPrepareKey,
+    secondCandidateUrl,
+  ]);
+
+  /* Legacy problem-3 slot path — WATCH queue claims only now
+     (Listen queues use the download cache above): once the
+     current track is stably playing, preload the next item's
+     .ogg into the slot; a skip/queue change re-keys (discard +
+     replace); an offline next needs none. */
+  const nextKey = !listenQueue && shouldPreloadNext({
     isPlaying,
     buffering,
     next: nextPreload ? { slug: nextPreload.key, atEntryId: null } : null,
@@ -1507,11 +1697,6 @@ export function usePlayback(args: {
   })
     ? (nextPreload?.key ?? null)
     : null;
-  const nextCandidateUrl = useMemo(() => {
-    if (!nextPreload) return null;
-    const tagged = tagCandidates(nextPreload.candidates, 'listen');
-    return tagged.find((c) => c.kind === 'audio')?.url ?? null;
-  }, [nextPreload]);
   const lastNextKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const prev = lastNextKeyRef.current;

@@ -984,6 +984,52 @@ export function shouldPreloadNext(snap: NextPreloadSnapshot): boolean {
 }
 
 /**
+ * The queue-audio prepare gate (owner order 2026-11-15 —
+ * supersedes shouldPreloadNext for the QUEUE path; that gate
+ * stays for the slot-stream semantics it describes). The old
+ * gate required stable playing AND not-buffering, which on
+ * the owner's dipping road meant a track that rebuffered
+ * intermittently NEVER opened the gate — so the next track
+ * was never preloaded and buffered too, compounding.
+ *
+ * The relaxed gate opens at the earliest RELIABLE signal
+ * that the current track's load has SETTLED: the engine
+ * reports the current source loaded / ready-to-play
+ * (`currentLoaded`), or playback is actually running
+ * (`isPlaying` implies loaded). It does NOT require
+ * !buffering afterwards: the prepare is a resumable
+ * DownloadResumable transfer of one small (~2–4 MB) file,
+ * issued sequentially (never parallel to another prepare),
+ * so a mid-track rebuffer no longer starves it — and a
+ * paused-after-load claim still prepares its next track,
+ * which is what background listeners need when they return.
+ * It still never opens before the current load settles, so
+ * the prepare never competes with the current track's own
+ * start burst, and never for an offline next track.
+ */
+export interface QueuePrepareSnapshot {
+  /** The session is active (a claim is in play). */
+  active: boolean;
+  /** The current source has loaded / reached ready-to-play. */
+  currentLoaded: boolean;
+  /** Playback is actually running (implies loaded). */
+  isPlaying: boolean;
+  /** The next queue item, if any. */
+  next: { slug: string; atEntryId: number | null } | null;
+  /** The next item is already downloaded (offline needs none). */
+  nextOffline: boolean;
+}
+
+export function shouldStartQueuePrepare(
+  snap: QueuePrepareSnapshot,
+): boolean {
+  if (!snap.active) return false;
+  if (!snap.next) return false;
+  if (snap.nextOffline) return false;
+  return snap.currentLoaded || snap.isPlaying;
+}
+
+/**
  * The preload ticket key for a queue item — slug + entry, so a
  * skip or a version switch re-keys (and thereby discards) the
  * preload instead of serving a stale one.

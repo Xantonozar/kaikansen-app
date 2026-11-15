@@ -10,7 +10,9 @@ import { InjectModel } from '@nestjs/mongoose';
 import type { Model, Types } from 'mongoose';
 import type {
   AnimeDetailResponse,
+  AnimeFranchiseResponse,
   ArtistDetailResponse,
+  FranchiseAnimeGroup,
   HomeResponse,
   NetworkUser,
   RelatedAnime,
@@ -65,6 +67,15 @@ const POPULAR_LIMIT = 50;
  * seasons. Beyond that the rail honestly stays empty.
  */
 const SEASON_FALLBACK_STEPS = 8;
+/**
+ * Franchise serve caps (GET /anime/:id/franchise, owner's order
+ * 2026-11-15): groups and themes SERVED per response, in the
+ * franchise's chronological order. The response's totals always
+ * count the full franchise and `truncated` flags a cut — the
+ * caps bound payload size, never silently shorten the list.
+ */
+export const FRANCHISE_MAX_GROUPS = 25;
+export const FRANCHISE_MAX_THEMES = 200;
 /* Search constants — the web's own values (app/api/search/route.ts). */
 const SEARCH_PAGE_SIZE = 20; // per-type limit of the web's SONGS view
 const SEARCH_GROUP_LIMIT = 5; // per-group limit of the web's ALL view
@@ -1459,6 +1470,194 @@ export class ThemesService {
       .exec();
 
     return { related: (docs as AnimeDoc[]).map(toRelatedAnime) };
+  }
+
+  /**
+   * The anime header synthesized from a theme document — field
+   * for field the synthesis GET /anime/:id performs when the
+   * cache has no document for the anime (see getAnimeDetail).
+   */
+  private animeHeaderFromTheme(animeId: number, t: ThemeDoc): RelatedAnime {
+    return {
+      anilistId: animeId,
+      malId: null,
+      kitsuId: null,
+      titleRomaji: t.animeTitle,
+      titleEnglish: t.animeTitleEnglish ?? null,
+      titleNative: null,
+      titleAlternative: [],
+      season: (t.animeSeason as Season | null) ?? null,
+      seasonYear: t.animeSeasonYear ?? null,
+      genres: [],
+      coverImageLarge: t.animeCoverImage ?? null,
+      coverImageMedium: t.animeCoverImageSmall ?? null,
+      bannerImage: null,
+      studios: t.animeStudios ?? [],
+      series: t.animeSeries ?? [],
+      totalEpisodes: null,
+      status: null,
+      averageScore: null,
+    };
+  }
+
+  /**
+   * GET /anime/:id/franchise (owner's order, 2026-11-15 — "if
+   * anime is searched show franchise so all the songs of that
+   * franchise including all seasons will show there"): the
+   * requested anime plus EVERY anime sharing a `series` name
+   * with it, grouped per anime in chronological order
+   * (seasonYear asc), each group carrying that anime's themes
+   * in the anime page's order (OP before ED, then sequence).
+   *
+   * Membership comes from AnimeCache `series` — the same join
+   * key as the related read, but INCLUDING the requested anime
+   * and with no 10-cap. When the requested anime has no cache
+   * document, its themes' own `animeSeries` names the series
+   * (the detail read's synthesis source), so an uncached anime
+   * still expands to its franchise. 404 exactly like the
+   * sibling reads: non-numeric id (parseInt NaN — guarded, Bug
+   * 4), or an id with neither a cache document nor any theme.
+   *
+   * Groups are served only for anime that HAVE themes (a
+   * themeless season is a related-series card, not an empty
+   * group). Serve caps: FRANCHISE_MAX_GROUPS groups /
+   * FRANCHISE_MAX_THEMES themes, applied in display order;
+   * `totalGroups` / `totalThemes` count the full franchise
+   * before the caps and `truncated` says the caps cut — the
+   * totals are exact because the read already holds every
+   * franchise theme summary in hand to group them.
+   */
+  async getAnimeFranchise(idParam: string): Promise<AnimeFranchiseResponse> {
+    const themeModel = this.requireModel();
+    const animeModel = this.requireAnimeModel();
+    const animeId = Number.parseInt(idParam, 10);
+    if (Number.isNaN(animeId)) {
+      throw new NotFoundException('Anime not found');
+    }
+
+    const animeDoc = (await animeModel
+      .findOne({ anilistId: animeId })
+      .lean()
+      .exec()) as AnimeDoc | null;
+
+    // Franchise membership: every cache document sharing a
+    // series name with the requested anime (itself included —
+    // the find matches it through its own series list).
+    let seriesNames: string[] = animeDoc?.series ?? [];
+    let memberDocs: AnimeDoc[] = [];
+    if (seriesNames.length > 0) {
+      memberDocs = (await animeModel
+        .find({ series: { $in: seriesNames } })
+        .select(ANIME_RELATED_PROJECTION)
+        .sort({ seasonYear: 1 })
+        .lean()
+        .exec()) as AnimeDoc[];
+    }
+    const memberIds = new Set<number>([animeId]);
+    for (const doc of memberDocs) {
+      if (doc.anilistId != null) memberIds.add(doc.anilistId);
+    }
+
+    let themeDocs = (await themeModel
+      .find({ anilistId: { $in: [...memberIds] } })
+      .select(THEME_SUMMARY_PROJECTION)
+      .lean()
+      .exec()) as unknown as ThemeDoc[];
+
+    if (!animeDoc && themeDocs.length === 0) {
+      throw new NotFoundException('Anime not found');
+    }
+
+    if (!animeDoc) {
+      // Uncached requested anime: its first theme's animeSeries
+      // is the only series evidence — expand membership from it
+      // once, then re-read the widened theme set.
+      seriesNames = (themeDocs[0] as ThemeDoc).animeSeries ?? [];
+      if (seriesNames.length > 0) {
+        memberDocs = (await animeModel
+          .find({ series: { $in: seriesNames } })
+          .select(ANIME_RELATED_PROJECTION)
+          .sort({ seasonYear: 1 })
+          .lean()
+          .exec()) as AnimeDoc[];
+        const widened = new Set<number>([animeId]);
+        for (const doc of memberDocs) {
+          if (doc.anilistId != null) widened.add(doc.anilistId);
+        }
+        if (widened.size > memberIds.size) {
+          themeDocs = (await themeModel
+            .find({ anilistId: { $in: [...widened] } })
+            .select(THEME_SUMMARY_PROJECTION)
+            .lean()
+            .exec()) as unknown as ThemeDoc[];
+        }
+      }
+    }
+
+    // Headers by AniList id: cache projections first; the
+    // requested anime falls back to the theme synthesis when
+    // uncached (member anime without a cache document cannot
+    // occur — membership itself comes from the cache).
+    const headers = new Map<number, RelatedAnime>();
+    for (const doc of memberDocs) {
+      if (doc.anilistId != null) headers.set(doc.anilistId, toRelatedAnime(doc));
+    }
+    if (animeDoc) headers.set(animeId, toRelatedAnime(animeDoc));
+
+    const themesByAnime = new Map<number, ThemeDoc[]>();
+    for (const doc of themeDocs) {
+      if (doc.anilistId == null) continue;
+      const list = themesByAnime.get(doc.anilistId) ?? [];
+      list.push(doc);
+      themesByAnime.set(doc.anilistId, list);
+    }
+    if (!headers.has(animeId) && themesByAnime.has(animeId)) {
+      headers.set(
+        animeId,
+        this.animeHeaderFromTheme(animeId, themesByAnime.get(animeId)![0]),
+      );
+    }
+
+    const groups: FranchiseAnimeGroup[] = [...themesByAnime.entries()]
+      .filter(([id]) => headers.has(id))
+      .map(([id, docs]) => ({
+        anime: headers.get(id)!,
+        themes: docs
+          .map(toThemeSummary)
+          .sort(
+            (a, b) =>
+              (a.type === 'OP' ? 0 : 1) - (b.type === 'OP' ? 0 : 1) ||
+              a.sequence - b.sequence ||
+              a.slug.localeCompare(b.slug),
+          ),
+      }))
+      .sort(
+        (a, b) =>
+          (a.anime.seasonYear ?? Number.MAX_SAFE_INTEGER) -
+            (b.anime.seasonYear ?? Number.MAX_SAFE_INTEGER) ||
+          (a.anime.anilistId ?? 0) - (b.anime.anilistId ?? 0),
+      );
+
+    const totalGroups = groups.length;
+    const totalThemes = groups.reduce((sum, g) => sum + g.themes.length, 0);
+
+    // Serve caps, in display order; a group the theme cap cuts
+    // into is served partial (its remaining themes are what the
+    // totals + truncated flag account for).
+    const served: FranchiseAnimeGroup[] = [];
+    let servedThemes = 0;
+    for (const group of groups) {
+      if (served.length >= FRANCHISE_MAX_GROUPS) break;
+      const room = FRANCHISE_MAX_THEMES - servedThemes;
+      if (room <= 0) break;
+      const themes = group.themes.slice(0, room);
+      served.push({ anime: group.anime, themes });
+      servedThemes += themes.length;
+    }
+    const truncated =
+      served.length < totalGroups || servedThemes < totalThemes;
+
+    return { groups: served, totalGroups, totalThemes, truncated };
   }
 
   /**

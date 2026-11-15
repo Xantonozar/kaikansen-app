@@ -70,7 +70,7 @@ type SheetView = 'none' | 'actions' | 'download';
  *   of its list context; falls back to opening the theme, exactly
  *   like the row's play tile);
  * - View theme — the row's onPress (or the theme route);
- * - Save / Unsave — the shared favorites store (same state as the
+ * - Favourite / Unfavourite — the shared favorites store (same state as the
  *   row's bookmark tile);
  * - Add to playlist — the shared AddToPlaylistSheet (extracted from
  *   the theme detail; one picker implementation);
@@ -357,8 +357,8 @@ export function ThemeRowMenu({
                   accessibilityRole="button"
                   accessibilityLabel={
                     saved
-                      ? `Unsave ${item.songTitle}`
-                      : `Save ${item.songTitle}`
+                      ? `Unfavourite ${item.songTitle}`
+                      : `Favourite ${item.songTitle}`
                   }
                   accessibilityState={{ disabled: savePending }}
                   style={({ pressed }) => [
@@ -379,7 +379,7 @@ export function ThemeRowMenu({
                     )}
                   </View>
                   <Text style={styles.actionLabel}>
-                    {saved ? 'Unsave' : 'Save'}
+                    {saved ? 'Unfavourite' : 'Favourite'}
                   </Text>
                 </Pressable>
 

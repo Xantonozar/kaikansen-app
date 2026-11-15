@@ -141,6 +141,12 @@ describe('ThemesService — no database configured', () => {
       ServiceUnavailableException,
     );
   });
+
+  it('getAnimeFranchise answers 503', async () => {
+    await expect(service.getAnimeFranchise('42')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
 });
 
 describe('ThemesService.getHome', () => {
@@ -1862,6 +1868,211 @@ describe('ThemesService.getRelatedAnime', () => {
     expect(res.related[0]).not.toHaveProperty('syncedAt');
     expect(res.related[0]).not.toHaveProperty('synonyms');
     expect(res.related[0]).not.toHaveProperty('atCoverImage');
+  });
+});
+
+describe('ThemesService.getAnimeFranchise', () => {
+  function serviceWithBoth(themeModel: unknown, animeModel: unknown) {
+    return new ThemesService(
+      themeModel as Model<ThemeCacheDocument>,
+      animeModel as Model<AnimeCacheDocument>,
+    );
+  }
+
+  it('serves every season of the franchise, groups chronological, themes in anime-page order', async () => {
+    const animeFind = jest.fn(() =>
+      queryOf([
+        makeAnimeDoc({
+          _id: 'a3',
+          anilistId: 44,
+          titleRomaji: 'Series Anime S3',
+          season: 'FALL',
+          seasonYear: 2022,
+        }),
+        makeAnimeDoc(),
+        makeAnimeDoc({
+          _id: 'a2',
+          anilistId: 43,
+          titleRomaji: 'Series Anime S0',
+          season: 'WINTER',
+          seasonYear: 2019,
+        }),
+      ]),
+    );
+    const themeFind = jest.fn(() =>
+      queryOf([
+        // Season 1's rows deliberately unsorted: ED first, OPs
+        // out of sequence — the service orders OP before ED,
+        // then sequence.
+        makeDoc({ slug: 's1-ed1', type: 'ED', sequence: 1 }),
+        makeDoc({ slug: 's1-op2', type: 'OP', sequence: 2 }),
+        makeDoc({ slug: 's1-op1', type: 'OP', sequence: 1 }),
+        makeDoc({ _id: 't-s3', slug: 's3-op1', anilistId: 44 }),
+        makeDoc({ _id: 't-s0', slug: 's0-ed1', anilistId: 43, type: 'ED' }),
+      ]),
+    );
+    const service = serviceWithBoth(
+      { find: themeFind },
+      { findOne: jest.fn(() => queryOf(makeAnimeDoc())), find: animeFind },
+    );
+
+    const res = await service.getAnimeFranchise('42');
+
+    // Membership is the series join over the cache, self included.
+    expect(animeFind).toHaveBeenCalledWith({ series: { $in: ['Series'] } });
+    // Groups chronological by seasonYear: 2019, 2020, 2022.
+    expect(res.groups.map((g) => g.anime.anilistId)).toEqual([43, 42, 44]);
+    expect(res.groups.map((g) => g.anime.seasonYear)).toEqual([
+      2019, 2020, 2022,
+    ]);
+    // Themes within a group: OP before ED, then sequence.
+    expect(res.groups[1].themes.map((t) => t.slug)).toEqual([
+      's1-op1',
+      's1-op2',
+      's1-ed1',
+    ]);
+    expect(res.groups[0].themes.map((t) => t.slug)).toEqual(['s0-ed1']);
+    expect(res.groups[2].themes.map((t) => t.slug)).toEqual(['s3-op1']);
+    // Group headers are the related projection (no bookkeeping).
+    expect(res.groups[1].anime).toMatchObject({
+      anilistId: 42,
+      titleRomaji: 'Series Anime',
+      season: 'SPRING',
+      seasonYear: 2020,
+      series: ['Series'],
+    });
+    expect(res.groups[1].anime).not.toHaveProperty('syncedAt');
+    expect(res.totalGroups).toBe(3);
+    expect(res.totalThemes).toBe(5);
+    expect(res.truncated).toBe(false);
+  });
+
+  it('answers just the anime’s own group when it has no series recorded', async () => {
+    const animeFind = jest.fn(() => queryOf([]));
+    const service = serviceWithBoth(
+      {
+        find: jest.fn(() =>
+          queryOf([
+            makeDoc(),
+            makeDoc({ slug: 'test_anime-ed1-1', type: 'ED' }),
+          ]),
+        ),
+      },
+      {
+        findOne: jest.fn(() => queryOf(makeAnimeDoc({ series: [] }))),
+        find: animeFind,
+      },
+    );
+
+    const res = await service.getAnimeFranchise('42');
+    expect(animeFind).not.toHaveBeenCalled();
+    expect(res.groups).toHaveLength(1);
+    expect(res.groups[0].anime.anilistId).toBe(42);
+    expect(res.groups[0].themes.map((t) => t.slug)).toEqual([
+      'test_anime-op1-1',
+      'test_anime-ed1-1',
+    ]);
+    expect(res.totalGroups).toBe(1);
+    expect(res.totalThemes).toBe(2);
+    expect(res.truncated).toBe(false);
+  });
+
+  it('404s for an unknown id (no cache document, no themes)', async () => {
+    const service = serviceWithBoth(
+      { find: jest.fn(() => queryOf([])) },
+      { findOne: jest.fn(() => queryOf(null)), find: jest.fn(() => queryOf([])) },
+    );
+    const error = await service
+      .getAnimeFranchise('999')
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NotFoundException);
+    expect((error as NotFoundException).getResponse()).toMatchObject({
+      statusCode: 404,
+      message: 'Anime not found',
+    });
+  });
+
+  it('Bug 4: a non-numeric id answers 404 without querying either model', async () => {
+    const themeFind = jest.fn(() => queryOf([]));
+    const findOne = jest.fn(() => queryOf(null));
+    const service = serviceWithBoth(
+      { find: themeFind },
+      { findOne, find: jest.fn(() => queryOf([])) },
+    );
+    const error = await service
+      .getAnimeFranchise('abc')
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NotFoundException);
+    expect(findOne).not.toHaveBeenCalled();
+    expect(themeFind).not.toHaveBeenCalled();
+  });
+
+  it('expands from the themes’ animeSeries and synthesizes the header when the anime is uncached', async () => {
+    const own = makeDoc({ animeSeries: ['Series'] });
+    const other = makeDoc({
+      _id: 't-other',
+      slug: 'other-op1',
+      anilistId: 43,
+      animeTitle: 'Series Anime S0',
+    });
+    const themeFind = jest.fn((filter: { anilistId: { $in: number[] } }) =>
+      queryOf(filter.anilistId.$in.includes(43) ? [own, other] : [own]),
+    );
+    const service = serviceWithBoth(
+      { find: themeFind },
+      {
+        findOne: jest.fn(() => queryOf(null)),
+        find: jest.fn(() =>
+          queryOf([
+            makeAnimeDoc({
+              _id: 'a2',
+              anilistId: 43,
+              titleRomaji: 'Series Anime S0',
+              season: 'WINTER',
+              seasonYear: 2019,
+            }),
+          ]),
+        ),
+      },
+    );
+
+    const res = await service.getAnimeFranchise('42');
+    // The cached member (2019) sorts before the uncached
+    // requested anime (its themes say FALL 2026).
+    expect(res.groups.map((g) => g.anime.anilistId)).toEqual([43, 42]);
+    expect(res.groups[1].anime).toMatchObject({
+      anilistId: 42,
+      titleRomaji: 'Test Anime',
+      titleEnglish: 'Test Anime EN',
+      season: 'FALL',
+      seasonYear: 2026,
+      series: ['Series'],
+    });
+    expect(res.totalGroups).toBe(2);
+    expect(res.totalThemes).toBe(2);
+    expect(res.truncated).toBe(false);
+  });
+
+  it('caps served themes at 200 while totals stay honest (truncated)', async () => {
+    const many = Array.from({ length: 205 }, (_, i) =>
+      makeDoc({ _id: `cap-${i}`, slug: `cap-op-${i + 1}`, sequence: i + 1 }),
+    );
+    const service = serviceWithBoth(
+      { find: jest.fn(() => queryOf(many)) },
+      {
+        findOne: jest.fn(() => queryOf(makeAnimeDoc({ series: [] }))),
+        find: jest.fn(() => queryOf([])),
+      },
+    );
+
+    const res = await service.getAnimeFranchise('42');
+    expect(res.groups).toHaveLength(1);
+    expect(res.groups[0].themes).toHaveLength(200);
+    expect(res.groups[0].themes[0].slug).toBe('cap-op-1');
+    expect(res.groups[0].themes[199].slug).toBe('cap-op-200');
+    expect(res.totalThemes).toBe(205);
+    expect(res.totalGroups).toBe(1);
+    expect(res.truncated).toBe(true);
   });
 });
 

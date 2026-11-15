@@ -14,14 +14,27 @@ import {
 } from '../../../src/components/Skeleton';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ArrowLeft, ExternalLink } from 'lucide-react-native';
-import type { AnimeDetailResponse, ThemeSummary } from '@kaikansen/contracts';
+import { ArrowLeft, ChevronRight, ExternalLink } from 'lucide-react-native';
+import type {
+  AnimeDetailResponse,
+  AnimeFranchiseResponse,
+  RelatedAnime,
+  RelatedAnimeResponse,
+  ThemeSummary,
+} from '@kaikansen/contracts';
 import {
   cacheKeyFor,
   fetchAnimeDetail,
+  fetchAnimeFranchise,
+  fetchRelatedAnime,
   fixtureMode,
   subscribeCache,
 } from '../../../src/api';
+import {
+  franchiseFlatThemes,
+  franchiseGroupSeasonLine,
+  franchiseSectionVisible,
+} from '../../../src/franchise';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import { getOpenThemesAs } from '../../../src/playbackSettings';
 import {
@@ -61,6 +74,20 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
  * genres (row omitted when empty); "View on AniList" renders
  * only when the payload carries an anilistId. The payload's
  * score/studio/romaji fields stay undrawn: not in the design.
+ *
+ * Below the themes (owner's order, 2026-11-15): "Related
+ * Series" — poster cards for GET /anime/:id/related (the web
+ * page's RelatedAnime rail: cover, title, season/year; a tap
+ * opens that anime's page), hidden entirely when the list is
+ * empty or the read fails, exactly as the web renders nothing
+ * then — and "Franchise" (GET /anime/:id/franchise): ALL of
+ * the franchise's themes grouped per season/anime in
+ * chronological order, whose play discs claim the WHOLE flat
+ * franchise list as the queue so playback (and the queue
+ * preload) chains across seasons. The Franchise section hides
+ * when the franchise is just this anime (its themes already
+ * list above); search reaches this view in one tap — the
+ * search anime row opens this page.
  */
 export default function AnimeDetailScreen() {
   const theme = useTheme();
@@ -73,6 +100,10 @@ export default function AnimeDetailScreen() {
     undefined,
   );
   const [error, setError] = useState<string | null>(null);
+  const [related, setRelated] = useState<RelatedAnime[]>([]);
+  const [franchise, setFranchise] = useState<AnimeFranchiseResponse | null>(
+    null,
+  );
 
   /* Silent swap (perf problem 5): a background revalidation of
      the CATALOGUE-cached detail replaces it in place. */
@@ -82,6 +113,45 @@ export default function AnimeDetailScreen() {
       cacheKeyFor(`/anime/${animeId}`),
       (fresh) => setData(fresh),
     );
+  }, [animeId]);
+
+  /* Silent swaps for the two sections below the themes, same
+     pattern: background revalidations of their cached reads
+     replace them in place. */
+  useEffect(() => {
+    if (fixtureMode || Number.isNaN(animeId)) return;
+    const offRelated = subscribeCache<RelatedAnimeResponse>(
+      cacheKeyFor(`/anime/${animeId}/related`),
+      (fresh) => setRelated(fresh.related),
+    );
+    const offFranchise = subscribeCache<AnimeFranchiseResponse>(
+      cacheKeyFor(`/anime/${animeId}/franchise`),
+      (fresh) => setFranchise(fresh),
+    );
+    return () => {
+      offRelated();
+      offFranchise();
+    };
+  }, [animeId]);
+
+  /* Related + franchise loads: independent of the detail read
+     and of each other — both fetch helpers resolve their empty
+     state ([] / null) on any failure, so a dead section read
+     never takes the page down; the sections simply hide. */
+  useEffect(() => {
+    let live = true;
+    setRelated([]);
+    setFranchise(null);
+    if (Number.isNaN(animeId)) return;
+    void fetchRelatedAnime(animeId).then((res) => {
+      if (live) setRelated(res);
+    });
+    void fetchAnimeFranchise(animeId).then((res) => {
+      if (live) setFranchise(res);
+    });
+    return () => {
+      live = false;
+    };
   }, [animeId]);
 
   useEffect(() => {
@@ -153,6 +223,35 @@ export default function AnimeDetailScreen() {
         onPlay={() => playTheme(item.slug)}
       />
     ));
+
+  /* Franchise play (owner's order, 2026-11-15): a franchise
+     row's PLAY DISC claims the WHOLE franchise — every group
+     flattened in display order — at the tapped row, in the
+     user's Open-themes-as mode (the same claim shape as the
+     page's own rows), so the queue walks season after season
+     and the queue preload chains across them. Claim only, no
+     navigation; the card's press opens the theme detail. */
+  const playFranchiseTheme = useCallback(
+    (slug: string) => {
+      if (!franchise) return;
+      const flat = franchiseFlatThemes(franchise.groups);
+      const index = flat.findIndex((t) => t.slug === slug);
+      if (index >= 0) {
+        startQueue(
+          queueItemsFromSummaries(flat),
+          index,
+          getOpenThemesAs(),
+          'other',
+        );
+      }
+    },
+    [franchise, startQueue],
+  );
+
+  const showFranchise = franchiseSectionVisible(franchise, animeId);
+  const franchiseServedThemes = franchise
+    ? franchise.groups.reduce((n, g) => n + g.themes.length, 0)
+    : 0;
 
   const metaLine = data
     ? [
@@ -264,6 +363,143 @@ export default function AnimeDetailScreen() {
               <Text style={styles.emptyText}>
                 No themes for this anime yet.
               </Text>
+            )}
+
+            {/* Related Series (web parity): poster cards in a
+                two-up grid — cover, title, season/year. Hidden
+                entirely when the read answered empty or failed
+                (the web renders nothing then). */}
+            {related.length > 0 && (
+              <View style={styles.section}>
+                <Text style={styles.sectionHeading}>Related Series</Text>
+                <View style={styles.relatedGrid}>
+                  {related.map((item) => (
+                    <Pressable
+                      key={item.anilistId ?? item.titleRomaji}
+                      onPress={() =>
+                        item.anilistId != null &&
+                        router.push(`/anime/${item.anilistId}`)
+                      }
+                      disabled={item.anilistId == null}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${item.titleEnglish ?? item.titleRomaji}`}
+                      style={({ pressed }) => [
+                        styles.relatedCard,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      {item.coverImageLarge ?? item.coverImageMedium ? (
+                        <AppImage
+                          source={
+                            item.coverImageLarge ?? item.coverImageMedium ?? ''
+                          }
+                          style={styles.relatedCover}
+                        />
+                      ) : (
+                        <View style={[styles.relatedCover, styles.placeholder]} />
+                      )}
+                      <Text style={styles.relatedTitle} numberOfLines={2}>
+                        {item.titleEnglish ?? item.titleRomaji}
+                      </Text>
+                      {(item.season || item.seasonYear) && (
+                        <Text style={styles.relatedMeta} numberOfLines={1}>
+                          {[item.season, item.seasonYear]
+                            .filter(Boolean)
+                            .join(' ')}
+                        </Text>
+                      )}
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+            )}
+
+            {/* Franchise: every season's themes together,
+                grouped per anime in chronological order; a
+                group's header opens that anime's page (the
+                current anime's own header is inert — the user
+                is already here). */}
+            {showFranchise && franchise && (
+              <View style={styles.section}>
+                <Text style={styles.sectionHeading}>Franchise</Text>
+                {franchise.totalGroups > 1 && (
+                  <Text style={styles.franchiseMeta}>
+                    {franchise.totalThemes}{' '}
+                    {franchise.totalThemes === 1 ? 'theme' : 'themes'} across{' '}
+                    {franchise.totalGroups} anime
+                  </Text>
+                )}
+                {franchise.truncated && (
+                  <Text style={styles.franchiseMeta}>
+                    Showing {franchiseServedThemes} of{' '}
+                    {franchise.totalThemes} themes — the largest
+                    franchises are capped.
+                  </Text>
+                )}
+                {franchise.groups.map((g) => {
+                  const seasonLine = franchiseGroupSeasonLine(g.anime);
+                  const isCurrent = g.anime.anilistId === animeId;
+                  return (
+                    <View
+                      key={g.anime.anilistId ?? g.anime.titleRomaji}
+                      style={styles.franchiseGroup}
+                    >
+                      <Pressable
+                        onPress={() =>
+                          g.anime.anilistId != null &&
+                          router.push(`/anime/${g.anime.anilistId}`)
+                        }
+                        disabled={isCurrent || g.anime.anilistId == null}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Open ${g.anime.titleEnglish ?? g.anime.titleRomaji}`}
+                        style={({ pressed }) => [
+                          styles.groupHeader,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        {g.anime.coverImageLarge ?? g.anime.coverImageMedium ? (
+                          <AppImage
+                            source={
+                              g.anime.coverImageLarge ??
+                              g.anime.coverImageMedium ??
+                              ''
+                            }
+                            style={styles.groupCover}
+                          />
+                        ) : (
+                          <View style={[styles.groupCover, styles.placeholder]} />
+                        )}
+                        <View style={styles.groupMain}>
+                          <Text style={styles.groupTitle} numberOfLines={1}>
+                            {g.anime.titleEnglish ?? g.anime.titleRomaji}
+                          </Text>
+                          <Text style={styles.groupMeta} numberOfLines={1}>
+                            {seasonLine ? `${seasonLine} · ` : ''}
+                            {g.themes.length}{' '}
+                            {g.themes.length === 1 ? 'theme' : 'themes'}
+                          </Text>
+                        </View>
+                        {!isCurrent && g.anime.anilistId != null && (
+                          <ChevronRight
+                            size={18}
+                            color={theme.secondary}
+                            strokeWidth={2}
+                          />
+                        )}
+                      </Pressable>
+                      {g.themes.map((item) => (
+                        <ThemeRow
+                          key={item.slug}
+                          item={item}
+                          anime
+                          onPress={() => openTheme(item.slug)}
+                          onPlay={() => playFranchiseTheme(item.slug)}
+                        />
+                      ))}
+                    </View>
+                  );
+                })}
+              </View>
             )}
 
             {data.anime.anilistId != null && (
@@ -437,5 +673,86 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.body,
       color: theme.muted,
       paddingTop: spacing.lg,
+    },
+    relatedGrid: {
+      // The web's Related Series grid at phone width: two
+      // poster cards per row, the column gap as the gutter.
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.md,
+    },
+    relatedCard: {
+      width: '47%',
+      flexGrow: 1,
+    },
+    relatedCover: {
+      // AniList covers are 2:3 portraits (the web card's
+      // aspect-[2/3]); radius follows the poster treatment
+      // (DESIGN.md §7: images inherit their container's radius,
+      // 24 for poster cards).
+      width: '100%',
+      aspectRatio: 2 / 3,
+      borderRadius: radii.card,
+      backgroundColor: theme.surface,
+    },
+    relatedTitle: {
+      // The web card's title under the poster: 12px bold,
+      // two lines before it truncates.
+      fontSize: 12,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
+      marginTop: spacing.sm,
+    },
+    relatedMeta: {
+      // The web overlay's "YEAR SEASON" line, set as meta text
+      // under the title (the meta-line typography of this page).
+      fontSize: 11,
+      fontFamily: 'Inter_500Medium',
+      letterSpacing: 0.3,
+      color: theme.secondary,
+      marginTop: 2,
+    },
+    franchiseMeta: {
+      // The section's honest totals line (and its truncation
+      // note): meta typography, inset like the headings.
+      fontSize: 12,
+      fontFamily: 'Inter_500Medium',
+      color: theme.muted,
+      paddingHorizontal: spacing.xs,
+      marginBottom: spacing.sm,
+    },
+    franchiseGroup: {
+      marginTop: spacing.md,
+    },
+    groupHeader: {
+      // The Library AniList segment's group header pattern: a
+      // small portrait cover, the anime's title + season/meta
+      // line, and a chevron when the header navigates.
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      paddingHorizontal: spacing.xs,
+      marginBottom: spacing.sm,
+    },
+    groupCover: {
+      width: 44,
+      height: 59,
+      borderRadius: radii.base,
+      backgroundColor: theme.surface,
+    },
+    groupMain: {
+      flex: 1,
+    },
+    groupTitle: {
+      fontSize: 13,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
+    },
+    groupMeta: {
+      fontSize: 11,
+      fontFamily: 'Inter_500Medium',
+      letterSpacing: 0.3,
+      color: theme.secondary,
+      marginTop: 2,
     },
   });

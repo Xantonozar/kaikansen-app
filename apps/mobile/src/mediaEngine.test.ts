@@ -37,6 +37,7 @@ import {
   queuePreloadKey,
   resolveSoloNextPreload,
   shouldPreloadNext,
+  shouldStartQueuePrepare,
   stabilizeProgress,
   stallShouldTrip,
   videoLoadAction,
@@ -274,6 +275,41 @@ describe('problem 3 — next-track preload gate', () => {
     );
     expect(queuePreloadKey(next)).not.toBe(
       queuePreloadKey({ slug: 'next-theme', atEntryId: 7 }),
+    );
+  });
+});
+
+describe('rolling queue prepare gate (2026-11-15, relaxed)', () => {
+  const next = { slug: 'next-theme', atEntryId: 42 };
+  const base = {
+    active: true,
+    currentLoaded: true,
+    isPlaying: false,
+    next,
+    nextOffline: false,
+  };
+
+  it('opens as soon as the current load has settled — before playing', () => {
+    // Loaded but not yet playing (e.g. paused after load): the
+    // old gate stayed shut; the relaxed gate opens.
+    expect(shouldStartQueuePrepare(base)).toBe(true);
+    // Playing implies loaded, even if the loaded flag lags.
+    expect(
+      shouldStartQueuePrepare({ ...base, currentLoaded: false, isPlaying: true }),
+    ).toBe(true);
+  });
+
+  it('stays shut while the current load has not settled', () => {
+    expect(
+      shouldStartQueuePrepare({ ...base, currentLoaded: false }),
+    ).toBe(false);
+  });
+
+  it('stays shut when inactive, without a next item, or when offline', () => {
+    expect(shouldStartQueuePrepare({ ...base, active: false })).toBe(false);
+    expect(shouldStartQueuePrepare({ ...base, next: null })).toBe(false);
+    expect(shouldStartQueuePrepare({ ...base, nextOffline: true })).toBe(
+      false,
     );
   });
 });

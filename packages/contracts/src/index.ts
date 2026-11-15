@@ -2097,6 +2097,44 @@ export interface AnimeDetailResponse {
   themes: ThemeSummary[];
 }
 
+/**
+ * One anime's slice of a franchise (GET /anime/:id/franchise): the
+ * anime's header (the RelatedAnime projection — synthesized from
+ * its first theme when the cache has no document for it, exactly
+ * as GET /anime/:id synthesizes) plus its themes as ThemeSummary
+ * rows, ordered as the anime page orders them (Openings before
+ * Endings, then sequence).
+ */
+export interface FranchiseAnimeGroup {
+  anime: RelatedAnime;
+  themes: ThemeSummary[];
+}
+
+/**
+ * Response body of GET /anime/:id/franchise — the requested
+ * anime's whole franchise: EVERY anime sharing a `series` name
+ * with it (itself included), grouped per anime in chronological
+ * order (seasonYear asc), each group carrying that anime's
+ * themes. An anime with no series recorded — or whose series
+ * members have no themes in the catalogue — answers with just
+ * its own group. Anime whose cache documents exist but which
+ * have no themes are not served as empty groups (the related
+ * read covers them); the requested anime is always represented
+ * when it has themes.
+ *
+ * Caps (honest, never silent): at most 25 groups and 200 themes
+ * are SERVED, in the order above. `totalGroups` / `totalThemes`
+ * always count the FULL franchise before the caps, and
+ * `truncated` is true when the caps cut anything — a client can
+ * say "showing X of Y" instead of pretending the list ended.
+ */
+export interface AnimeFranchiseResponse {
+  groups: FranchiseAnimeGroup[];
+  totalGroups: number;
+  totalThemes: number;
+  truncated: boolean;
+}
+
 /** One artist's header (GET /artists/:slug) — the ArtistCache projection. */
 export interface ArtistDetail {
   slug: string;

@@ -232,7 +232,7 @@ export function ThemeRow({
       hitSlop={7}
       accessibilityRole="button"
       accessibilityLabel={
-        saved ? `Unsave ${item.songTitle}` : `Save ${item.songTitle}`
+        saved ? `Unfavourite ${item.songTitle}` : `Favourite ${item.songTitle}`
       }
       accessibilityState={{ selected: !!saved }}
       style={({ pressed }) => [

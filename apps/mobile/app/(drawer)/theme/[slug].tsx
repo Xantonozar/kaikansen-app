@@ -1199,7 +1199,7 @@ export default function ThemeDetailScreen() {
                 <Pressable
                   onPress={onToggleSave}
                   accessibilityRole="button"
-                  accessibilityLabel={saved ? 'Unsave theme' : 'Save theme'}
+                  accessibilityLabel={saved ? 'Unfavourite theme' : 'Favourite theme'}
                   accessibilityState={{ selected: saved }}
                   style={({ pressed }) => [
                     styles.actionDisc,

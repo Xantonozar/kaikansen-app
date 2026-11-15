@@ -34,7 +34,7 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
 
 /**
  * Favourites (DESIGN.md §6.12, layout-fidelity Slice 4) — the
- * standalone screen over the SAME data as Library → Saved: GET
+ * standalone screen over the SAME data as Library → Favourites: GET
  * /library/favorites, paged, with the favourites store keeping
  * every surface in step. Rows are the shared ThemeRow; the row's
  * toggle un-favourites in place (the row drops out and the count
@@ -42,7 +42,7 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
  * exactly the Library segment's behaviour, presented as the
  * designed full screen ("N favourite themes" + rows). The row
  * ⋮ menu belongs to Slice 5, like everywhere else. Entered from
- * Library → Saved's "View all" (the §6.10/§6.11 entry model).
+ * Library → Favourites' "View all" (the §6.10/§6.11 entry model).
  */
 export default function FavouritesScreen() {
   const theme = useTheme();
@@ -68,7 +68,9 @@ export default function FavouritesScreen() {
         syncFavoriteSlugs(res.themes);
       })
       .catch((e: unknown) =>
-        setFavError(e instanceof Error ? e.message : 'Could not load saves.'),
+        setFavError(
+          e instanceof Error ? e.message : 'Could not load favourites.',
+        ),
       );
   }, [signedIn]);
 
@@ -129,7 +131,7 @@ export default function FavouritesScreen() {
       })
       .catch((e: unknown) =>
         setFavError(
-          e instanceof Error ? e.message : 'Could not load more saves.',
+          e instanceof Error ? e.message : 'Could not load more favourites.',
         ),
       )
       .finally(() => setFavBusy(false));
@@ -179,7 +181,7 @@ export default function FavouritesScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         {fixtureMode ? (
           <Text style={styles.emptyText}>
-            Demo mode — saved themes live in your account on the live API.
+            Demo mode — favourite themes live in your account on the live API.
             Nothing is stored here.
           </Text>
         ) : !signedIn ? (
@@ -189,7 +191,7 @@ export default function FavouritesScreen() {
             </View>
             <Text style={styles.centerTitle}>Your favourites</Text>
             <Text style={styles.centerNote}>
-              Log in to see the themes you have saved.
+              Log in to see your favourite themes.
             </Text>
             <Pressable
               onPress={() => router.push('/login')}

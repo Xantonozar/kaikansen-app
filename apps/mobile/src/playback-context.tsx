@@ -364,12 +364,17 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
        (theme detail's open mode) preloads its mode's chain —
        Listen resolves the listen chain, Watch the watch chain —
        under the claim key, so the activating tap adopts it.
-     - `engineNextPreload` (problem 3): the NEXT queue item,
-       resolved through the same fetch + entry resolution queue
-       advances use, feeds its listen chain to the engine; the
-       engine preloads its .ogg only once the current track is
-       stably playing, under the queue item's key, and the
-       advance's claim adopts it when it lands on that item. The
+     - `engineNextPreload` (problem 3 → rolling preload,
+       2026-11-15): the NEXT queue item, resolved through the
+       same fetch + entry resolution queue advances use, feeds
+       its listen chain to the engine; in Listen mode the engine
+       prepares its .ogg as a full download (src/queueAudio.ts)
+       once the current track's load has settled, under the
+       queue item's key, and the advance's claim leads with the
+       landed file (or waits on the transfer) when it lands on
+       that item. `engineNextPreload2` carries the second-next
+       item for the rolling second (prepared only after the
+       next is ready, never on metered). The
        next item's detail resolution is kicked when the CURRENT
        item's resolution settles (never competing with the
        current track's own load beyond a catalogue read); an
@@ -433,6 +438,68 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     };
   }, [rawNextItem, nextDetail]);
 
+  /* Rolling preload (owner order 2026-11-15): the SECOND-next
+     queue item, resolved the same way as the next. Resolving
+     its detail is only a catalogue read — the engine prepares
+     its AUDIO download solely after the next item's download
+     is ready and never on metered connections
+     (queueAudio.shouldPrepareSecondNext), so the transfers
+     themselves stay sequential, one at a time, in queue order.
+     This provider is app-level (mounted at the root layout),
+     so the resolution + preparation keep running while the
+     user backgrounds the app and listens — they are not tied
+     to any screen being focused or foregrounded. */
+  const [secondDetail, setSecondDetail] = useState<{
+    slug: string;
+    detail: ThemeDetail;
+  } | null>(null);
+  const rawSecondItem =
+    queue && queue.index < queue.items.length - 2
+      ? queue.items[queue.index + 2]
+      : null;
+  useEffect(() => {
+    if (!rawSecondItem || !session.active) {
+      setSecondDetail(null);
+      return;
+    }
+    let live = true;
+    fetchThemeBySlug(rawSecondItem.slug)
+      .then((data) => {
+        if (live && data) {
+          setSecondDetail({ slug: rawSecondItem.slug, detail: data });
+        }
+      })
+      .catch(() => {
+        // A failed second-next resolution simply means no
+        // rolling-second preload.
+      });
+    return () => {
+      live = false;
+    };
+  }, [rawSecondItem?.slug, session.active]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const engineNextPreload2 = useMemo<NextTrackPreload | null>(() => {
+    if (
+      !rawSecondItem ||
+      !secondDetail ||
+      secondDetail.slug !== rawSecondItem.slug
+    ) {
+      return null;
+    }
+    const entry =
+      secondDetail.detail.entries.find(
+        (e) => e.atEntryId === rawSecondItem.atEntryId,
+      ) ??
+      secondDetail.detail.entries[0] ??
+      null;
+    if (!entry) return null;
+    return {
+      key: queuePreloadKey(rawSecondItem),
+      candidates: resolveListenCandidates(secondDetail.detail, entry),
+      offline: false,
+    };
+  }, [rawSecondItem, secondDetail]);
+
   const playback = usePlayback({
     slug: session.slug,
     detail: session.detail,
@@ -443,6 +510,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     watchAudioFallback: session.watchAudioFallback ?? false,
     preload: enginePreload,
     nextPreload: engineNextPreload,
+    nextPreload2: engineNextPreload2,
     claimPreloadKey: session.preloadKey ?? null,
   });
 

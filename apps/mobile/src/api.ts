@@ -1,8 +1,11 @@
 import type {
   AnimeDetailResponse,
+  AnimeFranchiseResponse,
   ArtistDetailResponse,
   HomeResponse,
   RecordWatchRequest,
+  RelatedAnime,
+  RelatedAnimeResponse,
   SearchGroup,
   SearchResponse,
   Season,
@@ -784,6 +787,50 @@ export async function fetchAnimeDetail(
   } catch (e) {
     if (e instanceof ApiRequestError && e.status === 404) return null;
     throw e;
+  }
+}
+
+/**
+ * Related series for the anime page (GET /anime/:id/related):
+ * the OTHER anime sharing a `series` name, chronological — the
+ * web anime page's Related Series rail. FIXTURE MODE resolves
+ * [] (the bundled snapshot carries no series data to answer
+ * with honestly), and ANY live failure resolves [] too: the
+ * section is a rail, not the page — the web component logs and
+ * renders nothing on failure, and the screen hides an empty
+ * list, so [] is the honest "nothing to show" for both worlds.
+ */
+export async function fetchRelatedAnime(
+  id: number,
+): Promise<RelatedAnime[]> {
+  if (fixtureMode) return [];
+  try {
+    // CATALOGUE class via the apiJson cache wiring on '/anime/…'.
+    const res = await apiJson<RelatedAnimeResponse>(`/anime/${id}/related`);
+    return res.related;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The anime's whole franchise (GET /anime/:id/franchise): every
+ * anime sharing its `series` names, grouped per anime in
+ * chronological order with all of their themes (serve caps +
+ * honest totals — see the contracts type). Resolves null in
+ * fixture mode (the snapshot cannot answer franchise membership
+ * honestly) and on ANY live failure: the anime page hides the
+ * section for null, exactly as it hides an empty related list.
+ */
+export async function fetchAnimeFranchise(
+  id: number,
+): Promise<AnimeFranchiseResponse | null> {
+  if (fixtureMode) return null;
+  try {
+    // CATALOGUE class via the apiJson cache wiring on '/anime/…'.
+    return await apiJson<AnimeFranchiseResponse>(`/anime/${id}/franchise`);
+  } catch {
+    return null;
   }
 }
 

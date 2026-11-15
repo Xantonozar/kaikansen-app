@@ -2,6 +2,7 @@ import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import type {
   AnimeDetailResponse,
+  AnimeFranchiseResponse,
   ArtistDetailResponse,
   HomeResponse,
   RelatedAnimeResponse,
@@ -89,6 +90,15 @@ export class ThemesController {
   })
   related(@Param('id') id: string): Promise<RelatedAnimeResponse> {
     return this.themes.getRelatedAnime(id);
+  }
+
+  @Get('anime/:id/franchise')
+  @ApiOkResponse({
+    description:
+      'The anime’s whole franchise: every anime sharing a series name with this AniList id (itself included), grouped per anime in chronological order (seasonYear asc), each group carrying its themes in anime-page order (OP before ED, then sequence). Serves at most 25 groups / 200 themes; totalGroups/totalThemes count the full franchise and `truncated` flags a cap cut. 404 for an unknown id.',
+  })
+  franchise(@Param('id') id: string): Promise<AnimeFranchiseResponse> {
+    return this.themes.getAnimeFranchise(id);
   }
 
   @Get('anime/:id')

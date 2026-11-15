@@ -57,4 +57,14 @@ describe('Themes without a database (e2e)', () => {
       .get('/season?season=SPRING&year=2026')
       .expect(503);
   });
+
+  it('GET /anime/:id/related returns 503', () => {
+    return request(app.getHttpServer()).get('/anime/42/related').expect(503);
+  });
+
+  it('GET /anime/:id/franchise returns 503', () => {
+    return request(app.getHttpServer())
+      .get('/anime/42/franchise')
+      .expect(503);
+  });
 });
