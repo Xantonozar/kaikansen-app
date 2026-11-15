@@ -8,9 +8,12 @@ import type {
   ThemeSummary,
 } from '@kaikansen/contracts';
 import {
+  FRANCHISE_PAGE_SIZE,
   franchiseFlatThemes,
   franchiseGroupSeasonLine,
+  franchiseHasMore,
   franchiseSectionVisible,
+  franchiseVisibleGroups,
 } from './franchise';
 
 /**
@@ -153,6 +156,82 @@ describe('franchiseGroupSeasonLine', () => {
   });
 });
 
+/** A group of `count` themes with slugs g<id>-t0..t<count-1>. */
+const groupOf = (anilistId: number, count: number): FranchiseAnimeGroup =>
+  group(
+    anilistId,
+    Array.from({ length: count }, (_, i) => `g${anilistId}-t${i}`),
+  );
+
+describe('franchiseVisibleGroups / franchiseHasMore (progressive reveal)', () => {
+  it('pins the page size at 20', () => {
+    expect(FRANCHISE_PAGE_SIZE).toBe(20);
+  });
+
+  it('splits the first group when the budget is smaller than it', () => {
+    const g = groupOf(42, 30);
+    const visible = franchiseVisibleGroups([g], 20);
+    expect(visible).toHaveLength(1);
+    // The entry carries the FULL group (header count stays real)…
+    expect(visible[0].group).toBe(g);
+    expect(visible[0].group.themes).toHaveLength(30);
+    // …and only the budgeted slice of its rows, in served order.
+    expect(visible[0].themes.map((t) => t.slug)).toEqual(
+      g.themes.slice(0, 20).map((t) => t.slug),
+    );
+    expect(franchiseHasMore([g], 20)).toBe(true);
+  });
+
+  it('grows the same group’s slice as the budget grows (cumulative)', () => {
+    const g = groupOf(42, 30);
+    const visible = franchiseVisibleGroups([g], 25);
+    expect(visible).toHaveLength(1);
+    expect(visible[0].themes).toHaveLength(25);
+    expect(visible[0].themes[24].slug).toBe('g42-t24');
+  });
+
+  it('spends the budget across groups in order', () => {
+    const groups = [groupOf(42, 10), groupOf(43, 15), groupOf(44, 10)];
+    const visible = franchiseVisibleGroups(groups, 20);
+    expect(visible.map((v) => v.group.anime.anilistId)).toEqual([42, 43]);
+    expect(visible.map((v) => v.themes.length)).toEqual([10, 10]);
+    expect(franchiseHasMore(groups, 20)).toBe(true);
+  });
+
+  it('stops exactly at a group boundary — the next group contributes 0 and is skipped', () => {
+    const groups = [groupOf(42, 10), groupOf(43, 15)];
+    const visible = franchiseVisibleGroups(groups, 10);
+    expect(visible.map((v) => v.group.anime.anilistId)).toEqual([42]);
+    expect(visible[0].themes).toHaveLength(10);
+    expect(franchiseHasMore(groups, 10)).toBe(true);
+  });
+
+  it('returns every group in full when the budget reaches the total', () => {
+    const groups = [groupOf(42, 10), groupOf(43, 15)];
+    const atTotal = franchiseVisibleGroups(groups, 25);
+    expect(atTotal.map((v) => v.themes.length)).toEqual([10, 15]);
+    expect(franchiseHasMore(groups, 25)).toBe(false);
+    const beyond = franchiseVisibleGroups(groups, 40);
+    expect(beyond.map((v) => v.themes.length)).toEqual([10, 15]);
+    expect(franchiseHasMore(groups, 40)).toBe(false);
+  });
+
+  it('skips empty groups without spending budget on them', () => {
+    const groups = [groupOf(42, 0), groupOf(43, 3), groupOf(44, 0)];
+    const visible = franchiseVisibleGroups(groups, 20);
+    expect(visible.map((v) => v.group.anime.anilistId)).toEqual([43]);
+    expect(visible[0].themes).toHaveLength(3);
+  });
+
+  it('answers empty / no-more for no groups and a zero budget', () => {
+    expect(franchiseVisibleGroups([], 20)).toEqual([]);
+    expect(franchiseHasMore([], 20)).toBe(false);
+    expect(franchiseVisibleGroups([groupOf(42, 5)], 0)).toEqual([]);
+    expect(franchiseHasMore([groupOf(42, 5)], 0)).toBe(true);
+    expect(franchiseHasMore([groupOf(42, 5)], 5)).toBe(false);
+  });
+});
+
 describe('anime page wiring (source scan)', () => {
   const source = readFileSync(
     join(__dirname, '../app/(drawer)/anime/[id].tsx'),
@@ -174,6 +253,15 @@ describe('anime page wiring (source scan)', () => {
 
   it('related cards open the tapped anime’s page', () => {
     expect(source).toContain('router.push(`/anime/${item.anilistId}`)');
+  });
+
+  it('franchise rendering is progressive: sliced groups, scroll trigger, skeletons', () => {
+    expect(source).toContain('franchiseVisibleGroups(');
+    expect(source).toContain('franchiseHasMore(');
+    expect(source).toContain('FRANCHISE_PAGE_SIZE');
+    expect(source).toContain('onScroll={onPageScroll}');
+    expect(source).toContain('franchisePending');
+    expect(source).toContain('franchiseLoadingMore');
   });
 
   it('franchise plays claim the whole flat franchise in the open-themes-as mode', () => {

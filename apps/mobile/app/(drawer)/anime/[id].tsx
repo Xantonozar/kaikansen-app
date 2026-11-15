@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Linking,
   Pressable,
@@ -6,6 +6,8 @@ import {
   StyleSheet,
   Text,
   View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from 'react-native';
 import { AppImage } from '../../../src/components/AppImage';
 import {
@@ -31,9 +33,12 @@ import {
   subscribeCache,
 } from '../../../src/api';
 import {
+  FRANCHISE_PAGE_SIZE,
   franchiseFlatThemes,
   franchiseGroupSeasonLine,
+  franchiseHasMore,
   franchiseSectionVisible,
+  franchiseVisibleGroups,
 } from '../../../src/franchise';
 import { ThemeRow } from '../../../src/components/ThemeRow';
 import { getOpenThemesAs } from '../../../src/playbackSettings';
@@ -87,7 +92,13 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
  * preload) chains across seasons. The Franchise section hides
  * when the franchise is just this anime (its themes already
  * list above); search reaches this view in one tap — the
- * search anime row opens this page.
+ * search anime row opens this page. The section's RENDERING
+ * is progressive (owner's follow-up, 2026-11-15): a skeleton
+ * shell while the fetch is in flight, then at most
+ * FRANCHISE_PAGE_SIZE rows mounted, +1 batch per approach to
+ * the page bottom (skeleton rows during each reveal) — the
+ * DATA stays the one small fetch, so the whole-franchise play
+ * claim above is unaffected.
  */
 export default function AnimeDetailScreen() {
   const theme = useTheme();
@@ -104,6 +115,20 @@ export default function AnimeDetailScreen() {
   const [franchise, setFranchise] = useState<AnimeFranchiseResponse | null>(
     null,
   );
+  /* Progressive reveal (owner's follow-up, 2026-11-15): how
+     many franchise theme rows are MOUNTED — the data is all
+     here from the one fetch; only the rendering is paged.
+     franchisePending separates "fetch still in flight" from
+     "no franchise" (both leave `franchise` null) so the
+     section can hold a skeleton shell while it loads. */
+  const [franchiseVisibleCount, setFranchiseVisibleCount] =
+    useState(FRANCHISE_PAGE_SIZE);
+  const [franchiseLoadingMore, setFranchiseLoadingMore] = useState(false);
+  const [franchisePending, setFranchisePending] = useState(false);
+  const franchiseRevealRef = useRef(false);
+  const franchiseRevealTimer = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
 
   /* Silent swap (perf problem 5): a background revalidation of
      the CATALOGUE-cached detail replaces it in place. */
@@ -142,17 +167,43 @@ export default function AnimeDetailScreen() {
     let live = true;
     setRelated([]);
     setFranchise(null);
-    if (Number.isNaN(animeId)) return;
+    // A new anime starts the reveal over: first batch only, no
+    // batch in flight, and no reveal timer from the old page.
+    setFranchiseVisibleCount(FRANCHISE_PAGE_SIZE);
+    setFranchiseLoadingMore(false);
+    franchiseRevealRef.current = false;
+    if (franchiseRevealTimer.current) {
+      clearTimeout(franchiseRevealTimer.current);
+      franchiseRevealTimer.current = null;
+    }
+    if (Number.isNaN(animeId)) {
+      setFranchisePending(false);
+      return;
+    }
+    setFranchisePending(true);
     void fetchRelatedAnime(animeId).then((res) => {
       if (live) setRelated(res);
     });
     void fetchAnimeFranchise(animeId).then((res) => {
-      if (live) setFranchise(res);
+      if (live) {
+        setFranchise(res);
+        setFranchisePending(false);
+      }
     });
     return () => {
       live = false;
     };
   }, [animeId]);
+
+  /* Never let a reveal timer outlive the screen. */
+  useEffect(() => {
+    return () => {
+      if (franchiseRevealTimer.current) {
+        clearTimeout(franchiseRevealTimer.current);
+        franchiseRevealTimer.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -253,6 +304,36 @@ export default function AnimeDetailScreen() {
     ? franchise.groups.reduce((n, g) => n + g.themes.length, 0)
     : 0;
 
+  /* Reveal the next franchise batch: skeleton rows show for a
+     short beat (~300ms) so the user SEES the loading state
+     while the next batch mounts, then the budget grows by one
+     page. The ref guard makes the trigger non-reentrant — a
+     scroll storm near the bottom cannot queue two batches. */
+  const revealMoreFranchise = useCallback(() => {
+    if (franchiseRevealRef.current || franchiseLoadingMore) return;
+    if (!franchise || !showFranchise) return;
+    if (!franchiseHasMore(franchise.groups, franchiseVisibleCount)) return;
+    franchiseRevealRef.current = true;
+    setFranchiseLoadingMore(true);
+    franchiseRevealTimer.current = setTimeout(() => {
+      franchiseRevealTimer.current = null;
+      setFranchiseVisibleCount((n) => n + FRANCHISE_PAGE_SIZE);
+      setFranchiseLoadingMore(false);
+      franchiseRevealRef.current = false;
+    }, 300);
+  }, [franchise, showFranchise, franchiseVisibleCount, franchiseLoadingMore]);
+
+  const onPageScroll = useCallback(
+    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const { contentOffset, contentSize, layoutMeasurement } =
+        e.nativeEvent;
+      const distanceFromBottom =
+        contentSize.height - layoutMeasurement.height - contentOffset.y;
+      if (distanceFromBottom < 500) revealMoreFranchise();
+    },
+    [revealMoreFranchise],
+  );
+
   const metaLine = data
     ? [
         data.anime.totalEpisodes != null
@@ -318,6 +399,8 @@ export default function AnimeDetailScreen() {
         <ScrollView
           contentContainerStyle={styles.content}
           showsVerticalScrollIndicator={false}
+          onScroll={onPageScroll}
+          scrollEventThrottle={200}
         >
           {/* Full-bleed banner, 224dp (mock: h-56). */}
           {bannerUri ? (
@@ -414,11 +497,33 @@ export default function AnimeDetailScreen() {
               </View>
             )}
 
+            {/* Franchise skeleton shell: while the franchise
+                fetch is still in flight the section holds its
+                place under Related Series with the heading and
+                theme-row shapes. When the fetch resolves it is
+                replaced by the real section — or disappears
+                entirely when the franchise turns out to be just
+                this anime (the hide rule below). A cached
+                response may already have swapped the real
+                section in; the shell then never shows. */}
+            {franchisePending && !showFranchise && (
+              <View style={styles.section}>
+                <Text style={styles.sectionHeading}>Franchise</Text>
+                <SkeletonThemeRow />
+                <SkeletonThemeRow />
+                <SkeletonThemeRow />
+              </View>
+            )}
+
             {/* Franchise: every season's themes together,
                 grouped per anime in chronological order; a
                 group's header opens that anime's page (the
                 current anime's own header is inert — the user
-                is already here). */}
+                is already here). Only the visible budget of
+                rows is MOUNTED (progressive reveal — see
+                franchiseVisibleGroups); the header still reads
+                the full group's count, and plays still claim
+                the whole franchise. */}
             {showFranchise && franchise && (
               <View style={styles.section}>
                 <Text style={styles.sectionHeading}>Franchise</Text>
@@ -436,7 +541,10 @@ export default function AnimeDetailScreen() {
                     franchises are capped.
                   </Text>
                 )}
-                {franchise.groups.map((g) => {
+                {franchiseVisibleGroups(
+                  franchise.groups,
+                  franchiseVisibleCount,
+                ).map(({ group: g, themes: visibleThemes }) => {
                   const seasonLine = franchiseGroupSeasonLine(g.anime);
                   const isCurrent = g.anime.anilistId === animeId;
                   return (
@@ -487,7 +595,7 @@ export default function AnimeDetailScreen() {
                           />
                         )}
                       </Pressable>
-                      {g.themes.map((item) => (
+                      {visibleThemes.map((item) => (
                         <ThemeRow
                           key={item.slug}
                           item={item}
@@ -499,6 +607,17 @@ export default function AnimeDetailScreen() {
                     </View>
                   );
                 })}
+                {/* Next-batch reveal in flight: skeleton rows
+                    hold the space at the end of the groups
+                    until the budget grows and the real rows
+                    mount (~300ms — see revealMoreFranchise). */}
+                {franchiseLoadingMore && (
+                  <>
+                    <SkeletonThemeRow />
+                    <SkeletonThemeRow />
+                    <SkeletonThemeRow />
+                  </>
+                )}
               </View>
             )}
 
