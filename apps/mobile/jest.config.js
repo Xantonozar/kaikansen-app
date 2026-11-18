@@ -33,6 +33,19 @@ module.exports = {
     // any transitive import native-free (release readiness).
     '^@react-native-async-storage/async-storage$':
       '<rootDir>/jest.updates-stub.js',
+    // expo-notifications is a native module reached by
+    // src/chatPush.ts; pure-logic suites never register for
+    // push, so it maps to the same inert stub family.
+    '^expo-notifications$': '<rootDir>/jest.updates-stub.js',
+    // expo-secure-store is a native module imported at module
+    // level by src/storage.ts; suites that load storage
+    // transitively (chat outbox / unread store) map it to an
+    // in-memory stub.
+    '^expo-secure-store$': '<rootDir>/jest.secure-store-stub.js',
+    // react-native itself cannot load in the node test env;
+    // modules that import Platform/AppState at module level
+    // (storage, chat lifecycle) resolve to this minimal stub.
+    '^react-native$': '<rootDir>/jest.react-native-stub.js',
     '^expo-constants$': '<rootDir>/jest.updates-stub.js',
     '^expo-intent-launcher$': '<rootDir>/jest.updates-stub.js',
   },

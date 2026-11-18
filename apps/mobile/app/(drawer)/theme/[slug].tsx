@@ -26,6 +26,7 @@ import { VideoView } from 'expo-video';
 import {
   Check,
   ChevronLeft,
+  ChevronRight,
   Download,
   Headphones,
   Heart,
@@ -48,11 +49,13 @@ import type {
 } from '@kaikansen/contracts';
 import {
   cacheKeyFor,
+  fetchAnimeFranchise,
   fetchSimilarThemes,
   fetchThemeBySlug,
   fixtureMode,
   subscribeCache,
 } from '../../../src/api';
+import { franchiseSectionVisible } from '../../../src/franchise';
 import { ThemeComments } from '../../../src/components/ThemeComments';
 import {
   SkeletonBlock,
@@ -317,6 +320,31 @@ export default function ThemeDetailScreen() {
     'loading' | 'done'
   >('loading');
   const [similar, setSimilar] = useState<ThemeSummary[]>([]);
+
+  /* Franchise presence (owner order, 2026-11-16): whether this
+     theme's anime belongs to a multi-anime franchise — drives
+     the Franchise chip under the meta row, which opens the
+     dedicated franchise screen. Same visibility rule as the
+     anime page's franchise section (franchiseSectionVisible):
+     a "franchise" of only this anime is no franchise. A failed
+     read simply hides the chip. */
+  const [hasFranchise, setHasFranchise] = useState(false);
+  useEffect(() => {
+    let live = true;
+    setHasFranchise(false);
+    const anilistId = detail?.anilistId;
+    if (!anilistId || fixtureMode) return;
+    fetchAnimeFranchise(anilistId)
+      .then((res) => {
+        if (live) setHasFranchise(franchiseSectionVisible(res, anilistId));
+      })
+      .catch(() => {
+        if (live) setHasFranchise(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [detail?.anilistId]);
 
   /* The detail read — fires immediately on slug, in parallel with
      everything below. */
@@ -804,8 +832,31 @@ export default function ThemeDetailScreen() {
       { key: 'sameArtist', label: 'More by this Artist', Icon: Users },
       { key: 'others', label: 'Recommended for You', Icon: Star },
     ];
+    // "See all" (owner order, 2026-11-16): the rail itself is
+    // the capped similar list (20), so a group that HAS a full
+    // list behind it links to it — every theme of the anime,
+    // the whole franchise, every theme of the (primary) artist.
+    // 'Recommended' has no full list; it gets none.
+    const seeAllPaths: Record<string, string | null> = {
+      sameAnime:
+        detail.anilistId != null ? `/anime/${detail.anilistId}` : null,
+      otherSeasons:
+        detail.anilistId != null
+          ? `/franchise/${detail.anilistId}`
+          : null,
+      sameArtist:
+        detail.artistSlugs.length > 0 &&
+        detail.artistSlugs.length === detail.allArtists.length
+          ? `/artist/${detail.artistSlugs[0]}`
+          : null,
+      others: null,
+    };
     return defs
-      .map((d) => ({ ...d, items: buckets[d.key] }))
+      .map((d) => ({
+        ...d,
+        items: buckets[d.key],
+        seeAllPath: seeAllPaths[d.key],
+      }))
       .filter((g) => g.items.length > 0);
   }, [detail, similar, similarState]);
 
@@ -1152,6 +1203,28 @@ export default function ThemeDetailScreen() {
                 )}
               </View>
 
+              {/* Franchise entry (owner order, 2026-11-16): only
+                  when this anime actually belongs to a franchise
+                  (hasFranchise, above) — opens the dedicated
+                  franchise screen with every season's themes. */}
+              {hasFranchise && detail.anilistId != null && (
+                <Pressable
+                  onPress={() =>
+                    router.push(`/franchise/${detail.anilistId}`)
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open the ${detail.animeTitle} franchise`}
+                  style={({ pressed }) => [
+                    styles.franchiseChip,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <LayoutGrid size={14} color={theme.accent} strokeWidth={2} />
+                  <Text style={styles.franchiseChipText}>Franchise</Text>
+                  <ChevronRight size={13} color={theme.accent} strokeWidth={2} />
+                </Pressable>
+              )}
+
               {/* Inline playback problems surface here, under the
                   hero — the strip stays clean. */}
               {playMode !== null && playback.unavailable ? (
@@ -1488,6 +1561,25 @@ export default function ThemeDetailScreen() {
                       <Text style={styles.relatedHeading}>
                         {group.label}
                       </Text>
+                      {group.seeAllPath && (
+                        <Pressable
+                          onPress={() => router.push(group.seeAllPath!)}
+                          accessibilityRole="button"
+                          accessibilityLabel={`See all: ${group.label}`}
+                          hitSlop={6}
+                          style={({ pressed }) => [
+                            styles.seeAllHit,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Text style={styles.seeAllText}>See all</Text>
+                          <ChevronRight
+                            size={13}
+                            color={theme.accent}
+                            strokeWidth={2}
+                          />
+                        </Pressable>
+                      )}
                     </View>
                     {group.items.map((item) => (
                       <ThemeRow
@@ -2165,6 +2257,36 @@ const createStyles = (theme: Theme) =>
     color: theme.muted,
     letterSpacing: 1.4,
     textTransform: 'uppercase',
+    flex: 1,
+  },
+  seeAllHit: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 1,
+    paddingVertical: 2,
+  },
+  seeAllText: {
+    ...typeStyles.caption,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.accent,
+  },
+  franchiseChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: spacing.xs + 2,
+    marginTop: spacing.sm,
+    backgroundColor: theme.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.border,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 2,
+  },
+  franchiseChipText: {
+    ...typeStyles.bodySmall,
+    fontFamily: fontFamilies.bodyStrong,
+    color: theme.text,
   },
   sheetBackdrop: {
     flex: 1,

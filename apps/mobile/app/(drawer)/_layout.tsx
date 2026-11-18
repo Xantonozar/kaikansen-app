@@ -75,6 +75,12 @@ export default function DrawerLayout() {
         name="notifications"
         options={{ drawerItemStyle: { display: 'none' } }}
       />
+      <Drawer.Screen name="chat/index" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen name="chat/new" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen name="chat/requests" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen name="chat/archived" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen name="chat/blocked" options={{ drawerItemStyle: { display: 'none' } }} />
+      <Drawer.Screen name="chat/[id]" options={{ drawerItemStyle: { display: 'none' } }} />
       <Drawer.Screen
         name="downloads"
         options={{ drawerItemStyle: { display: 'none' } }}

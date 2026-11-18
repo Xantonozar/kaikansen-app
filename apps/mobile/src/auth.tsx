@@ -57,6 +57,12 @@ import {
 import { clearResponseCache } from './api';
 import { secureGet, secureRemove, secureSet } from './storage';
 import { setSessionUsername } from './profileStatsCache';
+import {
+  armChatPushPrompt,
+  handleChatSessionUser,
+  initChatLifecycle,
+} from './chatLifecycle';
+import { unregisterChatPush } from './chatPush';
 
 /**
  * Session state for the app (Slice 2).
@@ -212,12 +218,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // account, sign-out) empties the response cache — a previous
     // account's data must never be served to the next one.
     registerUserScopeListener(() => clearResponseCache());
+    // Chat lifecycle: AppState foreground refresh + socket nudge.
+    initChatLifecycle();
     return () => {
       registerRefreshHandler(null);
       registerSessionExpiredHandler(null);
       registerUserScopeListener(null);
     };
   }, [doRefresh, clearSession]);
+
+  /* Chat session keying (deep-analysis fix pass): every session
+   * change — sign-in, sign-out, expiry, account switch — funnels
+   * through the user id, so chat's socket/badge/outbox/push state
+   * follows the account exactly. Skipped while restoring, so a
+   * cold start never tears down a session that is about to be
+   * restored. */
+  useEffect(() => {
+    if (status === 'loading') return;
+    void handleChatSessionUser(user?.id ?? null);
+  }, [status, user?.id]);
 
   /* Restore the session once on mount. */
   useEffect(() => {
@@ -272,6 +291,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(
     async (email: string, password: string) => {
+      // Explicit sign-in: the chat push-permission prompt may
+      // fire once the session lands (in context, non-blocking).
+      armChatPushPrompt();
       const res = fixtureMode
         ? await demoLogin({ email, password })
         : await loginAccount({ email, password });
@@ -282,6 +304,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const register = useCallback(
     async (input: RegisterRequest) => {
+      armChatPushPrompt();
       const res = fixtureMode
         ? await demoRegister(input)
         : await registerAccount(input);
@@ -298,6 +321,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * token into memory (session.ts), profile hydrated via /auth/me.
    */
   const loginWithAnilist = useCallback(async () => {
+    armChatPushPrompt();
     const authorizeUrl = await fetchAnilistAuthorizeUrl('login');
     const result = await withAnilistHandoff('login', () =>
       openAnilistFlow(authorizeUrl),
@@ -376,6 +400,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         // Swallowed on purpose — see above.
       }
+      // Chat push unregister while the access token is still
+      // valid — after clearSession the DELETE could not
+      // authenticate (best-effort; failures swallowed inside).
+      await unregisterChatPush();
     }
     await clearSession();
   }, [clearSession]);

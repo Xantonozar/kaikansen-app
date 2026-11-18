@@ -18,6 +18,7 @@ import { cacheKeyFor, fixtureMode, subscribeCache } from '../../src/api';
 import { useAuth } from '../../src/auth';
 import { Avatar } from '../../src/components/Avatar';
 import { SkeletonNotificationRow } from '../../src/components/Skeleton';
+import { useOverlayBottomInset } from '../../src/useBottomInset';
 import {
   decrementUnread,
   refreshUnreadCount,
@@ -136,6 +137,7 @@ function typeLine(type: NotificationType): string {
 export default function NotificationsScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const bottomInset = useOverlayBottomInset();
   const router = useRouter();
   const { status } = useAuth();
   const signedIn = status === 'signedIn';
@@ -387,7 +389,9 @@ export default function NotificationsScreen() {
       ) : items === null ? (
         /* Initial load (skeleton sweep): notification-row
            shapes inside the list's own card. */
-        <ScrollView contentContainerStyle={styles.content}>
+        <ScrollView
+          contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]}
+        >
           <View style={styles.card}>
             {[0, 1, 2, 3].map((i) => (
               <SkeletonNotificationRow key={i} />
@@ -403,7 +407,9 @@ export default function NotificationsScreen() {
           </Text>
         </View>
       ) : (
-        <ScrollView contentContainerStyle={styles.content}>
+        <ScrollView
+          contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]}
+        >
           {actionError && <Text style={styles.errorText}>{actionError}</Text>}
           <View style={styles.card}>
             {items.map((item, index) => {

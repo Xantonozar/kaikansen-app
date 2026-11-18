@@ -32,6 +32,7 @@ import {
   usePlaybackSession,
   type QueueItem,
 } from '../../src/playback-context';
+import { useOverlayBottomInset } from '../../src/useBottomInset';
 import {
   fontFamilies,
   radii,
@@ -73,6 +74,7 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
 export default function DownloadsScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const bottomInset = useOverlayBottomInset();
   const router = useRouter();
   const downloads = useDownloads();
   const { startQueue, session, playback } = usePlaybackSession();
@@ -147,7 +149,9 @@ export default function DownloadsScreen() {
         <Text style={styles.title}>Downloads</Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView
+        contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]}
+      >
         {fixtureMode ? (
           <Text style={styles.emptyText}>
             Demo mode — downloads are switched off in the demo. On the

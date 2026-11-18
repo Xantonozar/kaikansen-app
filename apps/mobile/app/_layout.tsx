@@ -22,6 +22,7 @@ import {
 import { JetBrainsMono_500Medium } from '@expo-google-fonts/jetbrains-mono';
 import { ThemeProvider, useTheme, useThemeMode } from '../src/theme-context';
 import { AuthProvider } from '../src/auth';
+import { useChatPushTapRouting } from '../src/chatPush';
 import { PlaybackProvider } from '../src/playback-context';
 import { UpdateProvider, useUpdate } from '../src/appUpdateRuntime';
 import { ConnectivityProvider } from '../src/connectivity';
@@ -94,6 +95,10 @@ function Shell() {
   const theme = useTheme();
   const { mode } = useThemeMode();
   const { check } = useUpdate();
+
+  // Chat push taps deep-link into the conversation / requests
+  // screen (deep-analysis fix pass).
+  useChatPushTapRouting();
 
   // The update check (release readiness): once per launch, after
   // the shell has painted. Silent for the home prompt on failure

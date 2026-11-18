@@ -15,6 +15,7 @@ import {
   multiplayerScoreFor,
   secondsRemainingAt,
   SOLO_LOAD_CREDIT_CAP_MS,
+  soloRpForCorrectCount,
   soloScoreFor,
   type QuizThemeLike,
 } from './quiz-game.utils';
@@ -392,6 +393,23 @@ describe('rank math (web lib/rank-utils.ts)', () => {
     expect(getStreakBonus(4)).toBe(15);
     expect(getStreakBonus(5)).toBe(20);
     expect(getStreakBonus(11)).toBe(20);
+  });
+});
+
+describe('soloRpForCorrectCount (owner tiered solo RP, 2026-11-16)', () => {
+  it('pays the picked table across the whole 0–10 range', () => {
+    expect(soloRpForCorrectCount(10)).toBe(10);
+    expect(soloRpForCorrectCount(9)).toBe(10);
+    expect(soloRpForCorrectCount(8)).toBe(5);
+    expect(soloRpForCorrectCount(7)).toBe(5);
+    expect(soloRpForCorrectCount(6)).toBe(2);
+    expect(soloRpForCorrectCount(5)).toBe(2);
+    // "Under 5 negative" — the built split: 3–4 → −3, 0–2 → −5.
+    expect(soloRpForCorrectCount(4)).toBe(-3);
+    expect(soloRpForCorrectCount(3)).toBe(-3);
+    expect(soloRpForCorrectCount(2)).toBe(-5);
+    expect(soloRpForCorrectCount(1)).toBe(-5);
+    expect(soloRpForCorrectCount(0)).toBe(-5);
   });
 });
 

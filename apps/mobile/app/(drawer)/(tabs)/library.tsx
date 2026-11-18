@@ -73,6 +73,7 @@ import {
   useDownloads,
 } from '../../../src/downloads';
 import { ThemeRow } from '../../../src/components/ThemeRow';
+import { useTabBottomInset } from '../../../src/useBottomInset';
 import { AppImage } from '../../../src/components/AppImage';
 import { ThemeRowMenu } from '../../../src/components/ThemeRowMenu';
 import {
@@ -258,6 +259,7 @@ function playedAgo(iso: string): string | null {
 export default function LibraryScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const bottomInset = useTabBottomInset();
   const router = useRouter();
   const { status, user, anilistUsername } = useAuth();
   const favorites = useFavorites();
@@ -1548,7 +1550,7 @@ export default function LibraryScreen() {
   const anilistStateScroll = (content: ReactNode) => (
     <ScrollView
       style={styles.scroll}
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]}
       showsVerticalScrollIndicator={false}
     >
       {content}
@@ -1634,7 +1636,7 @@ export default function LibraryScreen() {
     return (
       <SectionList
         style={styles.scroll}
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]}
         sections={sections}
         keyExtractor={(item) => item.slug}
         stickySectionHeadersEnabled={false}
@@ -2077,7 +2079,10 @@ export default function LibraryScreen() {
         ) : (
           <ScrollView
             style={styles.scroll}
-            contentContainerStyle={styles.content}
+            contentContainerStyle={[
+              styles.content,
+              { paddingBottom: bottomInset },
+            ]}
             showsVerticalScrollIndicator={false}
           >
             {section === 'saved' && renderSaved()}

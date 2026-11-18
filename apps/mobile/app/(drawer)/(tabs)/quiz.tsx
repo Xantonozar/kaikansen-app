@@ -28,6 +28,7 @@ import {
   fetchRankLeaderboard,
 } from '../../../src/socialApi';
 import { RankCard, RankCardSkeleton } from '../../../src/components/RankCard';
+import { useTabBottomInset } from '../../../src/useBottomInset';
 import { RankRow } from '../../../src/components/RankRow';
 import {
   fontFamilies,
@@ -92,6 +93,7 @@ const SOLO_BODY: Record<QuizGuessType, string> = {
 export default function QuizScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const bottomInset = useTabBottomInset();
   const router = useRouter();
   const { status } = useAuth();
 
@@ -193,7 +195,7 @@ export default function QuizScreen() {
   return (
     <ScrollView
       style={styles.screen}
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]}
       showsVerticalScrollIndicator={false}
     >
       <View style={styles.column}>

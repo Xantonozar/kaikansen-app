@@ -16,7 +16,10 @@ import type {
   SoloAnswerRequest,
   SoloAnswerResponse,
   SoloGameState,
+  SoloPlaybackStartedRequest,
   SoloPlaybackStartedResponse,
+  SoloReplaceRequest,
+  SoloReplaceResponse,
 } from '@kaikansen/contracts';
 import { AccessTokenGuard } from '../auth/access-token.guard';
 import type { TokenPayload } from '../auth/auth.service';
@@ -32,6 +35,7 @@ import { SoloQuizService } from './solo-quiz.service';
  * - GET  /quiz/solo/games/:gameId    the live game state (question re-served, timer untouched)
  * - POST /quiz/solo/games/:gameId/playback-started  the client signals the question's audio actually started (or proved unplayable); the answer window opens there, not at the draw
  * - POST /quiz/solo/games/:gameId/answers  answer (or null to skip); scores + persists + advances
+ * - POST /quiz/solo/games/:gameId/replace-failed  the live question's theme could not be played at all; swap it for one of the game's spare themes (same slot, no attempt recorded)
  * - GET  /quiz/leaderboard           public; the web's top-10 attempts board
  *
  * Multiplayer rooms are NOT here — they live on the Socket.IO
@@ -81,8 +85,14 @@ export class QuizController {
   playbackStarted(
     @Req() req: { user: TokenPayload },
     @Param('gameId') gameId: string,
+    @Body() body?: SoloPlaybackStartedRequest,
   ): Promise<SoloPlaybackStartedResponse> {
-    return this.solo.markPlaybackStarted(req.user.userId, gameId);
+    return this.solo.markPlaybackStarted(
+      req.user.userId,
+      gameId,
+      body?.index,
+      body?.slug,
+    );
   }
 
   @Post('quiz/solo/games/:gameId/answers')
@@ -102,6 +112,26 @@ export class QuizController {
       req.user.userId,
       gameId,
       body?.answer ?? null,
+    );
+  }
+
+  @Post('quiz/solo/games/:gameId/replace-failed')
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @UseGuards(AccessTokenGuard)
+  @ApiOkResponse({
+    description:
+      'Swap the live question for a spare theme because its theme could not be played at all (owner order, 2026-11-16). Same slot, no attempt recorded; refuses when the game is finished or the spares are spent.',
+  })
+  replaceFailed(
+    @Req() req: { user: TokenPayload },
+    @Param('gameId') gameId: string,
+    @Body() body?: SoloReplaceRequest,
+  ): Promise<SoloReplaceResponse> {
+    return this.solo.replaceFailedQuestion(
+      req.user.userId,
+      gameId,
+      body?.slug,
     );
   }
 

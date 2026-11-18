@@ -2,7 +2,7 @@
   "expo": {
     "name": "Kaikansen",
     "slug": "kaikansen",
-    "version": "1.0.12",
+    "version": "1.0.13",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "kaikansen",
@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "app.kaikansen.mobile",
-      "versionCode": 15,
+      "versionCode": 16,
       "adaptiveIcon": {
         "backgroundColor": "#F7F2F7",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -40,6 +40,12 @@
       "expo-secure-store",
       "expo-web-browser",
       "expo-video",
+      [
+        "expo-notifications",
+        {
+          "color": "#6E4158"
+        }
+      ],
       [
         "expo-splash-screen",
         {

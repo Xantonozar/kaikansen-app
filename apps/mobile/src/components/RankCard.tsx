@@ -87,12 +87,14 @@ export function RankCard({ profile }: { profile: UserRankProfile }) {
  * the same profile source as RankCard, drawn to the results
  * layout: the rank's icon tile + rank name / RP total, the
  * progress bar, and the "N RP to <target>" caption
- * right-aligned UNDER the bar. The sage "+N RP" pill at the
- * head row's right renders ONLY when `gainedRp` is a real
- * positive gain the just-finished session granted
- * (multiplayer rooms award RP via room:rank-updated); solo
- * runs award no RP, so solo passes nothing and the pill stays
- * hidden (standing rule — solo never shows a +RP pill).
+ * right-aligned UNDER the bar. The RP pill at the head row's
+ * right renders ONLY when `gainedRp` is a real change the
+ * just-finished session granted: sage "+N RP" for a gain
+ * (multiplayer rooms via room:rank-updated; solo runs since
+ * the owner's 2026-11-16 solo-RP order, which superseded the
+ * old solo-never-shows-a-pill rule), danger "−N RP" for a
+ * loss (solo's under-5 tiers and multiplayer's negative
+ * placements alike). Zero or absent stays hidden.
  */
 export function RankResultCard({
   profile,
@@ -117,6 +119,13 @@ export function RankResultCard({
           <View style={styles.gainPill}>
             <Text style={styles.gainPillText}>
               +{gainedRp.toLocaleString('en-US')} RP
+            </Text>
+          </View>
+        )}
+        {gainedRp != null && gainedRp < 0 && (
+          <View style={styles.lossPill}>
+            <Text style={styles.lossPillText}>
+              −{Math.abs(gainedRp).toLocaleString('en-US')} RP
             </Text>
           </View>
         )}
@@ -293,6 +302,17 @@ const createResultStyles = (theme: Theme) =>
       ...typeStyles.bodySmall,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.success,
+    },
+    lossPill: {
+      backgroundColor: theme.dangerContainer,
+      borderRadius: radii.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.xs + 1,
+    },
+    lossPillText: {
+      ...typeStyles.bodySmall,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.danger,
     },
     barTrack: {
       height: 8,

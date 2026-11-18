@@ -22,6 +22,7 @@ import {
   usePlaybackSession,
 } from '../../src/playback-context';
 import { getOpenThemesAs } from '../../src/playbackSettings';
+import { useOverlayBottomInset } from '../../src/useBottomInset';
 import {
   fontFamilies,
   radii,
@@ -47,6 +48,7 @@ import { CONTENT_MAX_WIDTH } from '../../src/layout';
 export default function FavouritesScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const bottomInset = useOverlayBottomInset();
   const router = useRouter();
   const { status } = useAuth();
   const signedIn = status === 'signedIn';
@@ -178,7 +180,9 @@ export default function FavouritesScreen() {
         <Text style={styles.title}>Favourites</Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView
+        contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]}
+      >
         {fixtureMode ? (
           <Text style={styles.emptyText}>
             Demo mode — favourite themes live in your account on the live API.

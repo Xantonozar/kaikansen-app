@@ -34,6 +34,7 @@ import {
   usePlaybackSession,
 } from '../../../src/playback-context';
 import { getOpenThemesAs } from '../../../src/playbackSettings';
+import { useTabBottomInset } from '../../../src/useBottomInset';
 import { fetchFriendsActivity, fetchUserNetwork } from '../../../src/socialApi';
 import { Avatar } from '../../../src/components/Avatar';
 import { PopularCard } from '../../../src/components/PopularCard';
@@ -298,6 +299,7 @@ export default function HomeScreen() {
   );
 
   const { startQueue } = usePlaybackSession();
+  const bottomInset = useTabBottomInset();
   const continuePlay = useCallback(
     (entry: WatchHistoryEntry) => {
       if (!entry.theme) return;
@@ -488,7 +490,7 @@ export default function HomeScreen() {
   return (
     <ScrollView
       style={styles.scroll}
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]}
       showsVerticalScrollIndicator={false}
       scrollEventThrottle={16}
       onScroll={(e) => {

@@ -440,6 +440,64 @@ describe('SoloQuizService — playback-start timing (owner fix, 2026-11-10)', ()
     );
   });
 
+  it('a signal naming the live question stamps it (audit, 2026-11-16)', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const signal = await service.markPlaybackStarted(USER_1, state.gameId, 1);
+    expect(currentOf(service, state.gameId).playbackStartedAt?.toISOString()).toBe(
+      signal.playbackStartedAt,
+    );
+  });
+
+  it('a stale signal never stamps the live question (audit, 2026-11-16)', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    // A signal naming a different slot does not stamp.
+    const stale = await service.markPlaybackStarted(USER_1, state.gameId, 7);
+    expect(currentOf(service, state.gameId).playbackStartedAt).toBeNull();
+    // The response falls back to the draw time instead of crashing.
+    expect(stale.playbackStartedAt).toBe(
+      currentOf(service, state.gameId).startedAt.toISOString(),
+    );
+    // A signal naming a different THEME does not stamp either.
+    await service.markPlaybackStarted(
+      USER_1,
+      state.gameId,
+      1,
+      'some-other-theme',
+    );
+    expect(currentOf(service, state.gameId).playbackStartedAt).toBeNull();
+    // The live question's own signal still stamps normally after.
+    const live = await service.markPlaybackStarted(USER_1, state.gameId, 1);
+    expect(currentOf(service, state.gameId).playbackStartedAt?.toISOString()).toBe(
+      live.playbackStartedAt,
+    );
+  });
+
+  it('the spare-swap race: a late signal for the failed theme cannot stamp its replacement', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const failedSlug = state.question!.theme.slug;
+    // The theme fails; the client fires BOTH the playback-started
+    // signal and the spare swap. The swap lands first.
+    const swapped = await service.replaceFailedQuestion(USER_1, state.gameId);
+    expect(swapped.question.theme.slug).not.toBe(failedSlug);
+    // The failed theme's signal arrives late — same slot index,
+    // old slug. It must NOT stamp the replacement.
+    await service.markPlaybackStarted(USER_1, state.gameId, 1, failedSlug);
+    expect(currentOf(service, state.gameId).playbackStartedAt).toBeNull();
+    // The replacement's own signal stamps it.
+    const live = await service.markPlaybackStarted(
+      USER_1,
+      state.gameId,
+      1,
+      swapped.question.theme.slug,
+    );
+    expect(currentOf(service, state.gameId).playbackStartedAt?.toISOString()).toBe(
+      live.playbackStartedAt,
+    );
+  });
+
   it('refuses the signal for unknown and finished games', async () => {
     const { service } = makeService();
     await expect(
@@ -1274,6 +1332,251 @@ describe('SoloQuizService — personal-pool options (owner ruling, 2026-11-12)',
     // The full game still completes on the 10 dealable themes.
     const seen = await playGame(service, state.gameId, state.question!.options);
     expect(seen).toHaveLength(10);
+  });
+});
+
+describe('SoloQuizService — spare themes (owner order, 2026-11-16)', () => {
+  it('a fresh game holds 5 spares, on create and on re-serve', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    expect(state.sparesRemaining).toBe(5);
+    const again = await service.getGame(USER_1, state.gameId);
+    expect(again.sparesRemaining).toBe(5);
+  });
+
+  it('replace swaps the live question in the same slot — no attempt, no score change', async () => {
+    const { service, models } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    expect(state.question?.theme.slug).toBe('anime-1-op1-1001');
+
+    const swapped = await service.replaceFailedQuestion(USER_1, state.gameId);
+    expect(swapped.sparesRemaining).toBe(4);
+    expect(swapped.question.index).toBe(1); // same slot
+    expect(swapped.question.theme.slug).toBe('anime-2-op1-1002');
+    expect(models.attempts).toHaveLength(0); // the failure recorded nothing
+
+    // The replacement is the live question: answering it scores Q1.
+    const res = await service.submitAnswer(USER_1, state.gameId, 'Anime 2 EN');
+    expect(res.correct).toBe(true);
+    expect(res.answeredCount).toBe(1);
+    expect(res.sparesRemaining).toBe(4);
+    expect(models.attempts).toHaveLength(1);
+    expect(models.attempts[0]).toMatchObject({ themeSlug: 'anime-2-op1-1002' });
+
+    // The failed theme is never re-dealt within the game.
+    const dealtSlugs: string[] = ['anime-2-op1-1002'];
+    let last = null;
+    for (let i = 0; i < 9; i++) {
+      last = await service.submitAnswer(USER_1, state.gameId, null);
+      dealtSlugs.push(last.reveal.slug);
+    }
+    expect(last!.gameOver).toBe(true);
+    expect(dealtSlugs).not.toContain('anime-1-op1-1001');
+    expect(new Set(dealtSlugs).size).toBe(10);
+  });
+
+  it('the fifth spare is the last — a sixth replace refuses', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    for (let left = 4; left >= 0; left--) {
+      const swapped = await service.replaceFailedQuestion(USER_1, state.gameId);
+      expect(swapped.sparesRemaining).toBe(left);
+      expect(swapped.question.index).toBe(1);
+    }
+    await expect(
+      service.replaceFailedQuestion(USER_1, state.gameId),
+    ).rejects.toThrow('No spare themes left for this game');
+  });
+
+  it('getGame re-serves the replacement — the lost-response resync contract (audit, 2026-11-16)', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const swapped = await service.replaceFailedQuestion(USER_1, state.gameId);
+    // The client never saw the swap response; it re-reads the game
+    // and must find the replacement live in the same slot, with
+    // the spent spare reflected — that is what lets it adopt the
+    // server's question instead of drifting.
+    const again = await service.getGame(USER_1, state.gameId);
+    expect(again.gameOver).toBe(false);
+    expect(again.question?.index).toBe(1);
+    expect(again.question?.theme.slug).toBe(swapped.question.theme.slug);
+    expect(again.sparesRemaining).toBe(4);
+  });
+
+  it('replace with a pre-drawn next: the spare never duplicates it, and it is promoted after the answer', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    // The playback-start signal pre-draws Q2 behind Q1.
+    const signal = await service.markPlaybackStarted(USER_1, state.gameId);
+    expect(signal.nextAudioUrl).not.toBeNull();
+    // Q1 then fails and is swapped: the spare is a third theme,
+    // not the pre-drawn Q2 (its id was spent at pre-draw time).
+    const swapped = await service.replaceFailedQuestion(USER_1, state.gameId);
+    expect(swapped.question.theme.slug).toBe('anime-3-op1-1003');
+    // Answering the replacement promotes the PRE-DRAWN Q2.
+    const res = await service.submitAnswer(USER_1, state.gameId, 'Anime 3 EN');
+    expect(res.correct).toBe(true);
+    const q2 = await service.getGame(USER_1, state.gameId);
+    expect(q2.question?.index).toBe(2);
+    expect(q2.question?.theme.slug).toBe('anime-2-op1-1002');
+  });
+
+  it('a replayed swap (stale slug) returns the live question and spends nothing (audit round 2)', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const failedSlug = state.question!.theme.slug;
+
+    const swapped = await service.replaceFailedQuestion(
+      USER_1,
+      state.gameId,
+      failedSlug,
+    );
+    expect(swapped.sparesRemaining).toBe(4);
+
+    // The same call retried (lost response, double submit): the
+    // failed slug no longer matches the live question, so the
+    // server replays the landed swap instead of drawing again.
+    const replay = await service.replaceFailedQuestion(
+      USER_1,
+      state.gameId,
+      failedSlug,
+    );
+    expect(replay.question.theme.slug).toBe(swapped.question.theme.slug);
+    expect(replay.question.index).toBe(1);
+    expect(replay.sparesRemaining).toBe(4);
+  });
+
+  it('a swap naming the LIVE theme’s slug is a real swap, never blocked by the replay guard', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    const first = await service.replaceFailedQuestion(
+      USER_1,
+      state.gameId,
+      state.question!.theme.slug,
+    );
+    // The replacement ALSO fails: its own swap names its slug,
+    // which matches the live question — a genuine second spend.
+    const second = await service.replaceFailedQuestion(
+      USER_1,
+      state.gameId,
+      first.question.theme.slug,
+    );
+    expect(second.question.theme.slug).not.toBe(first.question.theme.slug);
+    expect(second.sparesRemaining).toBe(3);
+  });
+
+  it('two swaps racing for one game cannot both spend (audit round 2)', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    // The first call claims the game synchronously, before its
+    // first await — the second call, fired in the same tick,
+    // must refuse rather than draw a second spare.
+    const first = service.replaceFailedQuestion(USER_1, state.gameId);
+    await expect(
+      service.replaceFailedQuestion(USER_1, state.gameId),
+    ).rejects.toThrow('already in progress');
+    const landed = await first;
+    expect(landed.sparesRemaining).toBe(4);
+    // The lock is released: the next (sequential) swap works.
+    const next = await service.replaceFailedQuestion(USER_1, state.gameId);
+    expect(next.sparesRemaining).toBe(3);
+  });
+
+  it('replace refuses a finished game and another player’s game', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'title' });
+    await expect(
+      service.replaceFailedQuestion(USER_2, state.gameId),
+    ).rejects.toThrow(NotFoundException);
+    for (let i = 1; i <= 10; i++) {
+      await service.submitAnswer(USER_1, state.gameId, `Song ${i}`);
+    }
+    await expect(
+      service.replaceFailedQuestion(USER_1, state.gameId),
+    ).rejects.toThrow('Game already finished');
+  });
+});
+
+describe('SoloQuizService — solo RP (owner order, 2026-11-16)', () => {
+  function makeRpService() {
+    const models = makeFakeModels();
+    const calls: { userId: string; correctCount: number }[] = [];
+    const rankService = {
+      applySoloRP: async (userId: string, correctCount: number) => {
+        calls.push({ userId, correctCount });
+        return { rpBefore: 40, rpAfter: 50, rpChange: 10 };
+      },
+    };
+    const service = new SoloQuizService(
+      models.themeModel as never,
+      models.attemptModel as never,
+      models.userModel as never,
+      models.watchHistoryModel as never,
+      undefined,
+      undefined,
+      rankService as never,
+    );
+    return { service, models, calls };
+  }
+
+  it('the game-over answer carries the applied RP, exactly once, from the correct count', async () => {
+    const { service, calls } = makeRpService();
+    const state = await service.createGame(USER_1, { quizType: 'anime' });
+    let last = null;
+    for (let i = 1; i <= 10; i++) {
+      // 9 correct, the last one wrong.
+      last = await service.submitAnswer(
+        USER_1,
+        state.gameId,
+        i < 10 ? `Anime ${i} EN` : 'Anime 1 EN',
+      );
+      if (!last.gameOver) {
+        expect(last.rpChange).toBeUndefined();
+        expect(last.rpAfter).toBeUndefined();
+      }
+    }
+    expect(last!.gameOver).toBe(true);
+    expect(last!.correctCount).toBe(9);
+    expect(last!.rpChange).toBe(10);
+    expect(last!.rpAfter).toBe(50);
+    expect(calls).toEqual([{ userId: USER_1, correctCount: 9 }]);
+  });
+
+  it('without a rank service the game still ends, reporting rpChange null', async () => {
+    const { service } = makeService();
+    const state = await service.createGame(USER_1, { quizType: 'title' });
+    let last = null;
+    for (let i = 1; i <= 10; i++) {
+      last = await service.submitAnswer(USER_1, state.gameId, `Song ${i}`);
+    }
+    expect(last!.gameOver).toBe(true);
+    expect(last!.rpChange).toBeNull();
+    expect(last!.rpAfter).toBeNull();
+  });
+
+  it('a throwing rank service never fails the game-over answer', async () => {
+    const models = makeFakeModels();
+    const rankService = {
+      applySoloRP: async () => {
+        throw new Error('rank store down');
+      },
+    };
+    const service = new SoloQuizService(
+      models.themeModel as never,
+      models.attemptModel as never,
+      models.userModel as never,
+      models.watchHistoryModel as never,
+      undefined,
+      undefined,
+      rankService as never,
+    );
+    const state = await service.createGame(USER_1, { quizType: 'title' });
+    let last = null;
+    for (let i = 1; i <= 10; i++) {
+      last = await service.submitAnswer(USER_1, state.gameId, `Song ${i}`);
+    }
+    expect(last!.gameOver).toBe(true);
+    expect(last!.rpChange).toBeNull();
   });
 });
 

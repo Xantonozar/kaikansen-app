@@ -1,11 +1,14 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   Pressable,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { AppImage } from './AppImage';
 import { usePathname, useRouter } from 'expo-router';
 import { Pause, Play, SkipForward } from 'lucide-react-native';
@@ -19,6 +22,11 @@ import {
 import { useTheme } from '../theme-context';
 import { usePlaybackSession } from '../playback-context';
 import { isPlayerRouteOrigin } from '../queueOrigin';
+import {
+  miniPlayerDismissTargetX,
+  miniPlayerSwipeOpacity,
+  shouldDismissMiniPlayer,
+} from '../miniPlayerSwipe';
 
 /** Tab routes — the mini player reaches these through the TabBar
     mount; the drawer overlay must skip them (no double render). */
@@ -55,7 +63,13 @@ const HIDDEN_ROUTES: readonly string[] = ['/player', '/quiz/solo', '/quiz/room']
  *
  * Hidden when nothing is loaded (no active session, no resolvable
  * source, nothing to present), on the player route, and during
- * quiz play. No close button — the design has none. The Next
+ * quiz play. No close button — the design has none; dismissal is
+ * the owner's swipe (2026-11-16): drag the bar sideways, either
+ * direction, past the threshold (or flick it) and it slides off
+ * and ends the session via endSession; a shorter drag springs
+ * back. The pan only activates on a clearly horizontal drag, so
+ * taps on the bar and its buttons are untouched (see
+ * src/miniPlayerSwipe.ts for the decision math). The Next
  * button (Slice 2.5) is always drawn, as the mock draws it: it
  * skips through the session's real queue, and at the end of the
  * queue (or in a single-track session) it renders disabled —
@@ -70,8 +84,25 @@ export function MiniPlayer({
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
   const pathname = usePathname();
-  const { session, playback, nowPlaying, hasNext, next, queueOrigin } =
+  const { session, playback, nowPlaying, hasNext, next, queueOrigin, endSession } =
     usePlaybackSession();
+  const { width: viewportWidth } = useWindowDimensions();
+  // Swipe-to-dismiss animation state (owner, 2026-11-16): plain
+  // RN Animated values driven directly from the gesture
+  // callbacks — no re-render per drag frame.
+  const [translateX] = useState(() => new Animated.Value(0));
+  const [swipeOpacity] = useState(() => new Animated.Value(1));
+  const endSessionRef = useRef(endSession);
+  endSessionRef.current = endSession;
+
+  // A dismissed bar animated itself off-screen before the
+  // session ended; a NEW session must start back at rest.
+  useEffect(() => {
+    if (session.active) {
+      translateX.setValue(0);
+      swipeOpacity.setValue(1);
+    }
+  }, [session.active, session.slug, translateX, swipeOpacity]);
 
   if (!session.active || !nowPlaying || playback.unavailable) return null;
   if (HIDDEN_ROUTES.includes(pathname)) return null;
@@ -103,18 +134,63 @@ export function MiniPlayer({
     });
   };
 
+  // Swipe-to-dismiss (owner, 2026-11-16): a horizontal pan —
+  // activeOffsetX keeps taps and vertical scrolls out of the
+  // gesture entirely; failOffsetY hands vertical drags back.
+  const swipeToDismiss = Gesture.Pan()
+    .activeOffsetX([-12, 12])
+    .failOffsetY([-12, 12])
+    .onUpdate((event) => {
+      translateX.setValue(event.translationX);
+      swipeOpacity.setValue(miniPlayerSwipeOpacity(event.translationX));
+    })
+    .onEnd((event) => {
+      if (shouldDismissMiniPlayer(event.translationX, event.velocityX)) {
+        Animated.timing(translateX, {
+          toValue: miniPlayerDismissTargetX(
+            event.translationX,
+            event.velocityX,
+            viewportWidth,
+          ),
+          duration: 180,
+          useNativeDriver: true,
+        }).start(() => endSessionRef.current());
+        Animated.timing(swipeOpacity, {
+          toValue: 0,
+          duration: 180,
+          useNativeDriver: true,
+        }).start();
+      } else {
+        Animated.spring(translateX, {
+          toValue: 0,
+          useNativeDriver: true,
+          damping: 20,
+          stiffness: 220,
+        }).start();
+        Animated.timing(swipeOpacity, {
+          toValue: 1,
+          duration: 120,
+          useNativeDriver: true,
+        }).start();
+      }
+    });
+
   return (
+    <GestureDetector gesture={swipeToDismiss}>
+      <Animated.View
+        style={[
+          placement === 'overlay' ? styles.wrapOverlay : styles.wrapInBar,
+          { transform: [{ translateX }], opacity: swipeOpacity },
+        ]}
+      >
     <Pressable
       onPress={openNowPlaying}
       accessibilityRole="button"
       accessibilityLabel={`Now playing: ${nowPlaying.title}. ${
         playerOrigin ? 'Open the player' : 'Open the theme'
       }`}
-      style={({ pressed }) => [
-        styles.card,
-        placement === 'overlay' ? styles.cardOverlay : styles.cardInBar,
-        pressed && styles.pressed,
-      ]}
+      accessibilityHint="Swipe sideways to stop playback and close"
+      style={({ pressed }) => [styles.card, pressed && styles.pressed]}
     >
       <View style={styles.progressTrack}>
         <View
@@ -171,6 +247,8 @@ export function MiniPlayer({
         <SkipForward size={22} color={theme.text} strokeWidth={2} />
       </Pressable>
     </Pressable>
+      </Animated.View>
+    </GestureDetector>
   );
 }
 
@@ -191,12 +269,14 @@ const createStyles = (theme: Theme) =>
       shadowOffset: { width: 0, height: 3 },
       elevation: 5,
     },
-    cardInBar: {
+    // Placement lives on the swipe wrapper now (it carries the
+    // animated transform); the card itself is purely visual.
+    wrapInBar: {
       marginHorizontal: spacing.md,
       marginTop: spacing.sm,
       marginBottom: spacing.sm,
     },
-    cardOverlay: {
+    wrapOverlay: {
       position: 'absolute',
       left: spacing.md,
       right: spacing.md,

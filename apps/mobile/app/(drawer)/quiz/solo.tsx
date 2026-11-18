@@ -57,7 +57,9 @@ import {
 } from '../../../src/quizPrefetch';
 import {
   createSoloGame,
+  fetchSoloGame,
   markSoloPlaybackStarted,
+  replaceSoloQuestion,
   submitSoloAnswer,
 } from '../../../src/quizApi';
 import { fetchMyRank } from '../../../src/socialApi';
@@ -86,6 +88,22 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 type Phase = 'creating' | 'question' | 'feedback' | 'over' | 'fatal';
 
 const FEEDBACK_MS = 2800;
+
+/**
+ * The media key a question's player, chain freeze and slice
+ * cache share. A question dealt normally is `${game}:${index}`;
+ * a question swapped in by the spare-theme replacement (owner
+ * order, 2026-11-16) carries an `:r<nonce>` suffix — WITHOUT it
+ * the replacement would inherit the failed question's frozen
+ * chain, slice pin and keyed audio reports (same game, same
+ * index) and never load its own audio at all.
+ */
+function mediaKeyFor(gameKey: string, index: number, nonce: number): string {
+  return nonce > 0 ? `${gameKey}:${index}:r${nonce}` : `${gameKey}:${index}`;
+}
+
+/** The owner's line for a failed-playback swap, verbatim. */
+const REPLACE_NOTICE = "Theme couldn't play — trying another one";
 
 /**
  * Anti-hang safety for the playback-start clock (below; v2 —
@@ -145,13 +163,19 @@ const RESULTS_GUESS_LABEL: Record<QuizGuessType, string> = {
  * skips the wait). The end screen is the designed results screen
  * (§6.25): final score card with the run's Correct / Accuracy /
  * Best Streak stats, and the results rank card (RankResultCard)
- * showing the player's CURRENT rank state. RP is multiplayer-only
- * in this system — the API applies it solely when a multiplayer
- * room finishes (the web's rank-utils run from room routes only;
- * solo games record attempts and award no RP) — so the card is
- * fed by /rank/me, no gainedRp is passed, and its "+N RP" award
- * pill stays hidden on solo by design (owner ruling, reaffirmed
- * 2026-11-09). The "saved to your history" footer is literal:
+ * showing the player's CURRENT rank state. SOLO RP (owner order,
+ * 2026-11-16 — superseding his 2026-11-09 solo-no-RP ruling): a
+ * finished solo game now grants RP too, tiered by correct count
+ * (9–10 → +10, 7–8 → +5, 5–6 → +2, 3–4 → −3, 0–2 → −5), applied
+ * server-side at game over and reported on the final answer —
+ * the card is fed by /rank/me (already post-award) AND the
+ * answer's rpChange as gainedRp, so the award pill shows the
+ * run's actual gain or loss. SPARE THEMES (same order): when a
+ * question's whole candidate chain fails, the game swaps it for
+ * one of its 5 spares (replace-failed) under the owner's line
+ * "Theme couldn't play — trying another one" instead of burning
+ * the question; with the spares spent (or an older API) the old
+ * answer-without-audio behaviour remains. The "saved to your history" footer is literal:
  * the API persists one QuizAttempt per solo answer, exactly as
  * the web's submit stores it. The results screen replaces the
  * whole play layout — the question header is not rendered over
@@ -196,6 +220,19 @@ export default function SoloQuizScreen() {
     null,
   );
   const [rankLoading, setRankLoading] = useState(false);
+  // Spare themes + solo RP (owner order, 2026-11-16): the
+  // spares left in this game (0 with an older API — replacement
+  // then simply never triggers), the live replacement swap's
+  // nonce (part of the question's media key, see mediaKeyFor)
+  // and its notice line, and the finished game's applied RP
+  // change for the results pill.
+  const [sparesRemaining, setSparesRemaining] = useState(0);
+  const [questionNonce, setQuestionNonce] = useState(0);
+  const [replaceNotice, setReplaceNotice] = useState<string | null>(null);
+  const [soloRpChange, setSoloRpChange] = useState<number | null>(null);
+  const replacingRef = useRef(false);
+  const lastReplaceKeyRef = useRef<string | null>(null);
+  const questionNonceRef = useRef(0);
   // Earlier reveal (part 5, 2026-11-11): the playback-start
   // signal's response can carry the NEXT question's audio URL a
   // whole question before the answer response would. Held as
@@ -306,7 +343,7 @@ export default function SoloQuizScreen() {
    * field (older API) or null (last question / no audio) simply
    * leaves the feedback-phase reveal as the only trigger.
    */
-  const startClock = useCallback((qIndex: number) => {
+  const startClock = useCallback((qIndex: number, slug?: string) => {
     if (clockStartedForRef.current === qIndex) return;
     clockStartedForRef.current = qIndex;
     if (loadTimerRef.current) {
@@ -320,7 +357,7 @@ export default function SoloQuizScreen() {
     setClockRunning(true);
     const gid = gameIdRef.current;
     if (gid) {
-      void markSoloPlaybackStarted(gid)
+      void markSoloPlaybackStarted(gid, qIndex, slug)
         .then((res) => {
           if (!mountedRef.current) return;
           if (res?.nextAudioUrl) {
@@ -338,7 +375,7 @@ export default function SoloQuizScreen() {
     (
       q: SoloQuestion,
       limitSeconds: number,
-      opts?: { fromSetup?: boolean },
+      opts?: { fromSetup?: boolean; nonce?: number },
     ) => {
       // Part 6: pin this question's prefetched slice — its
       // player may read the file, so the next prefetch's
@@ -347,6 +384,14 @@ export default function SoloQuizScreen() {
       // question: it has done its job.
       pinQuizSlice(`${gameIdRef.current ?? 'game'}:${q.index}`);
       setEarlyNext((e) => (e && e.index <= q.index ? null : e));
+      // Spare-theme replacement: the nonce distinguishes a
+      // swapped-in question from the failed one it replaced
+      // (same game, same index — see mediaKeyFor). A normally
+      // dealt question resets it to 0.
+      const nonce = opts?.nonce ?? 0;
+      questionNonceRef.current = nonce;
+      setQuestionNonce(nonce);
+      setReplaceNotice(null);
       setQuestion(q);
       setPicked(null);
       setFeedback(null);
@@ -381,7 +426,7 @@ export default function SoloQuizScreen() {
       }
       if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
       loadTimerRef.current = setTimeout(
-        () => startClock(q.index),
+        () => startClock(q.index, q.theme.slug),
         soloLoadSafetyMs(limitSeconds),
       );
       const questionDeadline = Date.now() + limitSeconds * 1000;
@@ -421,6 +466,15 @@ export default function SoloQuizScreen() {
     setCorrectCount(0);
     setRankProfile(null);
     setRankLoading(false);
+    // Spare/RP hygiene (2026-11-16): a new game starts with no
+    // spares known, no replacement state and no prior RP.
+    setSparesRemaining(0);
+    setQuestionNonce(0);
+    questionNonceRef.current = 0;
+    setReplaceNotice(null);
+    setSoloRpChange(null);
+    replacingRef.current = false;
+    lastReplaceKeyRef.current = null;
     // Part 5/6 hygiene: a new game starts with no early reveal
     // and an empty prefetch cache — nothing leaks across games.
     setEarlyNext(null);
@@ -432,6 +486,7 @@ export default function SoloQuizScreen() {
         setGameId(state.gameId);
         setTotalQuestions(state.totalQuestions);
         setTimeLimit(state.timeLimitSeconds);
+        setSparesRemaining(state.sparesRemaining ?? 0);
         if (state.question) {
           // Pre-mount Q1 on the REMOTE chain — never a slice:
           // Q1 has no prefetch by construction, and §6's math
@@ -537,7 +592,7 @@ export default function SoloQuizScreen() {
   useEffect(() => {
     if (phase !== 'question' || !question) return;
     if (!soloClockStartsOnPhase(audioState.phase)) return;
-    startClock(question.index);
+    startClock(question.index, question.theme.slug);
   }, [audioState.phase, phase, question, startClock]);
 
   /* F6 chain freeze (2026-11-12): freeze the live question's
@@ -559,7 +614,7 @@ export default function SoloQuizScreen() {
      pre-frozen by the create effect, so it never waits here. */
   useEffect(() => {
     if (!question || phase !== 'question') return;
-    const key = `${gameId ?? 'game'}:${question.index}`;
+    const key = mediaKeyFor(gameId ?? 'game', question.index, questionNonce);
     if (frozenChain?.key === key) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -590,7 +645,93 @@ export default function SoloQuizScreen() {
       live = false;
       if (timer) clearTimeout(timer);
     };
-  }, [question, phase, gameId, frozenChain]);
+  }, [question, phase, gameId, frozenChain, questionNonce]);
+
+  /* Spare-theme replacement (owner order, 2026-11-16): when the
+     live question's media reports the FAILED or EMPTY verdict
+     for THIS question's key and the game still holds spares,
+     swap the question instead of burning it. The swap shows
+     the owner's line, asks the server for a spare (same slot,
+     no attempt recorded), and starts the replacement under a
+     fresh nonce'd media key with a full window — startQuestion
+     resets the clock guard, and the server committed the
+     replacement at swap time, so both measurements agree.
+     Exactly one swap per failed key: a replacement that ALSO
+     fails earns the next spare under its own key, until the
+     spares run out and the old fallback (answer without audio)
+     takes over. A failed SWAP (pool drained, game gone) clears
+     the notice and leaves the failed question live, exactly as
+     before spares existed — with one audit refinement
+     (2026-11-16): a swap whose RESPONSE was lost may still have
+     landed server-side, so a failed swap first re-reads the
+     game state; if the server's live question is this slot with
+     a different theme, the swap landed and the client adopts
+     the server's question instead of drifting (an answer sent
+     from a drifted client would be scored against a question
+     the player never saw). While a swap is in flight, submit
+     is held (see submit): the ring may expire mid-swap, and an
+     answer landing then would be scored against the NEW
+     question server-side. */
+  useEffect(() => {
+    if (phase !== 'question' || !question || !gameId) return;
+    if (audioState.phase !== 'failed' && audioState.phase !== 'empty') return;
+    const key = mediaKeyFor(gameId, question.index, questionNonce);
+    if (audioState.mediaKey !== key) return;
+    if (replacingRef.current || lastReplaceKeyRef.current === key) return;
+    if (sparesRemaining <= 0) return;
+    lastReplaceKeyRef.current = key;
+    replacingRef.current = true;
+    setReplaceNotice(REPLACE_NOTICE);
+    const failedIndex = question.index;
+    const failedSlug = question.theme.slug;
+    void replaceSoloQuestion(gameId, failedSlug)
+      .then((res) => {
+        if (!mountedRef.current) return;
+        setSparesRemaining(res.sparesRemaining);
+        startQuestion(res.question, limitRef.current, {
+          nonce: questionNonceRef.current + 1,
+        });
+        setReplaceNotice(REPLACE_NOTICE);
+      })
+      .catch(async () => {
+        /* Lost-response resync (audit, 2026-11-16): re-read the
+           game; adopt the server's question when the swap landed
+           despite the lost response, else fall back as before. */
+        try {
+          const state = await fetchSoloGame(gameId);
+          if (!mountedRef.current) return;
+          if (
+            state.question &&
+            state.question.index === failedIndex &&
+            state.question.theme.slug !== failedSlug
+          ) {
+            if (typeof state.sparesRemaining === 'number') {
+              setSparesRemaining(state.sparesRemaining);
+            }
+            startQuestion(state.question, limitRef.current, {
+              nonce: questionNonceRef.current + 1,
+            });
+            setReplaceNotice(REPLACE_NOTICE);
+            return;
+          }
+        } catch {
+          /* The re-read failed too — the plain fallback below. */
+        }
+        if (mountedRef.current) setReplaceNotice(null);
+      })
+      .finally(() => {
+        replacingRef.current = false;
+      });
+  }, [
+    phase,
+    question,
+    gameId,
+    audioState.phase,
+    audioState.mediaKey,
+    questionNonce,
+    sparesRemaining,
+    startQuestion,
+  ]);
 
   const advance = useCallback(() => {
     if (advanceTimerRef.current) {
@@ -608,8 +749,10 @@ export default function SoloQuizScreen() {
     if (current.gameOver || !current.nextQuestion) {
       setPhase('over');
       // The results rank card shows the player's CURRENT rank
-      // state (see the docblock: solo runs award no RP). A failed
-      // fetch simply omits the card — the score stands on its own.
+      // state — fetched AFTER the game-over answer, so it
+      // already includes the run's solo RP (applied server-side
+      // before that answer returned). A failed fetch simply
+      // omits the card — the score stands on its own.
       setRankLoading(true);
       void fetchMyRank()
         .then((profile) => {
@@ -630,6 +773,13 @@ export default function SoloQuizScreen() {
     async (answer: string | null) => {
       if (!gameId || !question || submittingRef.current) return;
       if (phase !== 'question') return;
+      // A spare-theme swap is in flight (2026-11-16): hold the
+      // answer (tap, skip or ring expiry alike) — server-side
+      // the live question is about to BE the replacement, and
+      // an answer landing now would score against a question
+      // the player never heard. The swap's startQuestion
+      // restarts the window, so nothing is lost by waiting.
+      if (replacingRef.current) return;
       submittingRef.current = true;
       // F3: freeze the ring at THIS moment — the tap (or the
       // timeout), before the network round trip — and hold the
@@ -655,6 +805,15 @@ export default function SoloQuizScreen() {
         setStreak(res.streak);
         setMaxStreak((m) => Math.max(m, res.streak));
         setCorrectCount(res.correctCount);
+        // Spares + solo RP (2026-11-16): keep the spare count
+        // in sync with the server's, and on the game-over
+        // answer capture the applied RP for the results pill.
+        if (typeof res.sparesRemaining === 'number') {
+          setSparesRemaining(res.sparesRemaining);
+        }
+        if (res.gameOver) {
+          setSoloRpChange(res.rpChange ?? null);
+        }
         setPhase('feedback');
         advanceTimerRef.current = setTimeout(advance, FEEDBACK_MS);
       } catch (e) {
@@ -836,11 +995,14 @@ export default function SoloQuizScreen() {
 
         {rankProfile ? (
           <View style={styles.rankWrap}>
-            {/* No gainedRp: a solo run grants no RP (see the
-                docblock), so the results card's "+N RP" pill
-                stays hidden — it lights up only where a session
-                genuinely granted RP. */}
-            <RankResultCard profile={rankProfile} />
+            {/* Solo RP (2026-11-16): the game-over answer's
+                rpChange is the run's genuinely-applied award,
+                so the pill shows it — gain, loss, or nothing
+                when the rank write was unavailable (null). */}
+            <RankResultCard
+              profile={rankProfile}
+              gainedRp={soloRpChange ?? undefined}
+            />
           </View>
         ) : rankLoading ? (
           <View style={styles.rankLoading}>
@@ -890,7 +1052,11 @@ export default function SoloQuizScreen() {
     const inFeedback = phase === 'feedback' && feedback !== null;
     const audioFailed = audioState.phase === 'failed';
     const audioEmpty = audioState.phase === 'empty';
-    const mediaKey = `${gameId ?? 'game'}:${question.index}`;
+    const mediaKey = mediaKeyFor(
+      gameId ?? 'game',
+      question.index,
+      questionNonce,
+    );
     // Part 6 + F6: this question's chain, frozen by the freeze
     // effect — its prefetched slice (ready at the freeze, or
     // finalized inside the F6 grace) leads, then the remote
@@ -990,15 +1156,17 @@ export default function SoloQuizScreen() {
                 <View
                   style={[
                     styles.statusDot,
-                    (audioFailed || audioEmpty) && styles.statusDotMuted,
+                    (audioFailed || audioEmpty || replaceNotice) &&
+                      styles.statusDotMuted,
                   ]}
                 />
                 <Text style={styles.statusText}>
-                  {audioFailed
-                    ? 'This theme could not be played — you can still answer.'
-                    : audioEmpty
-                      ? 'No playable media for this theme — you can still answer.'
-                      : 'Playing... guess the anime!'}
+                  {replaceNotice ??
+                    (audioFailed
+                      ? 'This theme could not be played — you can still answer.'
+                      : audioEmpty
+                        ? 'No playable media for this theme — you can still answer.'
+                        : 'Playing... guess the anime!')}
                 </Text>
               </View>
               <Text style={styles.prompt}>

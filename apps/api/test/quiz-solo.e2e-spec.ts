@@ -362,6 +362,77 @@ process.env.JWT_SECRET = E2E_SECRET;
       .set(auth())
       .expect(404);
   });
+
+  it('spare themes (owner order, 2026-11-16): replace-failed swaps the live question in the same slot', async () => {
+    const http = request(app.getHttpServer());
+
+    const created = await http
+      .post('/quiz/solo/games')
+      .set(auth())
+      .send({ quizType: 'anime' })
+      .expect(201);
+    expect(created.body.sparesRemaining).toBe(5);
+    const gameId = created.body.gameId as string;
+    const failedSlug = created.body.question.theme.slug as string;
+
+    const swapped = await http
+      .post(`/quiz/solo/games/${gameId}/replace-failed`)
+      .set(auth())
+      .expect(200);
+    expect(swapped.body.sparesRemaining).toBe(4);
+    expect(swapped.body.question.index).toBe(created.body.question.index);
+    expect(swapped.body.question.theme.slug).not.toBe(failedSlug);
+    // Still an answer-free projection.
+    expect(JSON.stringify(swapped.body)).not.toContain('correctValue');
+
+    await http
+      .post('/quiz/solo/games/nope/replace-failed')
+      .set(auth())
+      .expect(404);
+    await http
+      .post(`/quiz/solo/games/${gameId}/replace-failed`)
+      .expect(401);
+
+    // Idempotent replay on the wire (audit round 2, 2026-11-16):
+    // a second call naming the FAILED theme returns the landed
+    // replacement and spends no further spare.
+    const replay = await http
+      .post(`/quiz/solo/games/${gameId}/replace-failed`)
+      .set(auth())
+      .send({ slug: failedSlug })
+      .expect(200);
+    expect(replay.body.question.theme.slug).toBe(
+      swapped.body.question.theme.slug,
+    );
+    expect(replay.body.sparesRemaining).toBe(4);
+  });
+
+  it('playback-started accepts the question identity body — matching and stale alike (audit, 2026-11-16)', async () => {
+    const http = request(app.getHttpServer());
+
+    const created = await http
+      .post('/quiz/solo/games')
+      .set(auth())
+      .send({ quizType: 'anime' })
+      .expect(201);
+    const gameId = created.body.gameId as string;
+    const slug = created.body.question.theme.slug as string;
+
+    // A stale identity (a swapped-out theme's late signal) is
+    // accepted on the wire — the stamp decision is the unit
+    // suite's pin; here the body must simply pass through.
+    await http
+      .post(`/quiz/solo/games/${gameId}/playback-started`)
+      .set(auth())
+      .send({ index: 1, slug: 'not-the-live-theme' })
+      .expect(200);
+    const live = await http
+      .post(`/quiz/solo/games/${gameId}/playback-started`)
+      .set(auth())
+      .send({ index: 1, slug })
+      .expect(200);
+    expect(typeof live.body.playbackStartedAt).toBe('string');
+  });
 });
 
 describe('Solo quiz earlier reveal with derivable audio (e2e, part 5)', () => {

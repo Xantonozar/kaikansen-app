@@ -393,6 +393,61 @@ describe('RankService.calculateAndApplyRP (web rank-utils)', () => {
   });
 });
 
+describe('RankService.applySoloRP (owner tiered solo RP, 2026-11-16)', () => {
+  it('grants the tier award to a fresh player and writes NO history row', async () => {
+    const { service, ranks, history } = makeFakes(null);
+    const applied = await service.applySoloRP('alice', 9);
+    expect(applied).toEqual({ rpBefore: 0, rpAfter: 10, rpChange: 10 });
+    const doc = ranks.get('alice')!;
+    expect(doc.rp).toBe(10);
+    expect(doc.currentWinStreak).toBe(1);
+    expect(doc.stats).toMatchObject({ totalGames: 1, wins: 1, losses: 0, winRate: 1 });
+    expect(doc.season.seasonRP).toBe(10);
+    expect(doc.season.seasonWins).toBe(1);
+    // The shared rankhistories enum has no 'solo' — solo writes none.
+    expect(history).toHaveLength(0);
+  });
+
+  it('a bad run costs RP and counts as a loss, streak reset', async () => {
+    const { service, ranks } = makeFakes(null);
+    ranks.set('alice', makeRankDoc('alice', { rp: 100, currentWinStreak: 3 }));
+    const applied = await service.applySoloRP('alice', 1);
+    expect(applied).toEqual({ rpBefore: 100, rpAfter: 95, rpChange: -5 });
+    const doc = ranks.get('alice')!;
+    expect(doc.currentWinStreak).toBe(0);
+    expect(doc.stats).toMatchObject({ totalGames: 1, wins: 0, losses: 1 });
+    expect(doc.season.seasonRP).toBe(0); // season RP only ever grows
+    expect(doc.season.seasonLosses).toBe(1);
+  });
+
+  it('clamps at the current tier floor — a loss at the floor changes 0', async () => {
+    const { service, ranks } = makeFakes(null);
+    ranks.set(
+      'alice',
+      makeRankDoc('alice', { rp: 400, tier: 'genin', tierFloor: 400 }),
+    );
+    const applied = await service.applySoloRP('alice', 0);
+    expect(applied).toEqual({ rpBefore: 400, rpAfter: 400, rpChange: 0 });
+    expect(ranks.get('alice')!.stats.losses).toBe(1);
+  });
+
+  it('promotion moves the stored floor up', async () => {
+    const { service, ranks } = makeFakes(null);
+    ranks.set('alice', makeRankDoc('alice', { rp: 395 }));
+    const applied = await service.applySoloRP('alice', 10);
+    expect(applied).toEqual({ rpBefore: 395, rpAfter: 405, rpChange: 10 });
+    const doc = ranks.get('alice')!;
+    expect(doc.tier).toBe('genin');
+    expect(doc.tierFloor).toBe(400);
+    expect(doc.stats.peakTier).toBe('genin');
+  });
+
+  it('answers null without rank models (DB-less boot)', async () => {
+    const service = new RankService();
+    await expect(service.applySoloRP('alice', 10)).resolves.toBeNull();
+  });
+});
+
 describe('RankService.scheduleRPUpdate (web scheduler)', () => {
   it('dedupes concurrent schedules for the same room', async () => {
     const { service } = makeFakes(null);

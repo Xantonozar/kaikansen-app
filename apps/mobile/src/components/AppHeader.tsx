@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation, usePathname, useRouter } from 'expo-router';
 import { DrawerActions } from '@react-navigation/native';
-import { Bell, Menu, Search } from 'lucide-react-native';
+import { Bell, Menu, MessageCircle, Search } from 'lucide-react-native';
 import { shell, spacing, typeStyles, withOpacity, type Theme } from '../theme';
 import { useTheme } from '../theme-context';
 import { useAuth } from '../auth';
@@ -11,16 +11,18 @@ import {
   refreshUnreadCount,
   useUnreadNotifications,
 } from '../notificationsStore';
+import { refreshChatUnread, useChatUnread } from '../chatUnreadStore';
 
 /**
  * App shell header — the Lavender Dusk mocks' treatment (Home v3,
  * measured in layout-fidelity Slice 6): a 56px translucent bar,
  * hamburger left, the centred "Kaikansen ♪" wordmark (Outfit black
  * italic + the note glyph the mock draws), Search and — signed in —
- * the notifications Bell right (Slice M5: a real button to the
- * notifications screen, badged with the unread count from the
- * shared notifications store). Signed out the bell is not rendered
- * at all: there is nobody to notify.
+ * the chat button (badged with the unread-chat count from
+ * chatUnreadStore, route /chat) and the notifications Bell right
+ * (Slice M5: a real button to the notifications screen, badged with
+ * the unread count from the shared notifications store). Signed out
+ * neither is rendered at all: there is nobody to notify.
  *
  * There is deliberately NO avatar button: the mock header has none.
  * Profile and Login live in the drawer (its identity row opens the
@@ -37,14 +39,19 @@ export function AppHeader() {
   const pathname = usePathname();
   const { status, user } = useAuth();
   const unread = useUnreadNotifications();
+  const chatUnread = useChatUnread();
 
   const signedIn = status === 'signedIn' && user !== null;
 
   /* Badge freshness: on mount, on sign-in, and whenever the route
      changes (returning from the notifications screen included — the
-     screen also keeps the count exact itself as it marks rows). */
+     screen also keeps the count exact itself as it marks rows).
+     The chat badge follows the same rhythm (chatUnreadStore). */
   useEffect(() => {
-    if (signedIn) void refreshUnreadCount();
+    if (signedIn) {
+      void refreshUnreadCount();
+      void refreshChatUnread();
+    }
   }, [signedIn, pathname]);
 
   return (
@@ -78,6 +85,28 @@ export function AppHeader() {
         >
           <Search size={20} color={theme.text} strokeWidth={2} />
         </Pressable>
+        {signedIn && (
+          <Pressable
+            onPress={() => router.push('/chat')}
+            hitSlop={4}
+            accessibilityRole="button"
+            accessibilityLabel={
+              chatUnread > 0
+                ? `Chats, ${chatUnread} unread messages`
+                : 'Chats'
+            }
+            style={styles.iconButton}
+          >
+            <MessageCircle size={20} color={theme.text} strokeWidth={2} />
+            {chatUnread > 0 && (
+              <View style={styles.badge}>
+                <Text style={styles.badgeText}>
+                  {chatUnread > 99 ? '99+' : chatUnread}
+                </Text>
+              </View>
+            )}
+          </Pressable>
+        )}
         {signedIn && (
           <Pressable
             onPress={() => router.push('/notifications')}

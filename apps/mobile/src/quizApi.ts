@@ -5,6 +5,7 @@ import type {
   SoloAnswerResponse,
   SoloGameState,
   SoloPlaybackStartedResponse,
+  SoloReplaceResponse,
 } from '@kaikansen/contracts';
 import { apiJson, fixtureMode } from './api';
 import { getAccessToken } from './session';
@@ -16,6 +17,7 @@ import { getAccessToken } from './session';
  * - GET  /quiz/solo/games/:gameId       the live game state
  * - POST /quiz/solo/games/:gameId/playback-started  signal the question's audio actually started (or proved unplayable) — the answer window opens there
  * - POST /quiz/solo/games/:gameId/answers  answer (null = skip/timeout)
+ * - POST /quiz/solo/games/:gameId/replace-failed  swap the live question for a spare theme when its theme could not be played at all (owner order, 2026-11-16)
  * - GET  /quiz/leaderboard              public top-10 attempts board
  *
  * over the authenticated fetch in api.ts (the 401-refresh dance lives
@@ -63,14 +65,24 @@ export async function fetchSoloGame(gameId: string): Promise<SoloGameState> {
  * answer measurement opens at draw + the credited load. Callers
  * fire this once per question and may ignore failures: without
  * the signal the server measures from the draw, as before.
+ *
+ * `index` + `slug` name the exact question the signal belongs
+ * to (audit fix, 2026-11-16): the signal races the spare-theme
+ * swap — both fire when a theme fails — and a signal landing
+ * after the swap must not stamp the replacement as started (the
+ * swap keeps the slot index, so the theme slug is the identity
+ * that actually changes). The server ignores the stamp on a
+ * mismatch; older servers ignore the body.
  */
 export async function markSoloPlaybackStarted(
   gameId: string,
+  index?: number,
+  slug?: string,
 ): Promise<SoloPlaybackStartedResponse> {
   guardPlay();
   return apiJson<SoloPlaybackStartedResponse>(
     `/quiz/solo/games/${encodeURIComponent(gameId)}/playback-started`,
-    { method: 'POST' },
+    { method: 'POST', body: { index, slug } },
   );
 }
 
@@ -83,6 +95,32 @@ export async function submitSoloAnswer(
   return apiJson<SoloAnswerResponse>(
     `/quiz/solo/games/${encodeURIComponent(gameId)}/answers`,
     { method: 'POST', body: { answer } satisfies { answer: string | null } },
+  );
+}
+
+/**
+ * Swap the live question for one of the game's spare themes
+ * (owner order, 2026-11-16): the question's whole candidate
+ * chain failed, so instead of burning the question the server
+ * deals a replacement into the same slot — no attempt is
+ * recorded and score/streak are untouched. Rejects when the
+ * game is finished or the spares are spent; the caller then
+ * keeps the failed question (answerable without audio, the
+ * pre-spare behaviour).
+ *
+ * `slug` names the failed theme (audit round 2, 2026-11-16):
+ * it makes the swap idempotent server-side — a replayed call
+ * whose slug no longer matches the live question returns the
+ * live question without spending another spare.
+ */
+export async function replaceSoloQuestion(
+  gameId: string,
+  slug?: string,
+): Promise<SoloReplaceResponse> {
+  guardPlay();
+  return apiJson<SoloReplaceResponse>(
+    `/quiz/solo/games/${encodeURIComponent(gameId)}/replace-failed`,
+    { method: 'POST', body: { slug } },
   );
 }
 

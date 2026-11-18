@@ -16,7 +16,12 @@ import {
 } from '../../../src/components/Skeleton';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ArrowLeft, ChevronRight, ExternalLink } from 'lucide-react-native';
+import {
+  ArrowLeft,
+  ChevronRight,
+  ExternalLink,
+  LayoutGrid,
+} from 'lucide-react-native';
 import type {
   AnimeDetailResponse,
   AnimeFranchiseResponse,
@@ -99,6 +104,12 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
  * the page bottom (skeleton rows during each reveal) — the
  * DATA stays the one small fetch, so the whole-franchise play
  * claim above is unaffected.
+ *
+ * The section also has a dedicated screen now (owner order,
+ * 2026-11-16): /franchise/:id holds the same franchise on its
+ * own page with a Play All, and this page carries its entry
+ * card under the themes whenever the section would show. The
+ * inline section stays — the entry is a door, not a move.
  */
 export default function AnimeDetailScreen() {
   const theme = useTheme();
@@ -446,6 +457,40 @@ export default function AnimeDetailScreen() {
               <Text style={styles.emptyText}>
                 No themes for this anime yet.
               </Text>
+            )}
+
+            {/* Franchise entry (owner order, 2026-11-16): the
+                dedicated franchise screen's door on this page —
+                shown under the same rule as the section below
+                (a franchise of just this anime gets no entry),
+                opening /franchise/:id with every season's themes
+                and a Play All. The inline section below stays as
+                the in-page browse. */}
+            {showFranchise && franchise && (
+              <Pressable
+                onPress={() => router.push(`/franchise/${animeId}`)}
+                accessibilityRole="button"
+                accessibilityLabel={`Open the franchise — ${franchise.totalThemes} themes across ${franchise.totalGroups} anime`}
+                style={({ pressed }) => [
+                  styles.franchiseEntry,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <LayoutGrid size={19} color={theme.accent} strokeWidth={2} />
+                <View style={styles.franchiseEntryMain}>
+                  <Text style={styles.franchiseEntryTitle}>Franchise</Text>
+                  <Text style={styles.franchiseEntryMeta} numberOfLines={1}>
+                    {franchise.totalThemes}{' '}
+                    {franchise.totalThemes === 1 ? 'theme' : 'themes'} across{' '}
+                    {franchise.totalGroups} anime — every season together
+                  </Text>
+                </View>
+                <ChevronRight
+                  size={18}
+                  color={theme.secondary}
+                  strokeWidth={2}
+                />
+              </Pressable>
             )}
 
             {/* Related Series (web parity): poster cards in a
@@ -830,6 +875,33 @@ const createStyles = (theme: Theme) =>
       letterSpacing: 0.3,
       color: theme.secondary,
       marginTop: 2,
+    },
+    franchiseEntry: {
+      // The dedicated screen's door: a surface card in the
+      // column flow, icon + two lines + chevron.
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      borderRadius: radii.card,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.md,
+      marginTop: spacing.lg,
+    },
+    franchiseEntryMain: {
+      flex: 1,
+    },
+    franchiseEntryTitle: {
+      ...typeStyles.body,
+      fontFamily: fontFamilies.bodyStrong,
+      color: theme.text,
+    },
+    franchiseEntryMeta: {
+      ...typeStyles.bodySmall,
+      color: theme.muted,
+      marginTop: 1,
     },
     franchiseMeta: {
       // The section's honest totals line (and its truncation

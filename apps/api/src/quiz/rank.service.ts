@@ -9,6 +9,7 @@ import {
   getBaseRP,
   getStreakBonus,
   getTierFromRP,
+  soloRpForCorrectCount,
   tierIndex,
 } from './quiz-game.utils';
 import { ladderStandingFor } from './ladder-standing';
@@ -205,6 +206,74 @@ export class RankService {
         newStreak,
       } satisfies RankUpdatedEvent);
     }
+  }
+
+  /**
+   * Solo RP (owner order, 2026-11-16): apply ONE finished solo
+   * game's tiered award (soloRpForCorrectCount) to the player's
+   * UserRank, with the multiplayer arithmetic's exact clamp and
+   * bookkeeping: RP never drops below the CURRENT tier floor,
+   * the stored floor only moves up on promotion, a positive
+   * award counts as a win (and extends the win streak — the
+   * streak-bonus source for future multiplayer wins), a
+   * negative one as a loss, season.seasonRP only grows.
+   *
+   * NO RankHistory row is written for solo: the shared
+   * `rankhistories` schema (web + this API) restricts roomType
+   * to 'party' | 'duel', and schema compatibility with the live
+   * website is sacred (AGENTS.md rule 1) — a 'solo' row would
+   * be a unilateral vocabulary change to a shared collection.
+   * Consequence, stated plainly: the WEEKLY leaderboard, which
+   * sums RankHistory rpChange, counts multiplayer RP only;
+   * solo RP still moves the lifetime rank, ladder and boards
+   * that read UserRank. Returns the applied change, or null
+   * when the rank models are unavailable (DB-less boot).
+   */
+  async applySoloRP(
+    userId: string,
+    correctCount: number,
+  ): Promise<{ rpBefore: number; rpAfter: number; rpChange: number } | null> {
+    if (!this.userRankModel) return null;
+
+    const userRank = await this.getUserRank(userId);
+    const rpBefore = userRank.rp;
+    const tierBefore = userRank.tier;
+
+    const baseRP = soloRpForCorrectCount(correctCount);
+    const isWin = baseRP > 0;
+    const newStreak = isWin ? userRank.currentWinStreak + 1 : 0;
+
+    const rpAfter = Math.max(userRank.tierFloor, rpBefore + baseRP);
+    const {
+      tier: newTier,
+      division: newDivision,
+      newFloor,
+    } = getTierFromRP(rpAfter);
+    const promoted = tierIndex(newTier) > tierIndex(tierBefore);
+
+    userRank.rp = rpAfter;
+    userRank.tier = newTier;
+    userRank.division = newDivision;
+    userRank.tierFloor = promoted ? newFloor : userRank.tierFloor;
+    userRank.currentWinStreak = newStreak;
+    userRank.longestWinStreak = Math.max(userRank.longestWinStreak, newStreak);
+    userRank.stats.totalGames += 1;
+    if (isWin) userRank.stats.wins += 1;
+    if (!isWin && baseRP < 0) userRank.stats.losses += 1;
+    if (!isWin && baseRP >= 0) userRank.stats.draws += 1;
+    userRank.stats.winRate = userRank.stats.wins / userRank.stats.totalGames;
+    userRank.stats.peakRP = Math.max(userRank.stats.peakRP, rpAfter);
+    if (tierIndex(newTier) > tierIndex(userRank.stats.peakTier)) {
+      userRank.stats.peakTier = newTier;
+    }
+    const actualRpChange = rpAfter - rpBefore;
+    userRank.season.seasonRP += Math.max(0, actualRpChange);
+    if (isWin) userRank.season.seasonWins += 1;
+    else if (baseRP < 0) userRank.season.seasonLosses += 1;
+
+    await userRank.save();
+
+    return { rpBefore, rpAfter, rpChange: actualRpChange };
   }
 
   /** The web's scheduleRPUpdate: deduped, deferred, fire-and-forget. */

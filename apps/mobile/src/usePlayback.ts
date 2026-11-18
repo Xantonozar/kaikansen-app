@@ -34,6 +34,14 @@ import {
 } from './audioEngine';
 import { downloadFileUri, useDownloads, type DownloadRecord } from './downloads';
 import {
+  LOCK_SCREEN_OPTIONS,
+  lockScreenMetadataForDetail,
+  lockScreenMetadataForLocal,
+  lockScreenMetadataKey,
+  shouldActivateLockScreen,
+  type LockScreenMetadata,
+} from './lockScreen';
+import {
   WATCHDOG_POLL_INTERVAL_MS,
   bufferConnectionKind,
   failureAttributionDecision,
@@ -1964,6 +1972,83 @@ export function usePlayback(args: {
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audioFallback, localUsable, candidateIndex, url, candidate, videoPlayer]);
+
+  /* ---------------- lock screen / media notification ---------
+     Android media controls for the audio engine (src/lockScreen
+     .ts owns the decisions + the why): while the live candidate
+     plays on the AUDIO player, that player is registered with
+     expo-audio's media session, so the notification shade and
+     lock screen show the track (title / artist / artwork) with
+     working play/pause and ±10s seek — the session drives the
+     player natively, and the player's status events (already
+     the engine's single source of truth) keep every in-app
+     surface in sync. The registration FOLLOWS the live player:
+     an adopted preload player takes it over (the previous
+     holder is cleared first — it may already be released, so
+     every native call is guarded), and the metadata follows
+     the track (detail in hand, else the download snapshot;
+     while a queue advance is still resolving its detail the
+     previous metadata stands rather than blanking the card).
+     Session end / a video candidate / an exhausted chain
+     clears the controls, so no dead notification lingers. */
+  const lockScreenPlayerRef = useRef<AudioPlayer | null>(null);
+  const lockScreenMetaKeyRef = useRef<string | null>(null);
+  const lockScreenWanted = shouldActivateLockScreen({
+    active,
+    engineKind: kind,
+    unavailable,
+  });
+  const lockScreenMetadata: LockScreenMetadata | null = detail
+    ? lockScreenMetadataForDetail(detail)
+    : localUsable
+      ? lockScreenMetadataForLocal(localUsable)
+      : null;
+  const lockScreenMetaKey = lockScreenMetadataKey(lockScreenMetadata);
+  useEffect(() => {
+    const held = lockScreenPlayerRef.current;
+    if (!lockScreenWanted) {
+      if (held) {
+        try {
+          held.clearLockScreenControls();
+        } catch {
+          // Player already released — nothing to clear.
+        }
+        lockScreenPlayerRef.current = null;
+        lockScreenMetaKeyRef.current = null;
+      }
+      return;
+    }
+    const player = audioPlayerState;
+    if (held && held !== player) {
+      try {
+        held.clearLockScreenControls();
+      } catch {
+        // Player already released — its session is gone with it.
+      }
+      lockScreenPlayerRef.current = null;
+      lockScreenMetaKeyRef.current = null;
+    }
+    // No identity for the track yet (a queue advance mid-
+    // resolution): keep whatever the card already shows.
+    if (!lockScreenMetadata || !lockScreenMetaKey) return;
+    try {
+      if (lockScreenPlayerRef.current !== player) {
+        player.setActiveForLockScreen(
+          true,
+          lockScreenMetadata,
+          LOCK_SCREEN_OPTIONS,
+        );
+        lockScreenPlayerRef.current = player;
+        lockScreenMetaKeyRef.current = lockScreenMetaKey;
+      } else if (lockScreenMetaKeyRef.current !== lockScreenMetaKey) {
+        player.updateLockScreenMetadata(lockScreenMetadata);
+        lockScreenMetaKeyRef.current = lockScreenMetaKey;
+      }
+    } catch {
+      // Native module unavailable (web/tests) — playback itself
+      // is unaffected; there is simply no media card.
+    }
+  }, [lockScreenWanted, audioPlayerState, lockScreenMetadata, lockScreenMetaKey]);
 
   /* Problem 8 — the split return: `slow` carries every field
      except progress/fraction and is memoised on the slow inputs

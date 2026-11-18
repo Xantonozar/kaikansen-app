@@ -326,6 +326,12 @@ export interface PlaybackSlowSessionValue {
   session: PlaybackSession;
   /** The engine's slow channel only (see PlaybackSlow). */
   playback: PlaybackSlow;
+  /** Whether the mini player is on screen right now — its own
+      render gate (an active session with something to present
+      that isn't unavailable). Carried on the slow channel so
+      bottom-inset consumers (src/useBottomInset.ts) re-render
+      when playback starts/stops, never on progress ticks. */
+  miniPlayerVisible: boolean;
   startSession: PlaybackContextValue['startSession'];
   updateSession: PlaybackContextValue['updateSession'];
   endSession: PlaybackContextValue['endSession'];
@@ -1011,16 +1017,27 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     () => ({ progress: playback.progress, fraction: playback.fraction }),
     [playback.progress, playback.fraction],
   );
+  const miniPlayerVisible =
+    session.active && nowPlaying !== null && !playback.unavailable;
   const slowSessionValue = useMemo<PlaybackSlowSessionValue>(
     () => ({
       session,
       playback: playback.slow,
+      miniPlayerVisible,
       startSession,
       updateSession,
       endSession,
       startQueue,
     }),
-    [session, playback.slow, startSession, updateSession, endSession, startQueue],
+    [
+      session,
+      playback.slow,
+      miniPlayerVisible,
+      startSession,
+      updateSession,
+      endSession,
+      startQueue,
+    ],
   );
 
   return (

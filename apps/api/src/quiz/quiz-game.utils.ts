@@ -382,6 +382,26 @@ export function getBaseRP(
   return table[placement - 1];
 }
 
+/**
+ * Solo RP (owner order, 2026-11-16 — solo games grant rank,
+ * superseding the 2026-11-09 solo-no-RP ruling): ONE award per
+ * finished 10-question solo game, tiered by correct count —
+ * the owner's picked table: 9–10 correct → +10 RP, 7–8 → +5,
+ * 5–6 → +2, and "under 5 negative", split as 3–4 → −3 and
+ * 0–2 → −5. The award is the BASE change; RankService
+ * .applySoloRP applies it with the same tier-floor clamp as
+ * multiplayer RP, so the actual change can be smaller at a
+ * floor. No win-streak bonus rides on solo (the streak the
+ * table rewards is accuracy within the run, already priced in).
+ */
+export function soloRpForCorrectCount(correctCount: number): number {
+  if (correctCount >= 9) return 10;
+  if (correctCount >= 7) return 5;
+  if (correctCount >= 5) return 2;
+  if (correctCount >= 3) return -3;
+  return -5;
+}
+
 export function getStreakBonus(winStreak: number): number {
   if (winStreak <= 1) return 0;
   if (winStreak === 2) return 5;

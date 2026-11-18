@@ -868,6 +868,19 @@ export const SOLO_QUESTION_COUNT = 10;
 /** Solo per-question timer (seconds) — the web client's countdown. */
 export const SOLO_TIME_LIMIT_SECONDS = 20;
 
+/**
+ * Spare themes per solo game (owner order, 2026-11-16): when a
+ * question's theme cannot be played at all, the client asks the
+ * server to swap the live question for a spare
+ * (POST /quiz/solo/games/:gameId/replace-failed) instead of
+ * burning the question. Each game may replace at most this many
+ * questions; the spare is drawn from the game's own pool at
+ * replacement time (same verified dealing as a normal draw), so
+ * the game's question order is untouched until a failure
+ * actually happens.
+ */
+export const SOLO_SPARE_COUNT = 5;
+
 /** POST /quiz/solo/games body. */
 export interface CreateSoloGameRequest {
   quizType: QuizGuessType;
@@ -916,12 +929,36 @@ export interface SoloGameState {
   gameOver: boolean;
   /** The live question; null once the game is over. */
   question: SoloQuestion | null;
+  /**
+   * Failed-playback replacements left in this game (see
+   * SOLO_SPARE_COUNT). OPTIONAL: APIs predating the spare-theme
+   * feature omit it, and clients then simply never auto-replace.
+   */
+  sparesRemaining?: number;
 }
 
 /** POST /quiz/solo/games/:gameId/answers body. */
 export interface SoloAnswerRequest {
   /** The chosen option, verbatim. null = skip / let the timer expire. */
   answer: string | null;
+}
+
+/** POST /quiz/solo/games/:gameId/playback-started body. */
+export interface SoloPlaybackStartedRequest {
+  /**
+   * The question this signal belongs to (audit fix, 2026-11-16):
+   * its index AND its theme slug. The signal races the spare-theme
+   * swap on purpose — both fire the moment a theme proves
+   * unplayable, and the signal may land AFTER the replacement was
+   * committed into the same slot (same index, different theme).
+   * Without the identity it would stamp the replacement as
+   * "started" before its audio ever played. The server stamps
+   * only when every provided field matches the live question.
+   * OPTIONAL: older clients omit both and are stamped
+   * unconditionally, as before.
+   */
+  index?: number;
+  slug?: string;
 }
 
 /**
@@ -987,6 +1024,48 @@ export interface SoloAnswerResponse {
   reveal: SoloAnswerReveal;
   /** The next question, or null when the game just ended. */
   nextQuestion: SoloQuestion | null;
+  /** Failed-playback replacements left (see SoloGameState). */
+  sparesRemaining?: number;
+  /**
+   * Solo RP (owner order, 2026-11-16 — solo games grant rank,
+   * superseding the 2026-11-09 solo-no-RP ruling): the ACTUAL RP
+   * change the finished game applied to the player's rank,
+   * tier-floor clamp included, and their RP total after it.
+   * Present (possibly null, when the rank write was unavailable)
+   * ONLY on the game-over answer; absent on every other answer
+   * and on APIs predating the feature. The table is tiered by
+   * correct count out of 10: 9–10 → +10, 7–8 → +5, 5–6 → +2,
+   * 3–4 → −3, 0–2 → −5 (soloRpForCorrectCount in the API).
+   */
+  rpChange?: number | null;
+  rpAfter?: number | null;
+}
+
+/**
+ * Response of POST /quiz/solo/games/:gameId/replace-failed: the
+ * replacement question for the SAME slot (same index — the
+ * failed theme is discarded unanswered, no attempt is recorded
+ * and score/streak are untouched), plus the spares left after
+ * this swap.
+ */
+export interface SoloReplaceResponse {
+  question: SoloQuestion;
+  sparesRemaining: number;
+}
+
+/** POST /quiz/solo/games/:gameId/replace-failed body. */
+export interface SoloReplaceRequest {
+  /**
+   * The slug of the theme that failed to play (audit round 2,
+   * 2026-11-16). Makes the swap idempotent: if the live question
+   * no longer carries this slug, the swap already happened (a
+   * retry, a double call) and the server returns the live
+   * question WITHOUT spending another spare. A legit follow-up
+   * swap names the replacement's slug, which matches, so real
+   * consecutive swaps are never blocked. OPTIONAL: older clients
+   * omit it and get the original draw-every-time behaviour.
+   */
+  slug?: string;
 }
 
 /** One row of GET /quiz/leaderboard (the web's top-10 attempts). */
@@ -2309,4 +2388,347 @@ export interface TopArtistEntry {
  */
 export interface TopArtistsResponse {
   artists: TopArtistEntry[];
+}
+
+/* ------------------------------------------------------------------ */
+/* Chat (user-to-user direct messages)                                 */
+/*                                                                     */
+/* New app-only feature (no web counterpart). DM policy is the         */
+/* REQUESTS MODEL: when the receiver does not follow the sender, a     */
+/* new conversation starts as a message request for the receiver and   */
+/* stays one until they accept. While a conversation is a request the  */
+/* sender gets NO read receipts and NO typing indicators from the      */
+/* receiver, and the receiver sees an accept/decline/block bar        */
+/* instead of a composer. Declining is silent (no event to sender).    */
+/* Socket event names are string literals at the call sites, like      */
+/* the quiz rooms ('room:…'): 'chat:send', 'chat:typing' client→server */
+/* and 'chat:message', 'chat:read', 'chat:typing', 'chat:presence',    */
+/* 'chat:request-accepted' server→client.                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Lifecycle of a 1:1 conversation, from the stored pair record:
+ * - `active`  — both sides may message freely; receipts/typing on.
+ * - `request` — created by a sender the receiver does not follow;
+ *   held until the receiver accepts (→ `active`), declines (record
+ *   removed) or blocks (→ `blocked`).
+ * - `blocked` — the receiver blocked the sender; neither side can
+ *   send, and the blocked user cannot create a new conversation.
+ */
+export type ChatConversationStatus = 'active' | 'request' | 'blocked';
+
+/** What a single chat message carries. */
+export type ChatMessageType = 'text' | 'theme';
+
+/**
+ * The theme data frozen onto a theme message at send time, so the
+ * shared-theme card renders even if the theme is later re-synced.
+ * Mirrors the ThemeSummary fields the card needs.
+ */
+export interface ChatThemeSnapshot {
+  slug: string;
+  songTitle: string;
+  artistName: string | null;
+  animeTitle: string;
+  type: ThemeType;
+  sequence: number;
+  /** Anime cover/poster image for the card thumbnail, or null. */
+  coverImage: string | null;
+}
+
+/**
+ * The other participant of a conversation, or one row of a people
+ * list. `ladder`/`rp` are the derived 24-rank standing (same source
+ * as GET /rank/:userId); `online` is the socket gateway's live
+ * presence and may be absent on non-realtime responses.
+ */
+export interface ChatUserSummary {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  rp: number;
+  ladder: LadderStanding;
+  online?: boolean;
+  /** ISO timestamp of the user's last socket disconnect, when known and currently offline. */
+  lastActiveAt?: string | null;
+}
+
+/** One message as stored and as delivered over REST and sockets. */
+export interface ChatMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  type: ChatMessageType;
+  /** Message text for type 'text'; null for theme messages. */
+  text: string | null;
+  /** Frozen theme card data for type 'theme'; null otherwise. */
+  theme: ChatThemeSnapshot | null;
+  /** ISO timestamp. */
+  createdAt: string;
+  /**
+   * ISO timestamp of when the other participant read this message,
+   * or null. Only ever set on messages in `active` conversations —
+   * request-state messages never carry read state.
+   */
+  readAt: string | null;
+  /**
+   * Client-generated send id. When the sender supplies one it is
+   * STORED on the message and acts as the send-idempotency key:
+   * re-sending with the same (conversation, sender, clientId)
+   * returns the stored message instead of inserting a duplicate.
+   * Echoed back on the realtime 'chat:message' event and on REST
+   * responses so the sender can reconcile its optimistic bubble.
+   */
+  clientId?: string;
+}
+
+/** Last-message preview snapshot stored on the conversation. */
+export interface ChatLastMessage {
+  /** Id of the message this preview mirrors. Delete-for-me floors key off it — never wall-clock time (same-millisecond races). */
+  id: string;
+  type: ChatMessageType;
+  /** Text body for text messages; null for theme messages. */
+  text: string | null;
+  /** Song title for theme messages (preview renders "♪ title — artist"). */
+  themeTitle: string | null;
+  themeArtist: string | null;
+  senderId: string;
+  /** ISO timestamp. */
+  createdAt: string;
+}
+
+/** One row of GET /chat/conversations (the inbox). */
+export interface ChatConversationSummary {
+  id: string;
+  other: ChatUserSummary;
+  status: ChatConversationStatus;
+  /** userId of whoever sent the first message while in request state; null when active from the start. */
+  requestedBy: string | null;
+  lastMessage: ChatLastMessage | null;
+  /** Messages from the other side the caller has not read yet. */
+  unreadCount: number;
+  /** ISO timestamp of the last activity (list is sorted by this, desc). */
+  updatedAt: string;
+  /** The CALLER muted this conversation: no push, and its unread is excluded from badge counts. */
+  muted: boolean;
+  /** The CALLER archived this conversation (hidden from the inbox until a new message arrives). */
+  archived: boolean;
+}
+
+/** Response body of GET /chat/conversations. Paginated: pass `?cursor=<last row id>&limit=` for the next page. */
+export interface ChatConversationListResponse {
+  conversations: ChatConversationSummary[];
+  /** Pending incoming requests (shown as the inbox requests row). */
+  requestCount: number;
+  /** Total unread across active, unmuted conversations (home-header badge). */
+  totalUnread: number;
+  /** How many conversations the caller currently has archived. */
+  archivedCount: number;
+  /** Id of the last returned row when an older page exists, else null. */
+  nextCursor: string | null;
+}
+
+/** Response body of GET /chat/requests. Paginated like the inbox (`?cursor=&limit=`). */
+export interface ChatRequestListResponse {
+  requests: ChatConversationSummary[];
+  /** Id of the last returned row when an older page exists, else null. */
+  nextCursor: string | null;
+}
+
+/** Response body of GET /chat/conversations/:id/messages. Newest page first; pass `before` (a message id) for older pages. */
+export interface ChatMessageListResponse {
+  messages: ChatMessage[];
+  /** True when an older page exists beyond the oldest returned message. */
+  hasMore: boolean;
+  /** The conversation's status, so the thread screen can render request mode. */
+  status: ChatConversationStatus;
+  requestedBy: string | null;
+  other: ChatUserSummary;
+}
+
+/** POST /chat/conversations — get-or-create the 1:1 conversation with a user. */
+export interface ChatOpenConversationRequest {
+  userId: string;
+}
+
+export interface ChatOpenConversationResponse {
+  conversation: ChatConversationSummary;
+  /** True when this call created the record. */
+  created: boolean;
+}
+
+/** POST /chat/conversations/:id/messages (REST send; the socket 'chat:send' carries the same shape). */
+export interface ChatSendMessageRequest {
+  type: ChatMessageType;
+  /** Required for type 'text' (trimmed, non-empty). */
+  text?: string;
+  /** Required for type 'theme': the theme slug to snapshot. */
+  themeSlug?: string;
+  /**
+   * Optional send-idempotency id (see ChatMessage.clientId). The
+   * client sends the SAME id on the socket attempt, the REST
+   * fallback and every tap-to-retry of one bubble, so a send whose
+   * ack was lost never lands twice.
+   */
+  clientId?: string;
+}
+
+/** Client→server 'chat:send' socket payload. */
+export interface ChatSendEvent extends ChatSendMessageRequest {
+  conversationId: string;
+  /** Optimistic-bubble reconciliation id, echoed on the delivered message. */
+  clientId: string;
+}
+
+/** Ack returned by the 'chat:send' socket handler (and the REST send response body). */
+export interface ChatSendAck {
+  ok: boolean;
+  message?: ChatMessage;
+  /** Error message when ok is false (e.g. blocked, request rules). */
+  error?: string;
+}
+
+/** Client→server 'chat:typing' payload; server relays it to the other participant only in active conversations. */
+export interface ChatTypingEvent {
+  conversationId: string;
+  typing: boolean;
+}
+
+/** Server→client 'chat:read' payload: the reader has read everything in the conversation up to now. */
+export interface ChatReadEvent {
+  conversationId: string;
+  readerId: string;
+  /** ISO timestamp applied as readAt to the reader-side messages. */
+  readAt: string;
+}
+
+/**
+ * Server→client 'chat:read-sync' payload: the SAME shape as
+ * ChatReadEvent, but delivered to the READER's own channel
+ * (readerId === the receiving user) so a second device signed
+ * into the same account can clear its unread state live.
+ * 'chat:read' itself only ever goes to the other participant.
+ */
+
+/** Server→client 'chat:presence' payload. */
+export interface ChatPresenceEvent {
+  userId: string;
+  online: boolean;
+}
+
+/**
+ * One row of GET /chat/people and GET /chat/people/search.
+ * Presence is deliberately NOT part of a people row: the New Chat
+ * design shows no presence there, and a stranger's online /
+ * last-active state is not public information. Presence fields
+ * exist only on conversation-partner surfaces (inbox, thread).
+ */
+export interface ChatPerson
+  extends Omit<ChatUserSummary, 'online' | 'lastActiveAt'> {
+  /** True when the caller already has a conversation with this user. */
+  hasConversation: boolean;
+}
+
+/**
+ * Response body of GET /chat/conversations/:id/meta — the
+ * lightweight conversation header for participants. Unlike the
+ * messages endpoint it does NOT fail for a `blocked` conversation,
+ * so the thread screen can render its "conversation closed" state
+ * instead of an endless load error. Carries no messages.
+ */
+export interface ChatConversationMetaResponse {
+  id: string;
+  status: ChatConversationStatus;
+  requestedBy: string | null;
+  other: ChatUserSummary;
+}
+
+/** Response body of GET /chat/counts — badge counts only, no conversation list. */
+export interface ChatCountsResponse {
+  /** Pending incoming requests (conversations with at least one message only). */
+  requestCount: number;
+  /** Total unread across active, unmuted conversations (home-header badge). */
+  totalUnread: number;
+}
+
+/** Response body of GET /chat/people (New Chat screen sections). */
+export interface ChatPeopleResponse {
+  /** People the caller has played multiplayer quiz rooms with. */
+  quizRoomPeople: ChatPerson[];
+  /** Followees not already listed, then other users — deterministic order. */
+  suggested: ChatPerson[];
+}
+
+/** Response body of GET /chat/people/search?q=. */
+export interface ChatPeopleSearchResponse {
+  query: string;
+  users: ChatPerson[];
+}
+
+/* ------------------------------------------------------------------ */
+/* Chat hardening (deep-analysis fix pass, 2026-11-18): push tokens,  */
+/* per-user conversation state, blocked list, reports.                */
+/* ------------------------------------------------------------------ */
+
+/** POST /chat/push-token (register) and DELETE /chat/push-token (unregister, same body). */
+export interface ChatPushTokenRequest {
+  /** Expo push token (ExponentPushToken[…]) from the device. */
+  token: string;
+}
+
+/**
+ * POST /chat/conversations/:id/state — set the CALLER's per-user
+ * state on one conversation. Omitted fields keep their value.
+ */
+export interface ChatConversationStateRequest {
+  muted?: boolean;
+  archived?: boolean;
+}
+
+/** One row of GET /chat/users/blocked — a user the caller has blocked. */
+export interface ChatBlockedUser extends ChatUserSummary {
+  /** ISO timestamp of when the block was placed. */
+  blockedAt: string;
+}
+
+/** Response body of GET /chat/users/blocked. */
+export interface ChatBlockedListResponse {
+  users: ChatBlockedUser[];
+}
+
+/** Why a chat report is filed (short enum, chosen in the report sheet). */
+export type ChatReportReason = 'spam' | 'harassment' | 'other';
+
+/**
+ * POST /chat/reports — report a user, optionally anchored to one
+ * message. With a messageId the server freezes a context snapshot
+ * (the reported message plus up to 5 surrounding messages) onto
+ * the report, so moderation sees what was reported even if the
+ * conversation later changes.
+ */
+export interface ChatReportRequest {
+  reportedUserId: string;
+  conversationId?: string;
+  messageId?: string;
+  reason: ChatReportReason;
+}
+
+/** One stored report, as returned by the operator read (GET /chat/reports). */
+export interface ChatReportRecord {
+  id: string;
+  reporterId: string;
+  reportedUserId: string;
+  conversationId: string | null;
+  messageId: string | null;
+  reason: ChatReportReason;
+  /** Frozen message context (empty for profile-level reports without a conversation). */
+  context: ChatMessage[];
+  /** ISO timestamp. */
+  createdAt: string;
+}
+
+/** Response body of GET /chat/reports (operator-only; ADMIN_USER_IDS env). */
+export interface ChatReportListResponse {
+  reports: ChatReportRecord[];
 }

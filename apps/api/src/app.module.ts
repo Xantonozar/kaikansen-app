@@ -16,6 +16,7 @@ import { SocialModule } from './social/social.module';
 import { StatsModule } from './stats/stats.module';
 import { SyncModule } from './sync/sync.module';
 import { UsersModule } from './users/users.module';
+import { ChatModule } from './chat/chat.module';
 
 /**
  * The database is OPTIONAL at boot: with no MONGODB_URI the API still
@@ -46,6 +47,7 @@ const hasDatabase = typeof mongodbUri === 'string' && mongodbUri.length > 0;
     StatsModule.register(hasDatabase),
     SyncModule.register(hasDatabase),
     SearchIndexesModule.register(hasDatabase),
+    ChatModule.register(hasDatabase),
   ],
   controllers: [HealthController, AppVersionController],
 })

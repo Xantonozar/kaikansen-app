@@ -273,4 +273,62 @@ describe('anime page wiring (source scan)', () => {
     expect(span).toContain('getOpenThemesAs()');
     expect(span).toContain('startQueue(');
   });
+
+  it('carries the dedicated-screen entry card under the same visibility rule', () => {
+    expect(source).toContain('router.push(`/franchise/${animeId}`)');
+    expect(source).toContain('styles.franchiseEntry');
+  });
+});
+
+describe('dedicated franchise screen + theme page entries (owner order, 2026-11-16)', () => {
+  const screen = readFileSync(
+    join(__dirname, '../app/(drawer)/franchise/[id].tsx'),
+    'utf8',
+  );
+  const themePage = readFileSync(
+    join(__dirname, '../app/(drawer)/theme/[slug].tsx'),
+    'utf8',
+  );
+
+  it('the screen reads the same franchise endpoint and hides a non-franchise', () => {
+    expect(screen).toContain('fetchAnimeFranchise(animeId)');
+    expect(screen).toContain('franchiseSectionVisible(franchise, animeId)');
+    expect(screen).toContain('franchiseVisibleGroups(');
+    expect(screen).toContain('franchiseHasMore(');
+  });
+
+  it('Play All and row plays claim the whole flat franchise', () => {
+    expect(screen).toContain('const playAll');
+    const start = screen.indexOf('const playFranchiseTheme');
+    expect(start).toBeGreaterThan(-1);
+    const span = screen.slice(start, start + 700);
+    expect(span).toContain('franchiseFlatThemes(franchise.groups)');
+    expect(span).toContain('startQueue(');
+  });
+
+  it('group headers open that anime’s page', () => {
+    expect(screen).toContain('router.push(`/anime/${g.anime.anilistId}`)');
+  });
+
+  it('scroll reveal grows the budget once per approach, not per event', () => {
+    expect(screen).toContain('revealLockRef');
+    expect(screen).toContain('revealLockRef.current = true');
+  });
+
+  it('the theme page chip appears only for a real franchise and opens the screen', () => {
+    expect(themePage).toContain('franchiseSectionVisible(res, anilistId)');
+    expect(themePage).toContain('hasFranchise && detail.anilistId != null');
+    expect(themePage).toContain('router.push(`/franchise/${detail.anilistId}`)');
+  });
+
+  it('related groups carry See-all paths to the full lists', () => {
+    expect(themePage).toContain('seeAllPath');
+    // Same Anime → the anime page (all of its themes).
+    expect(themePage).toContain('`/anime/${detail.anilistId}`');
+    // Franchise & Seasons → the dedicated franchise screen.
+    expect(themePage).toContain('`/franchise/${detail.anilistId}`');
+    // More by this Artist → the artist page (all of their themes).
+    expect(themePage).toContain('`/artist/${detail.artistSlugs[0]}`');
+    expect(themePage).toContain('See all');
+  });
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Modal,
   Pressable,
   ScrollView,
@@ -13,17 +14,22 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   ArrowLeft,
+  Ban,
   Check,
   ChevronRight,
+  Flag,
   ListMusic,
+  MessageCircle,
   MoreVertical,
   Pencil,
   Share2,
+  ShieldCheck,
   Star,
   UserPlus,
   X,
 } from 'lucide-react-native';
 import type {
+  ChatReportReason,
   PlaylistSummary,
   ProfileStats,
   UserHistoryResponse,
@@ -52,6 +58,13 @@ import {
   unfollowUser,
 } from '../../../src/socialApi';
 import { RankIcon } from '../../../src/components/RankIcon';
+import {
+  blockChatUser,
+  fetchBlockedUsers,
+  openConversation,
+  reportChatUser,
+  unblockChatUser,
+} from '../../../src/chatApi';
 import {
   SkeletonBlock,
   SkeletonThemeRow,
@@ -213,6 +226,12 @@ export default function UserProfileScreen() {
   const [followersCount, setFollowersCount] = useState(0);
   const [followBusy, setFollowBusy] = useState(false);
   const [followError, setFollowError] = useState<string | null>(null);
+  const [messageBusy, setMessageBusy] = useState(false);
+  // Chat safety (deep-analysis fix pass): my block state for
+  // this user + the report reason sheet.
+  const [blockedByMe, setBlockedByMe] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [safetyBusy, setSafetyBusy] = useState(false);
 
   const isOwn =
     signedIn &&
@@ -295,6 +314,8 @@ export default function UserProfileScreen() {
     setHistoryFailed(false);
     setExpanded(false);
     setMenuOpen(false);
+    setBlockedByMe(false);
+    setReportOpen(false);
     setIsFollowing(false);
     setFollowError(null);
     setCachedNumbers(null);
@@ -367,6 +388,89 @@ export default function UserProfileScreen() {
     void Share.share({
       message: `Check out @${profile.username} on Kaikansen!`,
     }).catch(() => undefined);
+  };
+
+  /* My block state for this profile (drives the menu's
+     Block/Unblock row and swaps the Message pill for Unblock). */
+  useEffect(() => {
+    if (!profile || !signedIn || isOwn) return;
+    let live = true;
+    fetchBlockedUsers()
+      .then((res) => {
+        if (live) setBlockedByMe(res.users.some((u) => u.id === profile.id));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [profile, signedIn, isOwn]);
+
+  const onBlockProfile = () => {
+    if (!profile || safetyBusy) return;
+    setMenuOpen(false);
+    Alert.alert(
+      `Block @${profile.username}?`,
+      'They will no longer be able to message you, and your conversation closes. You can unblock them later from Chats → Blocked users.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block',
+          style: 'destructive',
+          onPress: () => {
+            setSafetyBusy(true);
+            blockChatUser(profile.id)
+              .then(() => setBlockedByMe(true))
+              .catch(() => setFollowError('Couldn’t block this user.'))
+              .finally(() => setSafetyBusy(false));
+          },
+        },
+      ],
+    );
+  };
+
+  const onUnblockProfile = async () => {
+    if (!profile || safetyBusy) return;
+    setMenuOpen(false);
+    setSafetyBusy(true);
+    try {
+      await unblockChatUser(profile.id);
+      setBlockedByMe(false);
+    } catch {
+      setFollowError('Couldn’t unblock this user.');
+    } finally {
+      setSafetyBusy(false);
+    }
+  };
+
+  const onReportProfile = async (reason: ChatReportReason) => {
+    if (!profile) return;
+    setReportOpen(false);
+    try {
+      await reportChatUser({ reportedUserId: profile.id, reason });
+      Alert.alert(
+        'Report sent',
+        'Thanks — your report was recorded for the operators.',
+      );
+    } catch {
+      Alert.alert('Couldn’t send the report', 'Please try again in a moment.');
+    }
+  };
+
+  /* Chat entry point: opens (or creates) the 1:1 conversation
+     with this user and routes to the thread — which renders the
+     request state itself when the DM lands as a request. */
+  const onMessage = async () => {
+    if (!profile || messageBusy) return;
+    setMessageBusy(true);
+    setFollowError(null);
+    try {
+      const res = await openConversation(profile.id);
+      router.push(`/chat/${res.conversation.id}`);
+    } catch {
+      setFollowError('Couldn’t open a chat with this user.');
+    } finally {
+      setMessageBusy(false);
+    }
   };
 
   const onToggleFollow = () => {
@@ -768,6 +872,7 @@ export default function UserProfileScreen() {
                 <Text style={styles.actionPillEditText}>Edit profile</Text>
               </Pressable>
             ) : signedIn ? (
+              <View style={styles.actionRow}>
               <Pressable
                 onPress={onToggleFollow}
                 disabled={followBusy}
@@ -776,6 +881,7 @@ export default function UserProfileScreen() {
                 accessibilityState={{ selected: isFollowing }}
                 style={({ pressed }) => [
                   styles.actionPill,
+                  styles.actionPillFlex,
                   isFollowing
                     ? styles.actionPillPale
                     : styles.actionPillAccent,
@@ -800,6 +906,51 @@ export default function UserProfileScreen() {
                   </>
                 )}
               </Pressable>
+              {blockedByMe ? (
+                <Pressable
+                  onPress={() => void onUnblockProfile()}
+                  disabled={safetyBusy}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Unblock ${profile.username}`}
+                  style={({ pressed }) => [
+                    styles.actionPill,
+                    styles.actionPillFlex,
+                    styles.actionPillPale,
+                    pressed && styles.pressed,
+                    safetyBusy && styles.actionBusy,
+                  ]}
+                >
+                  {safetyBusy ? (
+                    <ActivityIndicator size="small" color={theme.accent} />
+                  ) : (
+                    <Text style={styles.actionPillPaleText}>Unblock</Text>
+                  )}
+                </Pressable>
+              ) : (
+                <Pressable
+                  onPress={() => void onMessage()}
+                  disabled={messageBusy}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Message ${profile.username}`}
+                  style={({ pressed }) => [
+                    styles.actionPill,
+                    styles.actionPillFlex,
+                    styles.actionPillAccent,
+                    pressed && styles.pressed,
+                    messageBusy && styles.actionBusy,
+                  ]}
+                >
+                  {messageBusy ? (
+                    <ActivityIndicator size="small" color={theme.onAccent} />
+                  ) : (
+                    <>
+                      <MessageCircle size={18} color={theme.onAccent} strokeWidth={2} />
+                      <Text style={styles.actionPillAccentText}>Message</Text>
+                    </>
+                  )}
+                </Pressable>
+              )}
+              </View>
             ) : (
               <Pressable
                 onPress={() => router.push('/login')}
@@ -931,9 +1082,10 @@ export default function UserProfileScreen() {
         </ScrollView>
       )}
 
-      {/* Header ⋮ sheet — the Playlist detail sheet's pattern. Its
-          only item is Share profile: the one action this screen can
-          honestly offer (no block/report backends exist). */}
+      {/* Header ⋮ sheet — the Playlist detail sheet's pattern:
+          Share profile, plus (for someone else's profile while
+          signed in) Block/Unblock and Report — the chat safety
+          actions (deep-analysis fix pass). */}
       <Modal
         visible={menuOpen}
         transparent
@@ -984,6 +1136,121 @@ export default function UserProfileScreen() {
               </View>
               <Text style={styles.menuLabel}>Share profile</Text>
             </Pressable>
+
+            {signedIn && !isOwn && profile && (
+              <>
+                {blockedByMe ? (
+                  <Pressable
+                    onPress={() => void onUnblockProfile()}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Unblock ${profile.username}`}
+                    style={({ pressed }) => [
+                      styles.menuRow,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <View style={styles.menuIcon}>
+                      <ShieldCheck size={18} color={theme.text} strokeWidth={2} />
+                    </View>
+                    <Text style={styles.menuLabel}>Unblock user</Text>
+                  </Pressable>
+                ) : (
+                  <Pressable
+                    onPress={onBlockProfile}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Block ${profile.username}`}
+                    style={({ pressed }) => [
+                      styles.menuRow,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <View style={styles.menuIcon}>
+                      <Ban size={18} color={theme.danger} strokeWidth={2} />
+                    </View>
+                    <Text style={[styles.menuLabel, styles.menuLabelDanger]}>
+                      Block user
+                    </Text>
+                  </Pressable>
+                )}
+                <Pressable
+                  onPress={() => {
+                    setMenuOpen(false);
+                    setReportOpen(true);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Report ${profile.username}`}
+                  style={({ pressed }) => [
+                    styles.menuRow,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <View style={styles.menuIcon}>
+                    <Flag size={18} color={theme.text} strokeWidth={2} />
+                  </View>
+                  <Text style={styles.menuLabel}>Report user</Text>
+                </Pressable>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Report reason sheet (spam / harassment / other). */}
+      <Modal
+        visible={reportOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setReportOpen(false)}
+      >
+        <View style={styles.menuBackdrop}>
+          <Pressable
+            style={styles.menuDismiss}
+            onPress={() => setReportOpen(false)}
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+          />
+          <View style={styles.menuSheet}>
+            <View style={styles.menuHeader}>
+              <View style={styles.menuHeaderMain}>
+                <Text style={styles.menuTitle} numberOfLines={1}>
+                  Report — why?
+                </Text>
+                <Text style={styles.menuSubtitle}>
+                  {profile ? `@${profile.username}` : ''}
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => setReportOpen(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel report"
+                style={({ pressed }) => [
+                  styles.menuClose,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <X size={18} color={theme.text} strokeWidth={2} />
+              </Pressable>
+            </View>
+            {(
+              [
+                ['spam', 'Spam'],
+                ['harassment', 'Harassment'],
+                ['other', 'Other'],
+              ] as [ChatReportReason, string][]
+            ).map(([reason, label]) => (
+              <Pressable
+                key={reason}
+                onPress={() => void onReportProfile(reason)}
+                accessibilityRole="button"
+                accessibilityLabel={`Report as ${label.toLowerCase()}`}
+                style={({ pressed }) => [
+                  styles.menuRow,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.menuLabel}>{label}</Text>
+              </Pressable>
+            ))}
           </View>
         </View>
       </Modal>
@@ -1144,6 +1411,15 @@ const createStyles = (theme: Theme) =>
       paddingHorizontal: spacing.xxl,
       paddingVertical: spacing.sm,
       borderRadius: radii.pill,
+    },
+    actionRow: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      alignSelf: 'stretch',
+    },
+    actionPillFlex: {
+      flex: 1,
+      paddingHorizontal: spacing.md,
     },
     actionPillPale: {
       // Following / Edit profile — the HTML's #EDE2EB pale fill is
@@ -1432,6 +1708,9 @@ const createStyles = (theme: Theme) =>
       ...typeStyles.body,
       fontFamily: fontFamilies.bodyStrong,
       color: theme.text,
+    },
+    menuLabelDanger: {
+      color: theme.danger,
     },
     pressed: {
       opacity: 0.85,

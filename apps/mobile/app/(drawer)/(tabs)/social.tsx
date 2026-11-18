@@ -19,6 +19,7 @@ import { useAuth } from '../../../src/auth';
 import { Avatar } from '../../../src/components/Avatar';
 import { AppImage } from '../../../src/components/AppImage';
 import { PersonRow } from '../../../src/components/PersonRow';
+import { useTabBottomInset } from '../../../src/useBottomInset';
 import {
   SkeletonFeedRow,
   SkeletonPersonRow,
@@ -76,6 +77,7 @@ import { CONTENT_MAX_WIDTH } from '../../../src/layout';
 export default function SocialScreen() {
   const theme = useTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const bottomInset = useTabBottomInset();
   const router = useRouter();
   const { status, user } = useAuth();
   const signedIn = status === 'signedIn' && user !== null;
@@ -303,7 +305,7 @@ export default function SocialScreen() {
 
   return (
     <ScrollView style={styles.screen} showsVerticalScrollIndicator={false}>
-      <View style={styles.column}>
+      <View style={[styles.column, { paddingBottom: bottomInset }]}>
         <View style={styles.searchField}>
           <Search size={18} color={theme.muted} strokeWidth={2} />
           <TextInput

@@ -9,6 +9,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import type { Model } from 'mongoose';
 import {
   SOLO_QUESTION_COUNT,
+  SOLO_SPARE_COUNT,
   SOLO_TIME_LIMIT_SECONDS,
   type CreateSoloGameRequest,
   type QuizGuessType,
@@ -19,6 +20,7 @@ import {
   type SoloGameState,
   type SoloPlaybackStartedResponse,
   type SoloQuestion,
+  type SoloReplaceResponse,
 } from '@kaikansen/contracts';
 import { User, type UserDocument } from '../auth/user.schema';
 import {
@@ -42,6 +44,7 @@ import {
   type AudioProbeResult,
 } from './audio-probe';
 import { QuizAttempt, type QuizAttemptDocument } from './quiz-attempt.schema';
+import { RankService } from './rank.service';
 import {
   buildSoloOptions,
   distractorFilterFor,
@@ -120,6 +123,22 @@ interface SoloSession {
    * drawn yet (the answer then draws on the spot, as before).
    */
   next: DrawnQuestion | null;
+  /**
+   * Failed-playback replacements left (owner order, 2026-11-16):
+   * the game holds SOLO_SPARE_COUNT spares; replaceFailedQuestion
+   * spends one to swap a live question whose theme could not be
+   * played at all. The spare theme is drawn from the game's own
+   * pool AT REPLACEMENT TIME (the same verified sampler as any
+   * draw), so an unused spare never disturbs the game's order.
+   */
+  sparesRemaining: number;
+  /**
+   * Solo RP (owner order, 2026-11-16): the rank application for
+   * this finished game, applied exactly once at game over. Null
+   * until then — and stays null when the rank write was
+   * unavailable, in which case the answer reports rpChange null.
+   */
+  soloRp: { rpChange: number; rpAfter: number } | null;
   answeredCount: number;
   correctCount: number;
   streak: number;
@@ -273,6 +292,16 @@ interface SoloModels {
  *    changes (the client derives the head URL by rule), no
  *    database writes, and a cold or lost cache degrades to
  *    exactly the pre-phase-2 origin chain.
+ * 10. Spare themes + solo RP (owner orders, 2026-11-16 — no web
+ *    equivalent; the web has no server-held game to hang either
+ *    on): (a) each game holds SOLO_SPARE_COUNT replacements —
+ *    when the client's whole candidate chain for the live
+ *    question fails, it calls replaceFailedQuestion and the
+ *    question is swapped for a fresh draw from the same pool,
+ *    same slot, no attempt recorded; (b) a finished solo game
+ *    grants RP through RankService.applySoloRP, tiered by
+ *    correct count (soloRpForCorrectCount) — this supersedes
+ *    the owner's own 2026-11-09 solo-no-RP ruling.
  *
  * Models are OPTIONAL like everywhere else in this API: booted
  * without MONGODB_URI, every method answers 503.
@@ -281,6 +310,19 @@ interface SoloModels {
 export class SoloQuizService {
   private readonly sessions = new Map<string, SoloSession>();
   private sessionSeq = 0;
+  /**
+   * Games with a spare-theme swap currently in flight (audit
+   * round 2, 2026-11-16). A swap draws from the database, so two
+   * calls racing for the same game could both draw and both
+   * spend a spare for one visible swap. The first call claims
+   * the game here synchronously (before its first await); a
+   * second call is refused and its caller re-reads the game
+   * state instead — the app already resyncs that way. A legit
+   * follow-up swap is sequential by construction (it fires only
+   * after the previous replacement is live and has failed), so
+   * the lock never blocks real play.
+   */
+  private readonly swapsInFlight = new Set<string>();
   /**
    * The verified-dealing probe (part 7). Optional in DI: the
    * module registers the real HTTP probe; anywhere the service
@@ -299,6 +341,15 @@ export class SoloQuizService {
    */
   private readonly headWarmer: QuizHeadWarmer;
 
+  /**
+   * The rank maintenance (solo RP, 2026-11-16). Optional in DI
+   * like the probe and the warmer: the module registers it;
+   * anywhere the service is constructed without one, solo games
+   * simply grant no RP (the answer reports rpChange null) —
+   * game flow never depends on the rank write.
+   */
+  private readonly rankService?: RankService;
+
   constructor(
     @Optional()
     @InjectModel(ThemeCache.name)
@@ -316,9 +367,12 @@ export class SoloQuizService {
     httpAudioProbe?: HttpAudioProbe,
     @Optional()
     headCache?: QuizHeadCacheService,
+    @Optional()
+    rankService?: RankService,
   ) {
     this.audioProbe = httpAudioProbe ?? UNKNOWN_AUDIO_PROBE;
     this.headWarmer = headCache ?? NOOP_QUIZ_HEAD_WARMER;
+    this.rankService = rankService;
   }
 
   private requireModels(): SoloModels {
@@ -737,6 +791,7 @@ export class SoloQuizService {
       totalScore: session.totalScore,
       gameOver: session.current === null && session.answeredCount > 0,
       question: null, // filled by callers that hold the drawn question
+      sparesRemaining: session.sparesRemaining,
     };
   }
 
@@ -764,6 +819,8 @@ export class SoloQuizService {
           : await this.buildNamedPool(models, userId, quizType, source),
       usedThemeIds: [],
       next: null,
+      sparesRemaining: SOLO_SPARE_COUNT,
+      soloRp: null,
       answeredCount: 0,
       correctCount: 0,
       streak: 0,
@@ -826,10 +883,24 @@ export class SoloQuizService {
    * (SOLO_LOAD_CREDIT_CAP_MS in quiz-game.utils) so even that
    * buys at most a few seconds. Idempotent per question: the
    * first signal wins, repeats return the original stamp.
+   *
+   * Stale-signal guard (audit, 2026-11-16): the signal races the
+   * spare-theme swap by design — both fire when a theme proves
+   * unplayable — and the signal may land AFTER the replacement
+   * was committed into the same slot (same index, NEW theme).
+   * When the caller names the question it signalled for (index
+   * and/or theme slug) and that is no longer the live question,
+   * the stamp is skipped (the replacement has not started
+   * playing; stamping it would hand it load credit it never
+   * spent). The pre-draw below still runs — it is identity-
+   * agnostic and just as useful. Callers that omit both fields
+   * keep the old behaviour.
    */
   async markPlaybackStarted(
     userId: string,
     gameId: string,
+    index?: number,
+    slug?: string,
   ): Promise<SoloPlaybackStartedResponse> {
     const models = this.requireModels();
     const session = this.findSession(userId, gameId);
@@ -837,7 +908,10 @@ export class SoloQuizService {
     if (!current) {
       throw new BadRequestException('Game already finished');
     }
-    if (!current.playbackStartedAt) {
+    const stale =
+      (index != null && index !== current.index) ||
+      (slug != null && slug !== current.theme.slug);
+    if (!stale && !current.playbackStartedAt) {
       current.playbackStartedAt = new Date();
       session.lastTouchedAt = Date.now();
     }
@@ -860,7 +934,12 @@ export class SoloQuizService {
       nextAudioUrl = null;
     }
     return {
-      playbackStartedAt: current.playbackStartedAt.toISOString(),
+      /* A stale signal leaves the live question unstamped; the
+         client ignores this field, so fall back to the draw time
+         rather than dereferencing null. */
+      playbackStartedAt: (
+        current.playbackStartedAt ?? current.startedAt
+      ).toISOString(),
       nextAudioUrl,
     };
   }
@@ -928,6 +1007,32 @@ export class SoloQuizService {
     if (gameOver) {
       session.current = null;
       session.next = null;
+      // Solo RP (owner order, 2026-11-16): the finished game
+      // grants its tiered award exactly once. The rank write
+      // rides the answer (not a background job) so the response
+      // can report the ACTUAL change — but a rank failure must
+      // never fail the answer itself: the game is over and the
+      // attempt is persisted either way, so a throw degrades to
+      // rpChange null, loudly logged.
+      if (!session.soloRp && this.rankService) {
+        try {
+          const applied = await this.rankService.applySoloRP(
+            userId,
+            session.correctCount,
+          );
+          if (applied) {
+            session.soloRp = {
+              rpChange: applied.rpChange,
+              rpAfter: applied.rpAfter,
+            };
+          }
+        } catch (err) {
+          console.error(
+            `[solo-quiz] solo RP application failed for game ${gameId}:`,
+            err,
+          );
+        }
+      }
     } else if (session.next) {
       // Promote the pre-drawn question (part 5): committing it
       // stamps its measurement from NOW — the pre-draw bought
@@ -961,7 +1066,92 @@ export class SoloQuizService {
           null,
       },
       nextQuestion,
+      sparesRemaining: session.sparesRemaining,
+      // Solo RP rides ONLY the game-over answer (see contracts).
+      ...(gameOver
+        ? {
+            rpChange: session.soloRp?.rpChange ?? null,
+            rpAfter: session.soloRp?.rpAfter ?? null,
+          }
+        : {}),
     };
+  }
+
+  /**
+   * POST /quiz/solo/games/:gameId/replace-failed — the live
+   * question's theme could not be played AT ALL (owner order,
+   * 2026-11-16): swap it for a spare. The replacement is a
+   * fresh verified draw from the game's own pool, committed
+   * into the SAME slot — commitDrawn derives the index from
+   * answeredCount, which has not moved, so the slot number is
+   * unchanged — and the failed theme stays in usedThemeIds,
+   * never re-dealt. No attempt is recorded for the failed
+   * question and score/streak are untouched: as far as the
+   * game is concerned it never happened. The pre-drawn next
+   * question is kept (it was drawn against the same exclusion
+   * set and is still the question after this slot).
+   *
+   * The spare is spent only once a replacement is actually in
+   * hand: a draw that finds the pool drained surfaces its own
+   * error with the budget intact, and the client falls back to
+   * the pre-spare behaviour (answerable without audio).
+   *
+   * Double-spend guards (audit round 2, 2026-11-16):
+   * - Idempotency: when the caller names the failed theme's
+   *   slug and the live question no longer carries it, this
+   *   call is a replay of a swap that already landed — the live
+   *   question is returned as-is and NO spare is spent.
+   * - Concurrency: a swap already in flight for this game
+   *   refuses a second one (see swapsInFlight). The refused
+   *   caller's resync (re-read the game) adopts the landed
+   *   replacement once it commits.
+   */
+  async replaceFailedQuestion(
+    userId: string,
+    gameId: string,
+    slug?: string,
+  ): Promise<SoloReplaceResponse> {
+    const models = this.requireModels();
+    const session = this.findSession(userId, gameId);
+    if (!session.current) {
+      throw new BadRequestException('Game already finished');
+    }
+    if (slug != null && slug !== session.current.theme.slug) {
+      // Replay of a landed swap: serve the live question, spend
+      // nothing. (Checked before the budget: a replay must
+      // succeed even when the spares are now spent.)
+      const current = session.current;
+      return {
+        question: this.questionProjection(
+          {
+            theme: current.theme,
+            options: current.options,
+            correctValue: current.correctValue,
+          },
+          current.index,
+        ),
+        sparesRemaining: session.sparesRemaining,
+      };
+    }
+    if (session.sparesRemaining <= 0) {
+      throw new BadRequestException('No spare themes left for this game');
+    }
+    if (this.swapsInFlight.has(gameId)) {
+      throw new BadRequestException(
+        'A replacement is already in progress for this game',
+      );
+    }
+    this.swapsInFlight.add(gameId);
+    try {
+      const correctTheme = await this.sampleVerifiedCandidate(models, session);
+      const drawn = await this.buildDrawn(models, session, correctTheme);
+      session.sparesRemaining -= 1;
+      session.lastTouchedAt = Date.now();
+      const question = this.commitDrawn(session, drawn);
+      return { question, sparesRemaining: session.sparesRemaining };
+    } finally {
+      this.swapsInFlight.delete(gameId);
+    }
   }
 
   /* ---------------------------------------------------------------- */
